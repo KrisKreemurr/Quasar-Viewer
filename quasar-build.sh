@@ -6,8 +6,8 @@
 #   ./quasar-build.sh Release         # another configuration
 #   ./quasar-build.sh Release 4       # and at most 4 compile jobs at once
 #
-# Windows starts every process the build launches (MSBuild, every cl.exe) at the priority of the first, so the
-# compilers take whatever CPU is left over after games, the browser and the rest, rather than all of it.
+# Windows starts every process the build launches (MSBuild, every cl.exe) at the priority of the process that
+# launched it, so the compilers take whatever CPU is left over after games, the browser and the rest.
 
 set -euo pipefail
 
@@ -29,9 +29,17 @@ if [ -n "$JOBS" ]; then
 fi
 
 echo "Building $CONFIG at low priority..."
-# /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
 STATUS=0
-cmd //c "start \"QuasarBuild\" /B /BELOWNORMAL /WAIT cmake --build $BUILD_DIR --config $CONFIG $PARALLEL -- /nodeReuse:false" || STATUS=$?
+(
+    # Lower this subshell's own priority; Windows gives every process it starts (cmake, MSBuild, each cl.exe) the same.
+    WINPID="$(cat /proc/$BASHPID/winpid 2>/dev/null || true)"
+    if [ -n "$WINPID" ]; then
+        powershell.exe -NoProfile -Command "(Get-Process -Id $WINPID).PriorityClass = 'BelowNormal'" >/dev/null 2>&1 \
+            || echo "(Could not lower the priority; building at normal priority.)"
+    fi
+    # /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
+    cmake --build "$BUILD_DIR" --config "$CONFIG" $PARALLEL -- /nodeReuse:false
+) || STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
     echo "Done. The viewer is in $BUILD_DIR/newview/$CONFIG/"
