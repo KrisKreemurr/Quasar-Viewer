@@ -30,16 +30,11 @@ fi
 
 echo "Building $CONFIG at low priority..."
 STATUS=0
-(
-    # Lower this subshell's own priority; Windows gives every process it starts (cmake, MSBuild, each cl.exe) the same.
-    WINPID="$(cat /proc/$BASHPID/winpid 2>/dev/null || true)"
-    if [ -n "$WINPID" ]; then
-        powershell.exe -NoProfile -Command "(Get-Process -Id $WINPID).PriorityClass = 'BelowNormal'" </dev/null >/dev/null 2>&1 \
-            || echo "(Could not lower the priority; building at normal priority.)"
-    fi
-    # /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
-    cmake --build "$BUILD_DIR" --config "$CONFIG" $PARALLEL -- /nodeReuse:false
-) || STATUS=$?
+# cmd's start launches cmake below normal priority, and Windows gives everything cmake starts (MSBuild, each cl.exe)
+# the same. The whole command goes to cmd as one argument that does not begin with a slash, so Git Bash passes it on
+# as written, and no window title is quoted.
+# /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
+cmd //c "start /b /belownormal /wait cmake --build $BUILD_DIR --config $CONFIG $PARALLEL -- /nodeReuse:false" </dev/null || STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
     echo "Done. The viewer is in $BUILD_DIR/newview/$CONFIG/"
