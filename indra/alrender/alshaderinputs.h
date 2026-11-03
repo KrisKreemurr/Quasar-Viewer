@@ -72,6 +72,7 @@ struct ALShaderSettings
     bool mDynamicLOD             = true;  ///< RenderDynamicLOD
     U32  mWaterHextile           = 1;     ///< AlchemyRenderWaterHextile
     bool mWaterWaves             = true;  ///< AlchemyRenderWaterWaves
+    bool mHiZCull                = true;  ///< QuasarRenderHiZCull
     bool mDisableCompute         = false; ///< AlchemyRenderDisableCompute
     bool mTransparentWater       = true;  ///< RenderTransparentWater
     bool mSSAO                   = true;  ///< RenderDeferredSSAO
@@ -137,6 +138,7 @@ struct ALShaderInputs
         bool mTerrainPBRNormals = false; ///< the PBR terrain programs' TERRAIN_FLAT_NORMALS
         bool mTerrainTessPinned = false; ///< the terrain tessellation programs' TERRAIN_TESS_PINNED, without dynamic LOD
         bool mWaterWaves       = true;  ///< the water waves' programs and the three objects only they attach
+        bool mDepthPyramid     = true;  ///< the depth pyramid's program, for the waves' cull or Quasar's Hi-Z object cull
         bool mCompute          = true;  ///< the compute programs, where the context has compute and it is not switched off
         S32  mIndexedGLTFChannels = 4;  ///< the indexed material programs' GLTF_INDEXED_CHANNELS, 0 for none
         U32  mTerrainPaintBitDepth = 0; ///< the local terrain paint's bake program, its precision 1 to 8, 0 for none

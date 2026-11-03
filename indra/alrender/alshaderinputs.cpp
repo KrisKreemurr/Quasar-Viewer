@@ -126,6 +126,7 @@ ALShaderInputs ALShaderInputs::make(const ALShaderSettings& s)
     l.mTerrainPBRNormals = s.mTerrainPBRNormals;
     l.mTerrainTessPinned = !s.mDynamicLOD;
     l.mWaterWaves        = s.mWaterWaves;
+    l.mDepthPyramid      = s.mWaterWaves || s.mHiZCull;
     l.mCompute           = s.mHasCompute && !s.mDisableCompute;
     // One material per four texture units (base colour, normal, ORM, emissive), with no units reserved: the passes
     // drawing indexed materials bind no shadow or reflection maps. GLOn12 builds none: Mesa's d3d12 translates a

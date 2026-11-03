@@ -1163,6 +1163,7 @@ ALShaderInputs LLPipeline::shaderInputsFromSettings()
     s.mDynamicLOD               = gSavedSettings.getBOOL("RenderDynamicLOD");
     s.mWaterHextile             = gSavedSettings.getU32("AlchemyRenderWaterHextile");
     s.mWaterWaves               = gSavedSettings.getBOOL("AlchemyRenderWaterWaves");
+    s.mHiZCull                  = gSavedSettings.getBOOL("QuasarRenderHiZCull");
     s.mDisableCompute           = gSavedSettings.getBOOL("AlchemyRenderDisableCompute");
     s.mTransparentWater         = gSavedSettings.getBOOL("RenderTransparentWater");
     s.mSSAO                     = gSavedSettings.getBOOL("RenderDeferredSSAO");
@@ -1613,6 +1614,7 @@ void LLPipeline::releaseDepthDependents()
 {
     mWaterSurface.release();
     mDepthPyramid.release();
+    mHiZCull.release();
 
     ALFarPlaneOverlay::release();
     if (ALSelectionOutline::instanceExists())
@@ -3589,6 +3591,11 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
             vo_part->cull(camera, sUseOcclusion > 0);
         }
     }
+
+    if (isMainWorldPass())
+    {
+        mHiZCull.endCull();
+    }
 }
 
 void LLPipeline::markNotCulled(LLSpatialGroup* group, LLCamera& camera)
@@ -3657,6 +3664,49 @@ void LLPipeline::markOccluder(LLSpatialGroup* group)
             }
         }
     }
+}
+
+bool LLPipeline::hiZOccluded(LLSpatialGroup* group)
+{
+    if (!group || !mHiZCull.isValid() || !sUseOcclusion || !isMainWorldPass() || sCutoutRender || gSnapshot)
+    {
+        return false;
+    }
+
+    // Never the root, which the cull never culls (LLOctreeCull::earlyFail).
+    if (!group->getOctreeNode() || !group->getOctreeNode()->getParent())
+    {
+        return false;
+    }
+
+    // A bridge's partition holds its groups in the bridge's own space; the read is in agent space. The bridge itself,
+    // an avatar or a moving linkset, is judged whole in the partition holding it.
+    LLSpatialPartition* part = group->getSpatialPartition();
+    if (!part || part->isBridge())
+    {
+        return false;
+    }
+
+    const LLViewerCamera* camera = LLViewerCamera::getInstance();
+    const LLVector4a* bounds = group->getBounds();
+    if (mHiZCull.isHidden(bounds[0], bounds[1], camera->getOrigin(), camera->getAtAxis()))
+    {
+        mHiZCull.noteCulled();
+        return true;
+    }
+    return false;
+}
+
+void LLPipeline::captureHiZCull()
+{
+    if (mRT != &mMainRT || !isMainWorldPass() || sCutoutRender || gSnapshot)
+    {
+        return;
+    }
+
+    const LLViewerCamera* camera = LLViewerCamera::getInstance();
+    mHiZCull.capture(gDepthPyramidProgram, mRT->deferredScreen, gGL.getModelviewMatrix(), gGL.getProjectionMatrix(),
+                     camera->getOrigin(), camera->getAtAxis(), LLRender::sReverseZ);
 }
 
 void LLPipeline::doOcclusion(LLCamera& camera)
@@ -4050,6 +4100,9 @@ void LLPipeline::shiftObjects(const LLVector3 &offset)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     assertInitialized();
+
+    // Quasar: the Hi-Z cull's read is in the agent space this moves.
+    mHiZCull.invalidate();
 
     gGL.clear(GL_DEPTH_BUFFER_BIT);
     gDepthDirty = true;

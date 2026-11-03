@@ -202,6 +202,15 @@ public:
     // writes. False, and nothing read, while every slot is pending.
     bool requestPixels(S32 x, S32 y, S32 width, S32 height, U32 format, U32 type, size_t bytes);
 
+    // Whether requestTextureImage can read: it reads a texture by name (glGetTextureImage, GL 4.5's direct state
+    // access), so that it needs no texture unit bound.
+    static bool canReadTextureImages();
+
+    // Read level `level` of the 2D texture named `texture` into the next slot, as glGetTextureImage reads it in
+    // `format` and `type`; `bytes` is what the read writes. False, and nothing read, while every slot is pending or
+    // where canReadTextureImages() is false.
+    bool requestTextureImage(U32 texture, S32 level, U32 format, U32 type, size_t bytes);
+
     // The oldest pending result into `out`, the `bytes` its request copied, once the frame fences have shown the frame
     // it was issued in finished, which is at a later frame's end: false before, or when nothing is pending. No GL call
     // for a mapped slot. `wait` waits for it instead, for a teardown or a test.

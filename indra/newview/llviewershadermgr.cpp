@@ -3192,7 +3192,8 @@ void LLViewerShaderMgr::loadShadersDeferred()
 
     // The depth pyramid's levels, where the session computes and the water's waves, its reader, are wanted. Optional,
     // like them: its failing leaves the cull off (ALDepthPyramid::build), not the shaders after it.
-    if (mInputs.mLocal.mCompute && mInputs.mLocal.mWaterWaves)
+    // Quasar: also wanted by the Hi-Z object cull (QLHiZCull).
+    if (mInputs.mLocal.mCompute && mInputs.mLocal.mDepthPyramid)
     {
         gDepthPyramidProgram.mName = "Depth Pyramid Shader";
         gDepthPyramidProgram.mShaderFiles.clear();

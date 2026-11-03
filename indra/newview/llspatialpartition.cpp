@@ -1025,6 +1025,12 @@ public:
             return true;
         }
 
+        // Quasar: hidden behind what the main view drew a few frames ago (QLHiZCull), with everything below it.
+        if (gPipeline.hiZOccluded(group))
+        {
+            return true;
+        }
+
         return false;
     }
 

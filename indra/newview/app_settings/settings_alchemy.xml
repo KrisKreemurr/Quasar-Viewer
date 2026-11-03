@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarRenderHiZCull</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: skip drawing objects and avatars hidden behind walls and terrain, judged on the CPU from a depth pyramid of the main view read back a few frames late. Stands down while the camera moves or turns quickly. Needs compute (OpenGL 4.3) and direct state access (OpenGL 4.5).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>AlchemyRenderWaterOcclusionCull</key>
         <map>
             <key>Comment</key>

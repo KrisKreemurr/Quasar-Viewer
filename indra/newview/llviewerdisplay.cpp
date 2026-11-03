@@ -1113,6 +1113,10 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
 
             gGL.setColorMask(true, true);
             gPipeline.renderGeomDeferred(*LLViewerCamera::getInstance(), true);
+
+            // Quasar: the G-buffer's depth now holds every opaque surface of the main view; read a pyramid of it back for
+            // the Hi-Z object cull of a frame a few from now.
+            gPipeline.captureHiZCull();
         }
 
         {

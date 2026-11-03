@@ -41,6 +41,7 @@
 #include "llgl.h"
 #include "lldrawable.h"
 #include "aldepthpyramid.h"
+#include "qlhizcull.h"
 #include "alprimitiveplot.h"
 #include "algpubuffer.h"
 #include "alquerypool.h"
@@ -463,6 +464,12 @@ public:
     // Object related methods
     void        markVisible(LLDrawable *drawablep, LLCamera& camera);
     void        markOccluder(LLSpatialGroup* group);
+    /// Quasar: whether the main view's cull may skip `group`, hidden behind what that view drew a few frames ago
+    /// (QLHiZCull). False in every other pass.
+    bool        hiZOccluded(LLSpatialGroup* group);
+    /// Quasar: builds the Hi-Z cull's pyramid from the main view's G-buffer and reads it back. With the G-buffer bound
+    /// and its opaque geometry drawn, in the main view only.
+    void        captureHiZCull();
 
     void        doOcclusion(LLCamera& camera);
     void        markNotCulled(LLSpatialGroup* group, LLCamera &camera);
@@ -1284,6 +1291,9 @@ public:
 
     // The farthest depth under each texel of the main view's depth, built where a GPU cull asks for it.
     ALDepthPyramid              mDepthPyramid;
+
+    // Quasar: culls objects and avatars hidden behind walls, from a read-back depth pyramid of the main view.
+    QLHiZCull                   mHiZCull;
 
     // Profiling tracks, plotted at the start of each main frame for a frame a few before: the primitives the main view's
     // terrain and water passes draw, the water's flat field and its waves' patches apart, and the draws of water
