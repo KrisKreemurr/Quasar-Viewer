@@ -13633,7 +13633,7 @@ namespace
         F32        mError = 0.f;
         F32        mFOV   = 0.f;
         U32        mFrame = 0;
-        U32        mTexture = 0;
+        U64        mDepthSerial = 0;  // which build of the map's depth it was drawn into
         U32        mEpoch = 0;
     };
 
@@ -14480,7 +14480,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 const bool due = ((frame + stagger.mPhase) % stagger.mInterval) == 0 || age >= stagger.mInterval * 2;
                 keep_map = stagger.mInterval > 1 && !due && kept.mValid
                     && kept.mEpoch == mShadowStaggerEpoch
-                    && kept.mTexture == mRT->shadow[j].getTexture()
+                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
                     && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
@@ -14532,7 +14532,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     kept.mError   = mShadowError.mV[j];
                     kept.mFOV     = mShadowFOV.mV[j];
                     kept.mFrame   = LLFrameTimer::getFrameCount();
-                    kept.mTexture = mRT->shadow[j].getTexture();
+                    kept.mDepthSerial = mRT->shadow[j].getDepthSerial();
                     kept.mEpoch   = mShadowStaggerEpoch;
                 }
             }
