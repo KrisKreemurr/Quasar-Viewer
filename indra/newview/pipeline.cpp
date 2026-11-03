@@ -14086,6 +14086,41 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             //restore the main camera
             LLViewerCamera::setCurrent(saved_camera);
 
+            // Quasar: whether this cascade's map, drawn a frame or few ago, can stand in for drawing it now. Decided
+            // first, so a kept cascade skips its receivers' walk of every partition (getVisiblePointCloud) and its fit
+            // as well as its draw. Only the main view's own maps, and never for a snapshot.
+            if (stagger_level > 0 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot && mRT->shadow[j].isComplete()
+                && j < (S32)ALRenderResourcePlan::SUN_CASCADES)
+            {
+                QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                const QLStagger stagger = cascade_stagger(stagger_level, j);
+                const U32 frame = LLFrameTimer::getFrameCount();
+                const U32 age = frame - kept.mFrame;
+                const bool due = ((frame + stagger.mPhase) % stagger.mInterval) == 0 || age >= stagger.mInterval * 2;
+                const bool keep_map = stagger.mInterval > 1 && !due && kept.mValid
+                    && kept.mEpoch == mShadowStaggerEpoch
+                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
+                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
+                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
+                    && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
+                if (keep_map)
+                {
+                    // Read the kept map through the light's view and projection it was drawn with.
+                    const LLMatrix4a keep_trans = LLRender::sReverseZ ? clip_to_texture(1.f, 0.f) : clip_to_texture(0.5f, 0.5f);
+                    view[j] = kept.mView;
+                    proj[j] = kept.mProj;
+                    mShadowModelview[j] = kept.mView;
+                    mShadowProjection[j] = kept.mProj;
+                    mShadowError.mV[j] = kept.mError;
+                    mShadowFOV.mV[j] = kept.mFOV;
+                    mSunShadowMatrix[j].setMul(inv_view, kept.mView);
+                    mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], kept.mProj);
+                    mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], keep_trans);
+                    ++mShadowCascadesKept;
+                    continue;
+                }
+            }
+
             LLVector3 eye = camera.getOrigin();
             llassert(eye.isFinite());
 
@@ -14473,42 +14508,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
 
             stop_glerror();
 
-            // Quasar: whether this cascade's map, drawn a frame or few ago, can stand in for drawing it now. Only the main
-            // view's own maps, and never for a snapshot.
-            bool keep_map = false;
-            if (stagger_level > 0 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot && mRT->shadow[j].isComplete()
-                && j < (S32)ALRenderResourcePlan::SUN_CASCADES)
-            {
-                QLShadowCascadeKeep& kept = sCascadeKeep[j];
-                const QLStagger stagger = cascade_stagger(stagger_level, j);
-                const U32 frame = LLFrameTimer::getFrameCount();
-                const U32 age = frame - kept.mFrame;
-                const bool due = ((frame + stagger.mPhase) % stagger.mInterval) == 0 || age >= stagger.mInterval * 2;
-                keep_map = stagger.mInterval > 1 && !due && kept.mValid
-                    && kept.mEpoch == mShadowStaggerEpoch
-                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
-                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
-                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
-                    && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
-            }
-
-            if (keep_map)
-            {
-                // Read the kept map through the light's view and projection it was drawn with.
-                const QLShadowCascadeKeep& kept = sCascadeKeep[j];
-                view[j] = kept.mView;
-                proj[j] = kept.mProj;
-                mShadowModelview[j] = kept.mView;
-                mShadowProjection[j] = kept.mProj;
-                mShadowError.mV[j] = kept.mError;
-                mShadowFOV.mV[j] = kept.mFOV;
-                mSunShadowMatrix[j].setMul(inv_view, kept.mView);
-                mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], kept.mProj);
-                mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], trans);
-                ++mShadowCascadesKept;
-            }
             // A cascade whose map could not be built is not drawn, and its shadows are read lit (unbuiltShadowMaps).
-            else if (mRT->shadow[j].isComplete())
+            if (mRT->shadow[j].isComplete())
             {
                 mRT->shadow[j].bindTarget();
                 mRT->shadow[j].getViewport(gGLViewport);
