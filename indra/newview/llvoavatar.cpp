@@ -12330,7 +12330,12 @@ void LLVOAvatar::processComplexityCostChange(const hud_complexity_list_t &hud_co
                 && obj->mDrawable)
             {
                 LLVOAvatar* avatar = (LLVOAvatar*)obj;
-                gPipeline.profileAvatar(avatar);
+                // Quasar: asked a frame ago, and the avatar may have been found too slow since (updateTooSlow), which
+                // profileAvatar refuses, as LLWorld's caller already checks.
+                if (!avatar->isTooSlow())
+                {
+                    gPipeline.profileAvatar(avatar);
+                }
             }
         });
     }
