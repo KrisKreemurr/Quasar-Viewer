@@ -5228,6 +5228,13 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             LL_PROFILE_PLOT("quasar vertex buffer switches", (int64_t)gQLDrawStats.mBufferSwitches);
             LL_PROFILE_PLOT("quasar model matrix changes", (int64_t)gQLDrawStats.mMatrixChanges);
             gQLDrawStats.clear();
+            gQLDrawStats.mLastFastSwitches = LLVertexBuffer::sAttribBindingSwitches;
+            gQLDrawStats.mLastFullSetups = LLVertexBuffer::sAttribPointerSetups;
+            LLVertexBuffer::sAttribBindingSwitches = 0;
+            LLVertexBuffer::sAttribPointerSetups = 0;
+            // Quasar: buffer switches under formats already given (LLVertexBuffer::bindVertexBuffers), set for the frame.
+            static LLCachedControl<bool> attrib_binding(gSavedSettings, "QuasarVertexAttribBinding", false);
+            LLVertexBuffer::sUseAttribBinding = attrib_binding;
         }
     }
 

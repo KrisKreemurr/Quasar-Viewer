@@ -41,6 +41,10 @@ struct QLDrawStats
     U32 mLastDraws          = 0;
     U32 mLastBufferSwitches = 0;
     U32 mLastMatrixChanges  = 0;
+    // The last frame's vertex buffer setups: by binding the buffer under formats already given, and by setting every
+    // attribute pointer (LLVertexBuffer, QuasarVertexAttribBinding).
+    U32 mLastFastSwitches   = 0;
+    U32 mLastFullSetups     = 0;
 
     void noteDraw(const void* buffer)
     {

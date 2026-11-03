@@ -886,6 +886,17 @@ static const LLVertexBuffer* sSetupBuffer = nullptr;
 static U32 sSetupGLBuffer = 0;
 static U32 sSetupMask = 0;
 
+// Quasar: the attribute locations whose format (size, type, normalisation, integer or not) and binding index a
+// setupVertexBuffer has given in the current vertex array object. glVertexAttribPointer gives each location its
+// format and binds it to the binding point of its own index, and setupVertexBuffer gives each location one format
+// whatever the mask, so once a location has been set up its format stands until the vertex array object goes, and a
+// buffer switch need only bind the new buffer at its binding point (bindVertexBuffers). Cleared with sLastMask when
+// the context's vertex array object does (cleanupClass).
+static U32 sFormatMask = 0;
+bool LLVertexBuffer::sUseAttribBinding = false;
+U32 LLVertexBuffer::sAttribBindingSwitches = 0;
+U32 LLVertexBuffer::sAttribPointerSetups = 0;
+
 
 //NOTE: each component must be AT LEAST 4 bytes in size to avoid a performance penalty on AMD hardware
 const U32 LLVertexBuffer::sTypeSize[LLVertexBuffer::TYPE_MAX] =
@@ -1219,6 +1230,8 @@ void LLVertexBuffer::cleanupClass()
     // context's VAO starts with none. Left as it was, setupClientArrays would take its first
     // draw's arrays for enabled already and skip the glEnableVertexAttribArray they need.
     sLastMask = 0;
+    // So are the attributes' formats (Quasar, bindVertexBuffers).
+    sFormatMask = 0;
 
     delete sVBOPool;
     sVBOPool = nullptr;
@@ -1985,7 +1998,19 @@ void LLVertexBuffer::setBuffer()
     // are enabled is setupClientArrays' to say, and sLastMask with it.
     if (sSetupBuffer != this || sSetupGLBuffer != mGLBuffer || sSetupMask != data_mask)
     {
-        setupVertexBuffer();
+        // Quasar: where every location this program reads has had its format given in this vertex array object, only
+        // the buffer under them changes: one call for each run of locations rather than a pointer for each.
+        if (sUseAttribBinding && glBindVertexBuffers && (setupLocations(data_mask) & ~sFormatMask) == 0)
+        {
+            bindVertexBuffers(data_mask);
+            ++sAttribBindingSwitches;
+        }
+        else
+        {
+            setupVertexBuffer();
+            sFormatMask |= setupLocations(data_mask);
+            ++sAttribPointerSetups;
+        }
         sSetupBuffer = this;
         sSetupGLBuffer = mGLBuffer;
         sSetupMask = data_mask;
@@ -2007,6 +2032,68 @@ void LLVertexBuffer::setBuffer()
 static void* buffer_offset(size_t offset)
 {
     return reinterpret_cast<void*>(offset);
+}
+
+// static
+U32 LLVertexBuffer::setupLocations(U32 data_mask)
+{
+    U32 locations = data_mask & ((1u << TYPE_MAX) - 1);
+    if ((data_mask & MAP_EMISSIVE) && !(data_mask & MAP_COLOR))
+    {
+        locations |= MAP_COLOR;
+    }
+    return locations;
+}
+
+void LLVertexBuffer::bindVertexBuffers(U32 data_mask)
+{
+    STOP_GLERROR;
+
+    // Offsets and strides as setupVertexBuffer gives them, location by location.
+    GLuint   buffers[TYPE_MAX];
+    GLintptr offsets[TYPE_MAX];
+    GLsizei  strides[TYPE_MAX];
+    for (U32 loc = 0; loc < TYPE_MAX; ++loc)
+    {
+        buffers[loc] = mGLBuffer;
+        offsets[loc] = (GLintptr)mOffsets[loc];
+        strides[loc] = (GLsizei)sTypeSize[loc];
+    }
+    if (data_mask & MAP_COLOR)
+    {
+        // emissive in place of colour where both are read, at colour's stride
+        offsets[TYPE_COLOR] = (GLintptr)((data_mask & MAP_EMISSIVE) ? mOffsets[TYPE_EMISSIVE] : mOffsets[TYPE_COLOR]);
+        strides[TYPE_COLOR] = (GLsizei)sTypeSize[TYPE_COLOR];
+    }
+    else if (data_mask & MAP_EMISSIVE)
+    {
+        // emissive in the colour channel too, where colour is not read
+        offsets[TYPE_COLOR] = (GLintptr)mOffsets[TYPE_EMISSIVE];
+        strides[TYPE_COLOR] = (GLsizei)sTypeSize[TYPE_EMISSIVE];
+    }
+    // the texture index rides in the position's fourth float
+    offsets[TYPE_TEXTURE_INDEX] = (GLintptr)(mOffsets[TYPE_VERTEX] + 12);
+    strides[TYPE_TEXTURE_INDEX] = (GLsizei)sTypeSize[TYPE_VERTEX];
+
+    // Each run of consecutive locations in one call, so a location this program does not read keeps its binding.
+    const U32 locations = setupLocations(data_mask);
+    U32 loc = 0;
+    while (loc < TYPE_MAX)
+    {
+        if (!(locations & (1u << loc)))
+        {
+            ++loc;
+            continue;
+        }
+        const U32 first = loc;
+        while (loc < TYPE_MAX && (locations & (1u << loc)))
+        {
+            ++loc;
+        }
+        glBindVertexBuffers(first, loc - first, buffers + first, offsets + first, strides + first);
+    }
+
+    STOP_GLERROR;
 }
 
 void LLVertexBuffer::setupVertexBuffer()

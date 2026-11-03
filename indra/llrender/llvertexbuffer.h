@@ -373,6 +373,22 @@ public:
     static U32 sGLRenderIndices;
     static U32 sLastMask;
     static U32 sVertexCount;
+
+    /// Quasar: where a buffer switch keeps the program's attributes, set the new buffer under the formats already
+    /// given rather than giving each attribute's pointer again (glBindVertexBuffers, GL 4.4). The viewer sets it from
+    /// QuasarVertexAttribBinding at the start of each frame.
+    static bool sUseAttribBinding;
+    /// Buffer switches that took the fast path and those that set every pointer, since the viewer last cleared them.
+    static U32 sAttribBindingSwitches;
+    static U32 sAttribPointerSetups;
+
+private:
+    // The locations setupVertexBuffer gives for `data_mask`: the program's, and the colour channel where emissive
+    // stands in for it.
+    static U32 setupLocations(U32 data_mask);
+    // Binds this buffer at every location of `data_mask` under the formats a setupVertexBuffer of that mask gave, with
+    // the offsets and strides it would give: the vertex-attribute-binding form of setupVertexBuffer.
+    void bindVertexBuffers(U32 data_mask);
 };
 
 #if LL_PROFILER_ENABLE_RENDER_DOC

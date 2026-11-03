@@ -651,6 +651,10 @@ public:
                                          gQLDrawStats.mLastDraws, gQLDrawStats.mLastBufferSwitches,
                                          gQLDrawStats.mLastMatrixChanges));
             ypos += y_inc;
+            addText(xpos, ypos, llformat("Quasar buffer setups: %u fast | %u full (QuasarVertexAttribBinding %s)",
+                                         gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
+                                         LLVertexBuffer::sUseAttribBinding ? "on" : "off"));
+            ypos += y_inc;
         }
 
         static LLCachedControl<bool> debug_show_render_info(gSavedSettings, "DebugShowRenderInfo", false);
