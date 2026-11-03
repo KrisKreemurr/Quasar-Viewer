@@ -783,18 +783,43 @@ void LLRender::packMatricesUBO()
     const bool proj_moved = mMatHash[MM_PROJECTION] != mMatricesUBOHash[MM_PROJECTION];
     const bool tex_moved  = mMatHash[MM_TEXTURE0]   != mMatricesUBOHash[MM_TEXTURE0];
 
-    if (mdv_moved)
+    // Quasar: a stack's hash moves with every load, even of the matrix it already held -- a draw pool loads the view
+    // and multiplies in each draw's model matrix, and static faces across a region share one -- so a moved hash with
+    // the same bytes as the last matrix the derived ones were worked from reuses them. The blocks below are written and
+    // compared as before; only the inverse and product are skipped.
+    // Per thread, as gGL is, and only for the LLRender that worked them out: another's cached inverses are not these.
+    static thread_local const LLRender* s_derived_owner = nullptr;
+    static thread_local LLMatrix4a      s_derived_mdv;
+    static thread_local LLMatrix4a      s_derived_proj;
+    static thread_local bool            s_have_derived_mdv  = false;
+    static thread_local bool            s_have_derived_proj = false;
+    if (s_derived_owner != this)
+    {
+        s_derived_owner     = this;
+        s_have_derived_mdv  = false;
+        s_have_derived_proj = false;
+    }
+    const bool mdv_values  = mdv_moved &&
+        !(s_have_derived_mdv && memcmp(mdv.getF32ptr(), s_derived_mdv.getF32ptr(), sizeof(LLMatrix4a)) == 0);
+    const bool proj_values = proj_moved &&
+        !(s_have_derived_proj && memcmp(proj.getF32ptr(), s_derived_proj.getF32ptr(), sizeof(LLMatrix4a)) == 0);
+
+    if (mdv_values)
     {
         // The modelview is affine (view * model, no perspective), so the affine inverse is
         // exact and much cheaper than a general 4x4 inverse.
         mCachedInvMdv.setAffineInverse(mdv);
+        s_derived_mdv = mdv;
+        s_have_derived_mdv = true;
     }
-    if (proj_moved)
+    if (proj_values)
     {
         // Projection is not affine -- general inverse required.
         mCachedInvProj.setInverse(proj);
+        s_derived_proj = proj;
+        s_have_derived_proj = true;
     }
-    if (mdv_moved || proj_moved)
+    if (mdv_values || proj_values)
     {
         // the modelview first, then the projection
         mCachedMVP.setMul(mdv, proj);

@@ -95,8 +95,11 @@ LL::ThreadPoolBase::ThreadPoolBase(const std::string& name,
     mAutomaticShutdown(auto_shutdown)
 {}
 
+LL::ThreadPoolBase::ThreadStartHook LL::ThreadPoolBase::sThreadStartHook = nullptr;
+
 void LL::ThreadPoolBase::start()
 {
+    const std::string pool{ getKey() };
     for (size_t i = 0; i < mThreadCount; ++i)
     {
         std::string tname{ stringize(mName, ':', (i+1), '/', mThreadCount) };
@@ -114,13 +117,17 @@ void LL::ThreadPoolBase::start()
         std::string os_name{ mThreadCount > 1 ? stringize(':', (i+1)) : std::string() };
         os_name.insert(0, getKey().substr(0, OS_NAME_MAX - os_name.size()));
 #endif
-        mThreads.emplace_back(tname, [this, tname, os_name]()
+        mThreads.emplace_back(tname, [this, tname, os_name, pool]()
             {
                 // Tracy names the OS thread too, cut to the same fifteen
                 // bytes, so it goes first and the short name is the one left
                 LL_PROFILER_SET_THREAD_NAME(tname.c_str());
                 set_thread_name(os_name.c_str());
                 set_thread_fp_mode();
+                if (ThreadStartHook hook = sThreadStartHook)
+                {
+                    hook(pool);
+                }
                 run(tname);
             });
     }

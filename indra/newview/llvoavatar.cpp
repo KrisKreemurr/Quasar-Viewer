@@ -12487,6 +12487,7 @@ void LLVOAvatar::accountRenderComplexityForObject(
 void LLVOAvatar::setVisualMuteSettings(VisualMuteSettings set)
 {
     mVisuallyMuteSetting = set;
+    mOverallAppearanceKeptValid = false;  // Quasar: the kept appearance answered for the old setting
     mNeedsImpostorUpdate = true;
     mLastImpostorUpdateReason = 7;
 
@@ -12554,7 +12555,11 @@ void LLVOAvatar::setOverallAppearanceInvisible()
 
 void LLVOAvatar::updateOverallAppearance()
 {
-    AvatarOverallAppearance new_overall = getOverallAppearance();
+    // Quasar: worked out afresh, as it changes the avatar's state, and kept for the rest of the frame.
+    AvatarOverallAppearance new_overall = computeOverallAppearance();
+    mOverallAppearanceKept      = new_overall;
+    mOverallAppearanceKeptFrame = gFrameCount;
+    mOverallAppearanceKeptValid = true;
     if (new_overall != mOverallAppearance)
     {
         switch (new_overall)
@@ -12627,6 +12632,17 @@ void LLVOAvatar::updateOverallAppearanceAnimations()
 
 // Based on isVisuallyMuted(), but has 3 possible results.
 LLVOAvatar::AvatarOverallAppearance LLVOAvatar::getOverallAppearance() const
+{
+    if (!mOverallAppearanceKeptValid || mOverallAppearanceKeptFrame != gFrameCount)
+    {
+        mOverallAppearanceKept      = computeOverallAppearance();
+        mOverallAppearanceKeptFrame = gFrameCount;
+        mOverallAppearanceKeptValid = true;
+    }
+    return mOverallAppearanceKept;
+}
+
+LLVOAvatar::AvatarOverallAppearance LLVOAvatar::computeOverallAppearance() const
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_AVATAR;
     AvatarOverallAppearance result = AOA_NORMAL;

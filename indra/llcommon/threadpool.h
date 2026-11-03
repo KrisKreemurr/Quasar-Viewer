@@ -89,6 +89,15 @@ namespace LL
         static
         size_t getWidth(const std::string& name, size_t dft);
 
+        /**
+         * A function each pool thread calls first, on itself, given its pool's
+         * name (the one passed to the constructor): for the application to
+         * place threads, as Quasar does on Windows' hybrid CPUs. Null for none.
+         * Set it before the pools it should reach start.
+         */
+        using ThreadStartHook = void (*)(const std::string& pool);
+        static void setThreadStartHook(ThreadStartHook hook) { sThreadStartHook = hook; }
+
     protected:
         std::unique_ptr<WorkQueueBase> mQueue;
         std::vector<std::pair<std::string, std::thread>> mThreads;
@@ -99,6 +108,8 @@ namespace LL
 
         std::string mName;
         size_t mThreadCount;
+
+        static ThreadStartHook sThreadStartHook;
     };
 
     /**

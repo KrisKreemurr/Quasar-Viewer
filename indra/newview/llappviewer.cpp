@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llappviewer.h"
+#include "qlcpuschedule.h"
 
 #include "alcrashreporter.h"
 
@@ -2353,6 +2354,14 @@ bool LLAppViewer::initThreads()
     // always use at least 2 threads for image decoding to prevent
     // a single texture blocking all other textures from decoding
     S32 image_decode_count = llclamp(cores - 6, 2, 16);
+
+    // Quasar: on a hybrid CPU, the main thread and the GL driver on the performance cores and decoding on the
+    // efficiency cores (QLCpuSchedule); decoding then takes no more threads than those cores have, so it does not
+    // spill back onto the performance cores.
+    if (QLCpuSchedule::apply(gSavedSettings.getBOOL("QuasarPreferPerformanceCores")))
+    {
+        image_decode_count = llclamp((S32)QLCpuSchedule::efficiencyThreads(), 2, image_decode_count);
+    }
 
     threadCounts["ImageDecode"] = image_decode_count;
     gSavedSettings.setLLSD("ThreadPoolSizes", threadCounts);

@@ -13608,16 +13608,36 @@ static void bucketShadowCull(LLCullResult& src, LLCamera& cam, LLCullResult& dst
         }
     }
 
-    // Individual drawables and spatial bridges (attachments/animesh) are few; pass them
-    // through unfiltered -- conservative (they render into every cascade) but correct.
+    // Individual drawables are few; pass them through unfiltered -- conservative (they render into every cascade) but
+    // correct.
     for (LLCullResult::drawable_iterator i = src.beginVisibleList(), end = src.endVisibleList(); i != end; ++i)
     {
         dst.pushDrawable(*i);
     }
 
+    // Quasar: spatial bridges (avatars, attachments, animesh, moving linksets) are not few in a crowd, and each one a
+    // cascade takes is culled and sorted again inside it (LLSpatialBridge::setVisible). Only the bridges whose box, in
+    // agent space as the groups' are, meets this cascade's frustum are taken, by the same test as the groups.
+    static LLCachedControl<bool> filter_bridges(gSavedSettings, "QuasarShadowBridgeFilter", true);
     for (LLCullResult::bridge_iterator i = src.beginVisibleBridge(), end = src.endVisibleBridge(); i != end; ++i)
     {
-        dst.pushBridge(*i);
+        LLSpatialBridge* bridge = *i;
+        if (filter_bridges && bridge && !bridge->isDead())
+        {
+            const LLVector4a* ext = bridge->getSpatialExtents();
+            LLVector4a center;
+            LLVector4a half;
+            center.setAdd(ext[0], ext[1]);
+            center.mul(0.5f);
+            half.setSub(ext[1], ext[0]);
+            half.mul(0.5f);
+            // A box that is not finite bounds nothing, and is kept.
+            if (center.isFinite3() && half.isFinite3() && cam.AABBInFrustum(center, half) == 0)
+            {
+                continue;
+            }
+        }
+        dst.pushBridge(bridge);
     }
 }
 

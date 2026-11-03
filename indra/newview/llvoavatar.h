@@ -556,6 +556,9 @@ public:
         AOA_INVISIBLE
     };
 
+    /// What the avatar is drawn as. Quasar: worked out once a frame (computeOverallAppearance) and kept, since the draw
+    /// pools, the pipeline and particle sources ask about a thousand times a frame in a crowd. A change of the
+    /// avatar's visual mute setting drops what was kept; anything else that moves it shows from the next frame.
     AvatarOverallAppearance getOverallAppearance() const;
     void setOverallAppearanceNormal();
     void setOverallAppearanceJellyDoll();
@@ -620,6 +623,12 @@ private:
 // [/RLVa:KB]
 
     VisualMuteSettings      mVisuallyMuteSetting;           // Always or never visually mute this AV
+
+    // Quasar: getOverallAppearance()'s answer and the frame it was worked out in.
+    AvatarOverallAppearance computeOverallAppearance() const;
+    mutable AvatarOverallAppearance mOverallAppearanceKept = AOA_NORMAL;
+    mutable U32                     mOverallAppearanceKeptFrame = 0;
+    mutable bool                    mOverallAppearanceKeptValid = false;
 
     //--------------------------------------------------------------------
     // Complexity calculation and caching

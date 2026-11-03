@@ -254,6 +254,7 @@ if(AL_BUILD_VIEWER)
     alterrainsurfacemaps.cpp
     altextureboost.cpp
     alwatersurface.cpp
+    qlcpuschedule.cpp
     qlhizcull.cpp
     alfloaterscriptstudio.cpp
     alfloaterwebprofile.cpp
@@ -1134,6 +1135,7 @@ if(AL_BUILD_VIEWER)
     alsky.h
     alterrainsurfacemaps.h
     alwatersurface.h
+    qlcpuschedule.h
     qldrawstats.h
     qlhizcull.h
     altextureboost.h

@@ -874,7 +874,9 @@ void LLVOVolume::updateTextureVirtualSize(bool forced)
     const S32 num_faces = mDrawable->getNumFaces();
     F32 min_vsize=999999999.f, max_vsize=0.f;
     LLViewerCamera* camera = LLViewerCamera::getInstance();
-    std::stringstream debug_text;
+    // Quasar: a plain string, empty unless the texture priority debug display is on; a stringstream built on every
+    // call costs its locale setup whether anything is written to it or not.
+    std::string debug_text;
     // The textures this holds at BOOST_HUD from here on: those its faces have now, while it is a HUD, one hold a
     // texture. Each is held in the place the last pass held its face's, so a texture held by both keeps its boost
     // unchanged.
@@ -977,7 +979,8 @@ void LLVOVolume::updateTextureVirtualSize(bool forced)
             LLViewerFetchedTexture* img = LLViewerTextureManager::staticCastToFetchedTexture(imagep) ;
             if(img)
             {
-                debug_text << img->getDiscardLevel() << ":" << img->getDesiredDiscardLevel() << ":" << img->getWidth() << ":" << (S32) sqrtf(vsize) << ":" << (S32) sqrtf(img->getMaxVirtualSize()) << "\n";
+                debug_text += llformat("%d:%d:%d:%d:%d\n", (S32)img->getDiscardLevel(), (S32)img->getDesiredDiscardLevel(),
+                                       (S32)img->getWidth(), (S32)sqrtf(vsize), (S32)sqrtf(img->getMaxVirtualSize()));
                 /*F32 pri = img->getDecodePriority();
                 pri = llmax(pri, 0.0f);
                 if (pri < min_vsize) min_vsize = pri;
@@ -1046,7 +1049,7 @@ void LLVOVolume::updateTextureVirtualSize(bool forced)
     else if (gPipeline.hasRenderDebugMask(LLPipeline::RENDER_DEBUG_TEXTURE_PRIORITY))
     {
         //setDebugText(llformat("%.0f:%.0f", (F32) sqrt(min_vsize),(F32) sqrt(max_vsize)));
-        setDebugText(debug_text.str());
+        setDebugText(debug_text);
     }
     else if (gPipeline.hasRenderDebugMask(LLPipeline::RENDER_DEBUG_FACE_AREA))
     {

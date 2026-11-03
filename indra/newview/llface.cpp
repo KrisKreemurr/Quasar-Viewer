@@ -2041,11 +2041,15 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
     LLVector4a center;
     LLVector4a size;
 
+    // Quasar: a rigged face's avatar, looked up once for the box and the update period below.
+    LLVOAvatar* rigged_avatar = nullptr;
+
     if (isState(LLFace::RIGGED))
     {
         LL_PROFILE_ZONE_NAMED_CATEGORY_FACE("calcPixelArea - rigged");
         //override with joint volume face joint bounding boxes
         LLVOAvatar* avatar = mVObjp.notNull() ? mVObjp->getAvatar() : nullptr;
+        rigged_avatar = avatar;
         bool hasRiggedExtents = false;
 
         if (avatar && avatar->mDrawable)
@@ -2165,8 +2169,7 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
     // folded into the time stamped, so the check at the top, which runs far more often than this, stays as it was.
     if (isState(LLFace::RIGGED))
     {
-        LLVOAvatar* avatar = mVObjp.notNull() ? mVObjp->getAvatar() : nullptr;
-        const F32 period = rigged_pixel_area_period(avatar, PIXEL_AREA_UPDATE_PERIOD);
+        const F32 period = rigged_pixel_area_period(rigged_avatar, PIXEL_AREA_UPDATE_PERIOD);
         if (period > PIXEL_AREA_UPDATE_PERIOD)
         {
             // Spread over the whole wait, so a crowd's faces do not come due together.

@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarPreferPerformanceCores</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: on hybrid CPUs (Intel 12th generation and later) under Windows, prefer the performance cores for the main thread and the graphics driver, steer texture and mesh decoding onto the efficiency cores, and stop Windows slowing the viewer as a background process. Does nothing on CPUs with one kind of core. Takes effect at the next start.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarProbeFaceInterval</key>
         <map>
             <key>Comment</key>
@@ -2607,6 +2618,17 @@
             <string>S32</string>
             <key>Value</key>
             <integer>2</integer>
+        </map>
+        <key>QuasarShadowBridgeFilter</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: with RenderShadowCullMode 1, draw avatars, attachments and moving objects only into the sun shadow cascades whose area they are in, rather than into all of them.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
         </map>
         <key>QuasarShowHiZInfo</key>
         <map>
