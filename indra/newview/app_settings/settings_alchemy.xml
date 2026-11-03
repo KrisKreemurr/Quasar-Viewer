@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarProbeFaceInterval</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: refresh reflection probes that already have a picture only every this many frames (1 to 8). Each refresh renders the whole scene again from the probe, one face a frame, for as long as the session runs. Probes still building their first picture are not held back. 1 is the original behaviour.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>2</integer>
+        </map>
         <key>QuasarRiggedPixelAreaThrottle</key>
         <map>
             <key>Comment</key>

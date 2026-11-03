@@ -43,6 +43,7 @@
 #include "pipeline.h"
 #include "llviewershadermgr.h"
 #include "llviewercontrol.h"
+#include "llframetimer.h"
 #include "llenvironment.h"
 #include "llstartup.h"
 #include "llviewermenufile.h"
@@ -479,10 +480,21 @@ void LLReflectionMapManager::update()
         abandonProbeUpdate();
     }
 
+    // Quasar: refresh probes that already have a picture only every few frames (QuasarProbeFaceInterval). Each face is
+    // a whole cull, sort and draw of the scene, done one face a frame for as long as the session runs, and in a static
+    // scene a refresh changes nothing. A probe still building its first picture is not held back, so reflections come
+    // in as fast as before.
+    static LLCachedControl<S32> face_interval(gSavedSettings, "QuasarProbeFaceInterval", 2);
+    const U32 interval = (U32)llclamp((S32)face_interval, 1, 8);
+    const bool refresh_turn = interval <= 1 || (LLFrameTimer::getFrameCount() % interval) == 0;
+
     if (mUpdatingProbe != nullptr)
     {
         did_update = true;
-        doProbeUpdate();
+        if (refresh_turn || !mUpdatingProbe->mComplete)
+        {
+            doProbeUpdate();
+        }
     }
 
     // Update distance to camera for all probes.
@@ -670,8 +682,8 @@ void LLReflectionMapManager::update()
       oldestProbe = mDefaultProbe;
     }
 
-    // switch to updating the next oldest probe
-    if (!did_update && oldestProbe != nullptr)
+    // switch to updating the next oldest probe (Quasar: on a refresh turn, or to build a probe's first picture)
+    if (!did_update && oldestProbe != nullptr && (refresh_turn || !oldestProbe->mComplete))
     {
         LLReflectionMap* probe = oldestProbe;
         llassert(probe->mCubeIndex != -1);
