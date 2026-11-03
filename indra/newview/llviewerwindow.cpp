@@ -638,6 +638,12 @@ public:
                                              hiz.getMovingLastFrame() ? " | paused: camera moving" : ""));
                 ypos += y_inc;
             }
+
+            // Quasar: the staggered sun shadow cascades (QuasarRenderShadowStagger).
+            static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 1);
+            addText(xpos, ypos, llformat("Quasar shadow stagger: level %d | cascades reused this frame: %u of %u",
+                                         (S32)shadow_stagger, gPipeline.mShadowCascadesKept, gPipeline.sunCascades()));
+            ypos += y_inc;
         }
 
         static LLCachedControl<bool> debug_show_render_info(gSavedSettings, "DebugShowRenderInfo", false);

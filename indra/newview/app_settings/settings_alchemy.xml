@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarRenderShadowStagger</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: draw the far sun shadow cascades less often, keeping their maps in between. 0: every cascade every frame. 1: the two far cascades on alternate frames (about a quarter less shadow work). 2: the second cascade every other frame and the two far ones every fourth (about half). A kept cascade is drawn again at once when the camera moves or turns more than a little, or the sun moves.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarShowHiZInfo</key>
         <map>
             <key>Comment</key>

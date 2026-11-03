@@ -1295,6 +1295,12 @@ public:
     // Quasar: culls objects and avatars hidden behind walls, from a read-back depth pyramid of the main view.
     QLHiZCull                   mHiZCull;
 
+    // Quasar: staggered sun shadow cascades (generateSunShadow). Bumped by every resource reconcile, so no cascade's map
+    // is kept across one; and how many cascades the main view kept rather than drew, this frame and the last.
+    U32                         mShadowStaggerEpoch = 0;
+    U32                         mShadowCascadesKept = 0;
+    U32                         mShadowCascadesKeptLast = 0;
+
     // Profiling tracks, plotted at the start of each main frame for a frame a few before: the primitives the main view's
     // terrain and water passes draw, the water's flat field and its waves' patches apart, and the draws of water
     // geometry in every view and pass.
