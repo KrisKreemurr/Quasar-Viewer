@@ -42,10 +42,22 @@ namespace
     // or four frames after it was asked for. ALTextureReadback takes sixteen in all, shared with the textures' reads.
     constexpr U32 READ_SLOTS = 5;
 
-    // How far the camera may have moved, in metres, and turned (the cosine of the angle) since the frame a read was
-    // taken of before the read is no longer trusted.
+    // How far the camera may have moved, in metres, since the frame a read was taken of before the read is no longer
+    // trusted; and, with QuasarHiZCullWhileTurning off, how far it may have turned (the cosine of the angle).
+    //
+    // Turning alone need not stand the cull down. Whether a box is hidden is a matter of the rays from the eye to it,
+    // which do not depend on where the camera looks: an occluder in front of the box from this eye was in front of it
+    // in the frame read too, and was drawn into its depth, since only boxes wholly on that frame's screen are judged and
+    // the occluder lies on the rays to them. What turning brings into view from off that screen is never judged, so it
+    // is drawn. Moving the eye changes the rays, and stands the cull down as before.
     constexpr F32 MAX_EYE_MOVE   = 0.5f;
     constexpr F32 MIN_AT_COSINE  = 0.99905f;  // about 2.5 degrees
+
+    bool cull_while_turning()
+    {
+        static LLCachedControl<bool> while_turning(gSavedSettings, "QuasarHiZCullWhileTurning", true);
+        return while_turning;
+    }
 
     // A box wider than this many texels of the level read each way covers much of the screen, and is kept rather than
     // read texel by texel.
@@ -191,7 +203,8 @@ bool QLHiZCull::isHidden(const LLVector4a& center, const LLVector4a& half, const
     ++mTestedThisFrame;
 
     // Too far from the frame the read was taken of to trust it.
-    if ((eye - mFrame.mEye).lengthSquared() > MAX_EYE_MOVE * MAX_EYE_MOVE || (at_axis * mFrame.mAtAxis) < MIN_AT_COSINE)
+    if ((eye - mFrame.mEye).lengthSquared() > MAX_EYE_MOVE * MAX_EYE_MOVE ||
+        (!cull_while_turning() && (at_axis * mFrame.mAtAxis) < MIN_AT_COSINE))
     {
         mMovingThisFrame = true;
         return false;

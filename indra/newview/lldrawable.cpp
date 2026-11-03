@@ -82,6 +82,8 @@ std::vector<LLPointer<LLDrawable> > LLDrawable::sDeadList;
 
 #define FORCE_INVISIBLE_AREA 16.f
 
+extern bool gCubeSnapshot;
+
 // static
 void LLDrawable::incrementVisible()
 {
@@ -1608,10 +1610,19 @@ void LLSpatialBridge::setVisible(LLCamera& camera_in, std::vector<LLDrawable*>* 
                 }
             }
         }
-        else
+        else if (LLViewerCamera::sCurCameraID == LLViewerCamera::CAMERA_WORLD && !gCubeSnapshot)
         {
+            // The groups' distances are worked out in the bridge's own space (markNotCulled's updateDistance).
             LLCamera trans_camera = transformCamera(camera_in);
             LLOctreeMarkNotCulled culler(&trans_camera);
+            culler.traverse(mOctree);
+        }
+        else
+        {
+            // Quasar: a shadow map's or probe face's view marks the groups seen and works out no distances
+            // (markNotCulled reads the camera only for the main view's), so the camera is not carried into the
+            // bridge's space for it: a copy of the camera and a turn of its frame, per bridge per view.
+            LLOctreeMarkNotCulled culler(&camera_in);
             culler.traverse(mOctree);
         }
     }

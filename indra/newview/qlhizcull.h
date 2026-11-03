@@ -47,8 +47,10 @@ class LLRenderTarget;
 /// It complements the occlusion queries (LLOcclusionCullingGroup), which need a query drawn per group and answer only
 /// for groups already asked about; this answers for every group from one read.
 ///
-/// What it trusts is a frame or few old, so it stands down when the camera has moved or turned more than a little
-/// since that frame, which keeps a fast turn or a step round a corner from hiding what has just come into sight.
+/// What it trusts is a frame or few old, so it stands down when the camera has moved more than a little since that
+/// frame, which keeps a step round a corner from hiding what has just come into sight. Turning alone does not stand it
+/// down (QuasarHiZCullWhileTurning): what hides what depends on where the eye is, not where it looks, and what a turn
+/// brings in from off the frame's screen is never judged.
 /// Something that moves out from behind cover can still appear a few frames late, as with the queries.
 class QLHiZCull
 {

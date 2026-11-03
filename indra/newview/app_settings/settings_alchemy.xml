@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarHiZCullWhileTurning</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: keep the Hi-Z object cull (QuasarRenderHiZCull) working while the camera turns in place. It still stands down while the camera moves. Off: it also stands down after a turn of a few degrees, as before.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarJobThreads</key>
         <map>
             <key>Comment</key>
