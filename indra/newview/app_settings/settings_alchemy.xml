@@ -2575,6 +2575,28 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarJobThreads</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: worker threads in the pool that spreads the main thread's own work across cores (QLJobPool). 0 picks a quarter of the logical processors, at most six. Takes effect at the next start.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarParallelShadowExtents</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): when the sun shadows work out where their receivers are, walk each region's partitions on the job pool's threads at once rather than one after another.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarPreferPerformanceCores</key>
         <map>
             <key>Comment</key>

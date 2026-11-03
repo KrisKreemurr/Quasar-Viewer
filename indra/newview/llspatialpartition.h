@@ -441,6 +441,10 @@ public:
     void restoreGL();
 
     bool getVisibleExtents(LLCamera& camera, LLVector3& visMin, LLVector3& visMax);
+    /// Quasar: getVisibleExtents' walk without its rebound(): widens [min, max] by what of this partition is in
+    /// `camera`'s view, and returns true where none is. Reads the octree and writes nothing else, so walks of different
+    /// partitions may run at once, once every root has been rebound and while nothing writes the octrees.
+    bool addVisibleExtents(LLCamera& camera, LLVector4a& min, LLVector4a& max);
 
 public:
     LLSpatialBridge* mBridge; // NULL for non-LLSpatialBridge instances, otherwise, mBridge == this

@@ -28,6 +28,7 @@
 
 #include "llappviewer.h"
 #include "qlcpuschedule.h"
+#include "qljobpool.h"
 
 #include "alcrashreporter.h"
 
@@ -2158,6 +2159,7 @@ bool LLAppViewer::cleanup()
 
     // Delete workers first
     // shotdown all worker threads before deleting them in case of co-dependencies
+    QLJobPool::instance().stop();  // Quasar: idle between frames, and no frame runs from here on
     mAppCoreHttp.requestStop();
     sTextureFetch->shutdown();
     sTextureCache->shutdown();
@@ -2365,6 +2367,17 @@ bool LLAppViewer::initThreads()
 
     threadCounts["ImageDecode"] = image_decode_count;
     gSavedSettings.setLLSD("ThreadPoolSizes", threadCounts);
+
+    // Quasar: the main thread's fork-join pool (QLJobPool). 0 picks a quarter of the logical processors, at most six;
+    // its threads take the process's default CPU sets, the performance cores on a hybrid CPU (QLCpuSchedule).
+    {
+        S32 job_threads = gSavedSettings.getS32("QuasarJobThreads");
+        if (job_threads <= 0)
+        {
+            job_threads = llclamp(cores / 4, 0, 6);
+        }
+        QLJobPool::instance().start((U32)llclamp(job_threads, 0, 16));
+    }
 
     // Image decoding
     LLAppViewer::sImageDecodeThread = new LLImageDecodeThread(enable_threads && true);

@@ -1400,11 +1400,17 @@ bool LLSpatialPartition::getVisibleExtents(LLCamera& camera, LLVector3& visMin, 
         group->rebound();
     }
 
-    LLOctreeCullVisExtents vis(&camera, visMina, visMaxa);
-    vis.traverse(mOctree);
+    const bool empty = addVisibleExtents(camera, visMina, visMaxa);
 
     visMin.set(visMina.getF32ptr());
     visMax.set(visMaxa.getF32ptr());
+    return empty;
+}
+
+bool LLSpatialPartition::addVisibleExtents(LLCamera& camera, LLVector4a& min, LLVector4a& max)
+{
+    LLOctreeCullVisExtents vis(&camera, min, max);
+    vis.traverse(mOctree);
     return vis.mEmpty;
 }
 

@@ -121,6 +121,7 @@
 #include "llcubemap.h"
 #include "llviewershadermgr.h"
 #include "qldrawstats.h"
+#include "qljobpool.h"
 #include "llviewerstats.h"
 #include "llviewerjoystick.h"
 #include "llviewerdisplay.h"
@@ -3388,6 +3389,68 @@ bool LLPipeline::getVisibleExtents(LLCamera& camera, LLVector3& min, LLVector3& 
 
     bool res = true;
 
+    // Quasar: walk the partitions on the job pool's threads at once (QuasarParallelShadowExtents). Each walk only reads
+    // its octree once its root has been rebound, which is done here first, on this thread; each writes only its own
+    // slot below, merged after. sCurCameraID, which the walks' occlusion checks read, holds still while this thread
+    // waits on them.
+    static LLCachedControl<bool> parallel_extents(gSavedSettings, "QuasarParallelShadowExtents", false);
+    if (parallel_extents && QLJobPool::instance().workers() > 0)
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow extents parallel");
+        static std::vector<LLSpatialPartition*> parts;
+        parts.clear();
+        for (LLViewerRegion* region : LLWorld::getInstance()->getRegionList())
+        {
+            for (U32 i = 0; i < LLViewerRegion::NUM_PARTITIONS; i++)
+            {
+                LLSpatialPartition* part = region->getSpatialPartition(i);
+                if (part && hasRenderType(part->mDrawableType))
+                {
+                    LLSpatialGroup* root = (LLSpatialGroup*)part->mOctree->getListener(0);
+                    root->rebound();
+                    parts.push_back(part);
+                }
+            }
+        }
+
+        struct Extents
+        {
+            LLVector4a mMin;
+            LLVector4a mMax;
+            bool       mEmpty;
+        };
+        static std::vector<Extents> slots;
+        slots.resize(parts.size());
+        const LLVector4a lo_start(X, X, X);
+        const LLVector4a hi_start(-X, -X, -X);
+        QLJobPool::instance().parallelFor((U32)parts.size(), 1, [&](U32 begin, U32 end)
+        {
+            for (U32 i = begin; i < end; ++i)
+            {
+                Extents& slot = slots[i];
+                slot.mMin = lo_start;
+                slot.mMax = hi_start;
+                slot.mEmpty = parts[i]->addVisibleExtents(camera, slot.mMin, slot.mMax);
+            }
+        });
+
+        LLVector4a lo;
+        LLVector4a hi;
+        lo.load3(min.mV);
+        hi.load3(max.mV);
+        for (const Extents& slot : slots)
+        {
+            if (!slot.mEmpty)
+            {
+                lo.setMin(lo, slot.mMin);
+                hi.setMax(hi, slot.mMax);
+                res = false;
+            }
+        }
+        min.set(lo.getF32ptr());
+        max.set(hi.getF32ptr());
+    }
+    else
     for (LLWorld::region_list_t::const_iterator iter = LLWorld::getInstance()->getRegionList().begin();
             iter != LLWorld::getInstance()->getRegionList().end(); ++iter)
     {
