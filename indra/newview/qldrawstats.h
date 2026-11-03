@@ -37,6 +37,11 @@ struct QLDrawStats
 
     const void* mLastBuffer = nullptr;
 
+    // The last whole frame's counts, kept by clear() for the on-screen status line.
+    U32 mLastDraws          = 0;
+    U32 mLastBufferSwitches = 0;
+    U32 mLastMatrixChanges  = 0;
+
     void noteDraw(const void* buffer)
     {
         ++mDraws;
@@ -47,7 +52,14 @@ struct QLDrawStats
         }
     }
 
-    void clear() { *this = QLDrawStats(); }
+    void clear()
+    {
+        mLastDraws          = mDraws;
+        mLastBufferSwitches = mBufferSwitches;
+        mLastMatrixChanges  = mMatrixChanges;
+        mDraws = mBufferSwitches = mMatrixChanges = 0;
+        mLastBuffer = nullptr;
+    }
 };
 
 extern QLDrawStats gQLDrawStats;

@@ -194,6 +194,7 @@
 #include "llworld.h"
 #include "llworldmapview.h"
 #include "pipeline.h"
+#include "qldrawstats.h"
 #include "llappviewer.h"
 #include "llviewerdisplay.h"
 #include "llspatialpartition.h"
@@ -643,6 +644,12 @@ public:
             static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
             addText(xpos, ypos, llformat("Quasar shadow stagger: level %d | cascades reused this frame: %u of %u",
                                          (S32)shadow_stagger, gPipeline.mShadowCascadesKept, gPipeline.sunCascades()));
+            ypos += y_inc;
+
+            // Quasar: the last frame's batch draws (QLDrawStats), for planning draw batching.
+            addText(xpos, ypos, llformat("Quasar draws: %u | vertex buffer switches: %u | model matrix changes: %u",
+                                         gQLDrawStats.mLastDraws, gQLDrawStats.mLastBufferSwitches,
+                                         gQLDrawStats.mLastMatrixChanges));
             ypos += y_inc;
         }
 
