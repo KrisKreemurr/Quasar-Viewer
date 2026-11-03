@@ -34,7 +34,7 @@ STATUS=0
     # Lower this subshell's own priority; Windows gives every process it starts (cmake, MSBuild, each cl.exe) the same.
     WINPID="$(cat /proc/$BASHPID/winpid 2>/dev/null || true)"
     if [ -n "$WINPID" ]; then
-        powershell.exe -NoProfile -Command "(Get-Process -Id $WINPID).PriorityClass = 'BelowNormal'" >/dev/null 2>&1 \
+        powershell.exe -NoProfile -Command "(Get-Process -Id $WINPID).PriorityClass = 'BelowNormal'" </dev/null >/dev/null 2>&1 \
             || echo "(Could not lower the priority; building at normal priority.)"
     fi
     # /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
