@@ -484,7 +484,7 @@ void LLReflectionMapManager::update()
     // a whole cull, sort and draw of the scene, done one face a frame for as long as the session runs, and in a static
     // scene a refresh changes nothing. A probe still building its first picture is not held back, so reflections come
     // in as fast as before.
-    static LLCachedControl<S32> face_interval(gSavedSettings, "QuasarProbeFaceInterval", 2);
+    static LLCachedControl<S32> face_interval(gSavedSettings, "QuasarProbeFaceInterval", 4);
     const U32 interval = (U32)llclamp((S32)face_interval, 1, 8);
     const bool refresh_turn = interval <= 1 || (LLFrameTimer::getFrameCount() % interval) == 0;
 

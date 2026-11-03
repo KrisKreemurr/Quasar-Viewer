@@ -2584,7 +2584,7 @@
             <key>Type</key>
             <string>S32</string>
             <key>Value</key>
-            <integer>2</integer>
+            <integer>4</integer>
         </map>
         <key>QuasarRiggedPixelAreaThrottle</key>
         <map>
