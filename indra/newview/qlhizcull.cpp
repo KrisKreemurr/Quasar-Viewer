@@ -39,7 +39,7 @@ namespace
     constexpr U32 MIN_READ_LEVEL = 2;
 
     // Reads in flight at once: the frame pacing lets the GPU run up to three frames behind, so a read is collected three
-    // or four frames after it was asked for.
+    // or four frames after it was asked for. ALTextureReadback takes sixteen in all, shared with the textures' reads.
     constexpr U32 READ_SLOTS = 5;
 
     // How far the camera may have moved, in metres, and turned (the cosine of the angle) since the frame a read was
@@ -68,13 +68,10 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
 
-    const EStatus off = !enabled() ? STATUS_OFF
-                      : !LLRender::sCompute ? STATUS_NO_COMPUTE
-                      : !ALGPUReadback::canReadTextureImages() ? STATUS_NO_TEXTURE_READ
-                      : STATUS_ACTIVE;
+    const EStatus off = !enabled() ? STATUS_OFF : !LLRender::sCompute ? STATUS_NO_COMPUTE : STATUS_ACTIVE;
     if (off != STATUS_ACTIVE)
     {
-        if (mPyramid.isAllocated() || mReadback.isAllocated() || mValid)
+        if (mPyramid.isAllocated() || !mPending.empty() || mValid)
         {
             release();
         }
@@ -85,18 +82,21 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
     collect();
 
     // Every read still in flight: building a pyramid now would have nowhere to go.
-    if (mReadback.isAllocated() && mReadback.getPending() >= READ_SLOTS)
+    if (mPending.size() >= READ_SLOTS)
     {
         return;
     }
 
-    if (!mPyramid.build(program, depth))
     {
-        if (!mValid)
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("hiz pyramid");
+        if (!mPyramid.build(program, depth))
         {
-            mStatus = STATUS_NO_PYRAMID;
+            if (!mValid)
+            {
+                mStatus = STATUS_NO_PYRAMID;
+            }
+            return;
         }
-        return;
     }
 
     const LLRenderTarget& target = mPyramid.getTarget();
@@ -109,25 +109,25 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
     const U32 height = llmax(target.getHeight() >> level, 1u);
     const size_t bytes = (size_t)width * height * sizeof(F32);
 
-    if (!mReadback.isAllocated() || bytes > mSlotBytes)
+    ALTextureReadback::Ticket ticket = 0;
     {
-        // A new store drops whatever was in flight in the old one.
-        mPending.clear();
-        mReadback.release();
-        if (!mReadback.allocate(bytes, READ_SLOTS, "quasar.hiz.readback"))
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("hiz request");
+        // The readback reads the texture bound on the active unit, as LLImageGL's readbacks do.
+        ALTextureSlot* slot = gGL.getTextureSlot(0);
+        slot->unbind();
+        if (slot->bindManual(ALTextureSlot::TT_TEXTURE, target.getTexture()))
         {
-            mSlotBytes = 0;
-            return;
+            ticket = gGL.textureReadback().request(GL_TEXTURE_2D, (S32)level, GL_RED, GL_FLOAT, bytes);
         }
-        mSlotBytes = bytes;
+        slot->unbind();
     }
-
-    if (!mReadback.requestTextureImage(target.getTexture(), (S32)level, GL_RED, GL_FLOAT, bytes))
+    if (ticket == 0)
     {
         return;
     }
 
     Frame frame;
+    frame.mTicket      = ticket;
     frame.mModelviewProjection.setMul(modelview, projection);
     frame.mEye         = eye;
     frame.mAtAxis      = at_axis;
@@ -146,21 +146,39 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
 
 void QLHiZCull::collect()
 {
-    while (!mPending.empty() && mReadback.getPending() > 0)
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("hiz collect");
+    // No GL call: the readback learned at the last frame's end which reads have finished.
+    ALTextureReadback& readback = gGL.textureReadback();
+    while (!mPending.empty())
     {
         const Frame& oldest = mPending.front();
         const size_t bytes  = (size_t)oldest.mWidth * oldest.mHeight * sizeof(F32);
-        mScratch.resize(oldest.mWidth * oldest.mHeight);
-        if (!mReadback.collect(mScratch.data(), bytes))
+        mScratch.resize((size_t)oldest.mWidth * oldest.mHeight);
+        const ALTextureReadback::EResult result =
+            readback.collect(oldest.mTicket, reinterpret_cast<U8*>(mScratch.data()), bytes);
+        if (result == ALTextureReadback::PENDING)
         {
             break;
         }
-        mDepth.swap(mScratch);
-        mFrame = oldest;
-        mValid = true;
-        mStatus = STATUS_ACTIVE;
+        if (result == ALTextureReadback::READY)
+        {
+            mDepth.swap(mScratch);
+            mFrame = oldest;
+            mValid = true;
+            mStatus = STATUS_ACTIVE;
+        }
+        // GONE: expired or released, so dropped.
         mPending.pop_front();
     }
+}
+
+void QLHiZCull::cancelPending()
+{
+    for (const Frame& frame : mPending)
+    {
+        gGL.textureReadback().cancel(frame.mTicket);
+    }
+    mPending.clear();
 }
 
 bool QLHiZCull::isHidden(const LLVector4a& center, const LLVector4a& half, const LLVector3& eye,
@@ -266,7 +284,6 @@ const char* QLHiZCull::statusName(EStatus status)
     {
     case STATUS_OFF:             return "off (QuasarRenderHiZCull)";
     case STATUS_NO_COMPUTE:      return "unavailable: no compute shaders";
-    case STATUS_NO_TEXTURE_READ: return "unavailable: no OpenGL 4.5 texture reads";
     case STATUS_NO_PYRAMID:      return "unavailable: depth pyramid did not build";
     case STATUS_WAITING:         return "starting";
     case STATUS_ACTIVE:          return "active";
@@ -277,9 +294,7 @@ const char* QLHiZCull::statusName(EStatus status)
 void QLHiZCull::release()
 {
     mPyramid.release();
-    mReadback.release();
-    mSlotBytes = 0;
-    mPending.clear();
+    cancelPending();
     mDepth.clear();
     mScratch.clear();
     mValid = false;

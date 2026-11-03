@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "lldrawpool.h"
+#include "qldrawstats.h"
 #include "llrender.h"
 #include "llviewercontrol.h"
 
@@ -713,10 +714,13 @@ void LLRenderPass::applyModelMatrix(const LLDrawInfo& params)
     applyModelMatrix(params.mModelMatrix);
 }
 
+QLDrawStats gQLDrawStats;
+
 void LLRenderPass::applyModelMatrix(const LLMatrix4a* model_matrix)
 {
     if (model_matrix != gGLLastMatrix)
     {
+        ++gQLDrawStats.mMatrixChanges;  // Quasar
         gGLLastMatrix = model_matrix;
         gGL.matrixMode(LLRender::MM_MODELVIEW);
         gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
@@ -801,6 +805,7 @@ void LLRenderPass::pushBatch(LLDrawInfo& params, bool texture, bool batch_textur
         }
     }
 
+    gQLDrawStats.noteDraw(params.mVertexBuffer.get());  // Quasar
     params.mVertexBuffer->setBuffer();
     params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
 
@@ -823,6 +828,7 @@ void LLRenderPass::pushUntexturedBatch(LLDrawInfo& params)
 
     applyModelMatrix(params);
 
+    gQLDrawStats.noteDraw(params.mVertexBuffer.get());  // Quasar
     params.mVertexBuffer->setBuffer();
     params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
 }

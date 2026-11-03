@@ -120,6 +120,7 @@
 #include "llworld.h"
 #include "llcubemap.h"
 #include "llviewershadermgr.h"
+#include "qldrawstats.h"
 #include "llviewerstats.h"
 #include "llviewerjoystick.h"
 #include "llviewerdisplay.h"
@@ -5159,6 +5160,11 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             LL_PROFILE_PLOT("transient target MB", (int64_t)(mTransientTargets.lastFrame().mBytes >> 20));
             LL_PROFILE_PLOT("transient target hits", (int64_t)mTransientTargets.lastFrame().mHits);
             LL_PROFILE_PLOT("transient target misses", (int64_t)mTransientTargets.lastFrame().mMisses);
+            // Quasar: the last frame's batch draws, for planning draw batching (QLDrawStats).
+            LL_PROFILE_PLOT("quasar batch draws", (int64_t)gQLDrawStats.mDraws);
+            LL_PROFILE_PLOT("quasar vertex buffer switches", (int64_t)gQLDrawStats.mBufferSwitches);
+            LL_PROFILE_PLOT("quasar model matrix changes", (int64_t)gQLDrawStats.mMatrixChanges);
+            gQLDrawStats.clear();
         }
     }
 

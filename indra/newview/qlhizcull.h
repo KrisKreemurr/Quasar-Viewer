@@ -24,7 +24,7 @@
 #pragma once
 
 #include "aldepthpyramid.h"
-#include "algpubuffer.h"
+#include "altexturereadback.h"
 #include "llmatrix4a.h"
 #include "v3math.h"
 
@@ -37,8 +37,10 @@ class LLRenderTarget;
 /// Hierarchical-Z occlusion culling for objects and avatars (QuasarRenderHiZCull).
 ///
 /// After the main view's G-buffer is drawn, capture() builds a depth pyramid of its own (ALDepthPyramid, by compute)
-/// and reads one coarse level of it back to the CPU without waiting (ALGPUReadback). A few frames later, once the GPU
-/// has finished it, the level arrives with the view and projection it was drawn with. The cull then asks isHidden() of
+/// and reads one coarse level of it back to the CPU without waiting (the renderer's ALTextureReadback, which, unlike an
+/// ALGPUReadback, polls its fences only at the frame's end: a poll in the middle of a frame on NVIDIA's threaded driver
+/// waits for the driver's thread to run everything queued before it, which cost this almost 2 ms a frame). A few frames
+/// later, once the GPU has finished it, the level arrives with the view and projection it was drawn with. The cull then asks isHidden() of
 /// each octree group's box before walking into it: a box whose nearest point lies behind the farthest depth under all
 /// the pixels it would cover was hidden in that frame, and is skipped with everything below it.
 ///
@@ -55,7 +57,7 @@ public:
 
     /// Collects any finished read, then builds a pyramid from `depth` (the main view's G-buffer, final for opaque
     /// geometry and bound) and reads its coarse level back, with the modelview and projection the view was drawn with.
-    /// Does nothing where the setting is off, without compute or direct state access, or while every read is pending.
+    /// Does nothing where the setting is off, without compute, or while every read is pending.
     void capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMatrix4a& modelview, const LLMatrix4a& projection,
                  const LLVector3& eye, const LLVector3& at_axis, bool reverse_z);
 
@@ -78,7 +80,6 @@ public:
     {
         STATUS_OFF,             // QuasarRenderHiZCull is off
         STATUS_NO_COMPUTE,      // the session does not compute
-        STATUS_NO_TEXTURE_READ, // no glGetTextureImage (GL 4.5 direct state access)
         STATUS_NO_PYRAMID,      // the pyramid did not build: its program is missing, or the target is another size
         STATUS_WAITING,         // reads are in flight, none collected yet
         STATUS_ACTIVE,          // a read is held and the cull uses it
@@ -102,9 +103,10 @@ public:
     }
 
 private:
-    // What one read was taken of.
+    // What one read was taken of, and the read.
     struct Frame
     {
+        ALTextureReadback::Ticket mTicket = 0;
         LLMatrix4a mModelviewProjection;
         LLVector3  mEye;
         LLVector3  mAtAxis;
@@ -119,10 +121,11 @@ private:
     /// Collects the newest finished read into mDepth and mFrame.
     void collect();
 
+    /// Gives up every read in flight.
+    void cancelPending();
+
     ALDepthPyramid     mPyramid;
-    ALGPUReadback      mReadback;
-    size_t             mSlotBytes = 0;
-    std::deque<Frame>  mPending;  // what each read in flight was taken of, oldest first
+    std::deque<Frame>  mPending;  // each read in flight and what it was taken of, oldest first
 
     Frame              mFrame;    // what mDepth was taken of
     std::vector<F32>   mDepth;    // the level read, row by row from the bottom

@@ -546,35 +546,6 @@ bool ALGPUReadback::requestPixels(S32 x, S32 y, S32 width, S32 height, U32 forma
     return true;
 }
 
-// static
-bool ALGPUReadback::canReadTextureImages()
-{
-    return gGLManager.mHasDirectStateAccess && glGetTextureImage != nullptr;
-}
-
-bool ALGPUReadback::requestTextureImage(U32 texture, S32 level, U32 format, U32 type, size_t bytes)
-{
-    if (!mStore.isAllocated() || texture == 0 || level < 0 || bytes == 0 || bytes > mSlotBytes)
-    {
-        llassert(false);
-        return false;
-    }
-    if (!canReadTextureImages() || mPending == (U32)mSlots.size())
-    {
-        return false;
-    }
-
-    // As requestPixels: through the pack buffer binding, at the slot's offset in place of a pointer. The texture is
-    // named, so no unit's binding is touched.
-    const uintptr_t offset = (uintptr_t)mNext * mSlotStride;
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, mStore.getGLName());
-    glGetTextureImage(texture, level, format, type, (GLsizei)bytes, reinterpret_cast<void*>(offset));
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    issueNext(bytes);
-    return true;
-}
-
 U32 ALGPUReadback::getFences() const
 {
     U32 fences = 0;

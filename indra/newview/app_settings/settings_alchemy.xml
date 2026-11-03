@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarRiggedPixelAreaThrottle</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: measure the on-screen size of rigged mesh (bodies, clothes, hair) less often for avatars that are far away or drawn as impostors: once a second for impostors, slowing from ten to about two and a half times a second between 8 and 32 metres. It only steers texture priority and detail level. Your own avatar is always measured at the full rate.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarRenderShadowStagger</key>
         <map>
             <key>Comment</key>
@@ -2600,7 +2611,7 @@
         <key>QuasarRenderHiZCull</key>
         <map>
             <key>Comment</key>
-            <string>Quasar: skip drawing objects and avatars hidden behind walls and terrain, judged on the CPU from a depth pyramid of the main view read back a few frames late. Stands down while the camera moves or turns quickly. Needs compute (OpenGL 4.3) and direct state access (OpenGL 4.5).</string>
+            <string>Quasar: skip drawing objects and avatars hidden behind walls and terrain, judged on the CPU from a depth pyramid of the main view read back a few frames late. Stands down while the camera moves or turns quickly. Needs compute (OpenGL 4.3).</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>

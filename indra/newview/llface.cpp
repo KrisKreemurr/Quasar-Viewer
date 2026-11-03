@@ -2003,6 +2003,28 @@ F32 LLFace::getTextureVirtualSize()
     return face_area;
 }
 
+namespace
+{
+    // Quasar: how long a rigged face's pixel area may stand before it is worked out again (QuasarRiggedPixelAreaThrottle).
+    // Working it out means taking the face's box through every joint it is rigged to, and a crowd has thousands of
+    // rigged faces. The area only steers texture priority and LOD, so an avatar drawn as an impostor, or far off, is
+    // measured less often: once a second as an impostor, and otherwise every tenth of a second out to 8 m, slowing to
+    // every four tenths by 32 m. Your own avatar always every tenth.
+    F32 rigged_pixel_area_period(LLVOAvatar* avatar, F32 base)
+    {
+        static LLCachedControl<bool> throttle(gSavedSettings, "QuasarRiggedPixelAreaThrottle", true);
+        if (!throttle || !avatar || avatar->isSelf() || avatar->mDrawable.isNull())
+        {
+            return base;
+        }
+        if (avatar->isImpostor())
+        {
+            return 1.f;
+        }
+        return base * llclamp(avatar->mDrawable->mDistanceWRTCamera / 8.f, 1.f, 4.f);
+    }
+}
+
 bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
 {
     constexpr F32 PIXEL_AREA_UPDATE_PERIOD = 0.1f;
@@ -2138,6 +2160,19 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
 
     // remember last update time, add 10% noise to avoid all faces updating at the same time
     mLastPixelAreaUpdate = gFrameTimeSeconds + ll_frand() * PIXEL_AREA_UPDATE_PERIOD * 0.1f;
+
+    // Quasar: a rigged face of an avatar far off or drawn as an impostor waits longer for its next update. The wait is
+    // folded into the time stamped, so the check at the top, which runs far more often than this, stays as it was.
+    if (isState(LLFace::RIGGED))
+    {
+        LLVOAvatar* avatar = mVObjp.notNull() ? mVObjp->getAvatar() : nullptr;
+        const F32 period = rigged_pixel_area_period(avatar, PIXEL_AREA_UPDATE_PERIOD);
+        if (period > PIXEL_AREA_UPDATE_PERIOD)
+        {
+            // Spread over the whole wait, so a crowd's faces do not come due together.
+            mLastPixelAreaUpdate += (period - PIXEL_AREA_UPDATE_PERIOD) * (0.9f + 0.2f * ll_frand());
+        }
+    }
 
     LLVector4a x_axis;
     x_axis.load3(camera->getXAxis().mV);

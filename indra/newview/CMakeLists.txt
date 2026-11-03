@@ -1134,6 +1134,7 @@ if(AL_BUILD_VIEWER)
     alsky.h
     alterrainsurfacemaps.h
     alwatersurface.h
+    qldrawstats.h
     qlhizcull.h
     altextureboost.h
     altexturetable.h
