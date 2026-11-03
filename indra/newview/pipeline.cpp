@@ -14066,7 +14066,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
 
         // Quasar: how far apart the far cascades are drawn (QuasarRenderShadowStagger): 0 every frame, 1 the two far
         // ones on alternate frames, 2 the second every other frame and the far two every fourth.
-        static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 1);
+        static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
         const S32 stagger_level = llclamp((S32)shadow_stagger, 0, 2);
         if (mRT == &mMainRT && !gCubeSnapshot)
         {
