@@ -2575,6 +2575,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarShowHiZInfo</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: show a status line for the Hi-Z object cull (QuasarRenderHiZCull): whether it is running, and how many chunks of the world it skipped last frame.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarRenderHiZCull</key>
         <map>
             <key>Comment</key>

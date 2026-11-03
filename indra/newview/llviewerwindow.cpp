@@ -621,6 +621,25 @@ public:
             ypos += y_inc;
         }*/
 
+        // Quasar: what the Hi-Z object cull is doing (QLHiZCull).
+        static LLCachedControl<bool> show_hiz_info(gSavedSettings, "QuasarShowHiZInfo", true);
+        if (show_hiz_info())
+        {
+            const QLHiZCull& hiz = gPipeline.mHiZCull;
+            addText(xpos, ypos, llformat("Quasar Hi-Z cull: %s | occlusion level %d", QLHiZCull::statusName(hiz.getStatus()),
+                                         LLPipeline::sUseOcclusion));
+            ypos += y_inc;
+            if (hiz.getStatus() == QLHiZCull::STATUS_ACTIVE)
+            {
+                const U32 tested = hiz.getTestedLastFrame();
+                const U32 culled = hiz.getCulledLastFrame();
+                addText(xpos, ypos, llformat("    skipped %u of %u chunks (%.0f%%)%s", culled, tested,
+                                             tested ? 100.f * (F32)culled / (F32)tested : 0.f,
+                                             hiz.getMovingLastFrame() ? " | paused: camera moving" : ""));
+                ypos += y_inc;
+            }
+        }
+
         static LLCachedControl<bool> debug_show_render_info(gSavedSettings, "DebugShowRenderInfo", false);
         if (debug_show_render_info())
         {

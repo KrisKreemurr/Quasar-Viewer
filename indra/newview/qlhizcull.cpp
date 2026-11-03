@@ -68,12 +68,17 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
 
-    if (!enabled() || !LLRender::sCompute || !ALGPUReadback::canReadTextureImages())
+    const EStatus off = !enabled() ? STATUS_OFF
+                      : !LLRender::sCompute ? STATUS_NO_COMPUTE
+                      : !ALGPUReadback::canReadTextureImages() ? STATUS_NO_TEXTURE_READ
+                      : STATUS_ACTIVE;
+    if (off != STATUS_ACTIVE)
     {
-        if (mPyramid.isAllocated() || mReadback.isAllocated())
+        if (mPyramid.isAllocated() || mReadback.isAllocated() || mValid)
         {
             release();
         }
+        mStatus = off;
         return;
     }
 
@@ -87,6 +92,10 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
 
     if (!mPyramid.build(program, depth))
     {
+        if (!mValid)
+        {
+            mStatus = STATUS_NO_PYRAMID;
+        }
         return;
     }
 
@@ -129,6 +138,10 @@ void QLHiZCull::capture(LLGLSLShader& program, LLRenderTarget& depth, const LLMa
     frame.mShift       = level + 1;
     frame.mReverseZ    = reverse_z;
     mPending.push_back(frame);
+    if (!mValid)
+    {
+        mStatus = STATUS_WAITING;
+    }
 }
 
 void QLHiZCull::collect()
@@ -145,6 +158,7 @@ void QLHiZCull::collect()
         mDepth.swap(mScratch);
         mFrame = oldest;
         mValid = true;
+        mStatus = STATUS_ACTIVE;
         mPending.pop_front();
     }
 }
@@ -156,10 +170,12 @@ bool QLHiZCull::isHidden(const LLVector4a& center, const LLVector4a& half, const
     {
         return false;
     }
+    ++mTestedThisFrame;
 
     // Too far from the frame the read was taken of to trust it.
     if ((eye - mFrame.mEye).lengthSquared() > MAX_EYE_MOVE * MAX_EYE_MOVE || (at_axis * mFrame.mAtAxis) < MIN_AT_COSINE)
     {
+        mMovingThisFrame = true;
         return false;
     }
 
@@ -243,6 +259,21 @@ bool QLHiZCull::isHidden(const LLVector4a& center, const LLVector4a& half, const
     return mFrame.mReverseZ ? (nearest < farthest) : (nearest > farthest);
 }
 
+// static
+const char* QLHiZCull::statusName(EStatus status)
+{
+    switch (status)
+    {
+    case STATUS_OFF:             return "off (QuasarRenderHiZCull)";
+    case STATUS_NO_COMPUTE:      return "unavailable: no compute shaders";
+    case STATUS_NO_TEXTURE_READ: return "unavailable: no OpenGL 4.5 texture reads";
+    case STATUS_NO_PYRAMID:      return "unavailable: depth pyramid did not build";
+    case STATUS_WAITING:         return "starting";
+    case STATUS_ACTIVE:          return "active";
+    }
+    return "unknown";
+}
+
 void QLHiZCull::release()
 {
     mPyramid.release();
@@ -252,4 +283,5 @@ void QLHiZCull::release()
     mDepth.clear();
     mScratch.clear();
     mValid = false;
+    mStatus = STATUS_OFF;
 }

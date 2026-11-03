@@ -73,10 +73,33 @@ public:
     /// Whether a read is held to cull against.
     bool isValid() const { return mValid; }
 
-    /// The groups the last cull skipped, for the debug console.
-    U32 getCulledLastFrame() const { return mCulledLastFrame; }
+    /// What the cull is doing, for the on-screen status line (QuasarShowHiZInfo).
+    enum EStatus
+    {
+        STATUS_OFF,             // QuasarRenderHiZCull is off
+        STATUS_NO_COMPUTE,      // the session does not compute
+        STATUS_NO_TEXTURE_READ, // no glGetTextureImage (GL 4.5 direct state access)
+        STATUS_NO_PYRAMID,      // the pyramid did not build: its program is missing, or the target is another size
+        STATUS_WAITING,         // reads are in flight, none collected yet
+        STATUS_ACTIVE,          // a read is held and the cull uses it
+    };
+    EStatus getStatus() const { return mStatus; }
+    static const char* statusName(EStatus status);
+
+    /// The groups the last main-view cull asked about and skipped, and whether it stood down for the camera's motion.
+    U32  getTestedLastFrame() const { return mTestedLastFrame; }
+    U32  getCulledLastFrame() const { return mCulledLastFrame; }
+    bool getMovingLastFrame() const { return mMovingLastFrame; }
     void noteCulled() const { ++mCulledThisFrame; }
-    void endCull() const { mCulledLastFrame = mCulledThisFrame; mCulledThisFrame = 0; }
+    void endCull() const
+    {
+        mTestedLastFrame = mTestedThisFrame;
+        mCulledLastFrame = mCulledThisFrame;
+        mMovingLastFrame = mMovingThisFrame;
+        mTestedThisFrame = 0;
+        mCulledThisFrame = 0;
+        mMovingThisFrame = false;
+    }
 
 private:
     // What one read was taken of.
@@ -106,6 +129,12 @@ private:
     std::vector<F32>   mScratch;
     bool               mValid = false;
 
+    EStatus            mStatus = STATUS_OFF;
+
+    mutable U32        mTestedThisFrame = 0;
+    mutable U32        mTestedLastFrame = 0;
     mutable U32        mCulledThisFrame = 0;
     mutable U32        mCulledLastFrame = 0;
+    mutable bool       mMovingThisFrame = false;
+    mutable bool       mMovingLastFrame = false;
 };
