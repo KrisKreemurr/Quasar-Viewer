@@ -2589,9 +2589,9 @@
         <key>QuasarVertexAttribBinding</key>
         <map>
             <key>Comment</key>
-            <string>Quasar (experimental): when a draw switches to another vertex buffer under the same attributes, bind the new buffer under the attribute formats already given (OpenGL 4.4) rather than giving every attribute's pointer again. Fewer driver calls per draw. Applies from the next frame.</string>
+            <string>Quasar (experimental): when a draw switches to another vertex buffer under the same attributes, bind the new buffer under the attribute formats already given (OpenGL 4.4) rather than giving every attribute's pointer again. Fewer driver calls per draw. Applies from the next frame. Not kept across restarts while experimental, so a restart always turns it off.</string>
             <key>Persist</key>
-            <integer>1</integer>
+            <integer>0</integer>
             <key>Type</key>
             <string>Boolean</string>
             <key>Value</key>
