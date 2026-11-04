@@ -643,32 +643,39 @@ public:
 
             // Quasar: the staggered sun shadow cascades (QuasarRenderShadowStagger).
             static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
-            addText(xpos, ypos, llformat("Quasar shadow stagger: level %d | cascades reused this frame: %u of %u",
+            addText(xpos, ypos, llformat("Quasar shadows: stagger %d | reused %u/%u",
                                          (S32)shadow_stagger, gPipeline.mShadowCascadesKept, gPipeline.sunCascades()));
             ypos += y_inc;
 
             // Quasar: the last frame's batch draws (QLDrawStats), for planning draw batching.
-            addText(xpos, ypos, llformat("Quasar draws: %u | vertex buffer switches: %u | model matrix changes: %u",
+            addText(xpos, ypos, llformat("Quasar draws %u | buffer switches %u | matrix %u",
                                          gQLDrawStats.mLastDraws, gQLDrawStats.mLastBufferSwitches,
                                          gQLDrawStats.mLastMatrixChanges));
             ypos += y_inc;
-            addText(xpos, ypos, llformat("Quasar cull+sort ms: world %.2f | sun shadow %.2f | spot shadows %.2f | probes %.2f | other %.2f",
+            addText(xpos, ypos, llformat("Quasar cull ms: world %.2f | sun %.2f | spot %.2f | probe %.2f | other %.2f",
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_WORLD],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SHADOW],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SPOT],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_PROBE],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_OTHER]));
             ypos += y_inc;
-            addText(xpos, ypos, llformat("Quasar buffer setups: %u fast | %u full (QuasarVertexAttribBinding %s)",
+            addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
-                                         LLVertexBuffer::sUseAttribBinding ? "on" : "off"));
+                                         LLVertexBuffer::sUseAttribBinding ? "" : " (fast path off)"));
             ypos += y_inc;
             {
                 const QLFrameWarp& warp = QLFrameWarp::instance();
                 static const char* const warp_status[] = { "off", "no program", "waiting", "active", "base fps above limit" };
-                addText(xpos, ypos, llformat("Quasar frame gen: %s, %s | %u generated/s | base frame %.1f ms | warp %.2f ms | %u avatars moved",
-                                             warp_status[warp.status()], warp.twoFrames() ? "from two frames" : "from one frame",
-                                             warp.lastGenerated(), warp.baseIntervalMs(), warp.lastWarpMs(), warp.lastAvatars()));
+                if (warp.status() == QLFrameWarp::OFF)
+                {
+                    addText(xpos, ypos, "Quasar frame gen: off");
+                }
+                else
+                {
+                    addText(xpos, ypos, llformat("Quasar frame gen: %s, %s | %u/s | base %.1f ms | warp %.2f ms",
+                                                 warp_status[warp.status()], warp.twoFrames() ? "two" : "one",
+                                                 warp.lastGenerated(), warp.baseIntervalMs(), warp.lastWarpMs()));
+                }
                 ypos += y_inc;
             }
         }

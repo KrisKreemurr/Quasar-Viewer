@@ -2751,6 +2751,17 @@
             <key>Value</key>
             <integer>2</integer>
         </map>
+        <key>QuasarProbeStars</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: draw the stars into reflection probes' faces too. Off: a probe face is too coarse to show them, and the main view, mirrors and water still draw them.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarShadowUnionToDrawn</key>
         <map>
             <key>Comment</key>

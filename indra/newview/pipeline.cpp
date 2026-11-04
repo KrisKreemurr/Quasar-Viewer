@@ -4359,6 +4359,8 @@ void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
     //LLVertexBuffer::unbind();
 
     grabReferences(result);
+    {
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("stateSort drawable groups");
     for (LLCullResult::sg_iterator iter = sCull->beginDrawableGroups(); iter != sCull->endDrawableGroups(); ++iter)
     {
         LLSpatialGroup* group = *iter;
@@ -4385,9 +4387,11 @@ void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
             }
         }
     }
+    }
 
     if (LLViewerCamera::sCurCameraID == LLViewerCamera::CAMERA_WORLD && !gCubeSnapshot)
     {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("stateSort bridges");
         LLSpatialGroup* last_group = NULL;
         bool fov_changed = LLViewerCamera::getInstance()->isDefaultFOVChanged();
         for (LLCullResult::bridge_iterator i = sCull->beginVisibleBridge(); i != sCull->endVisibleBridge(); ++i)
@@ -4422,6 +4426,8 @@ void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
         }
     }
 
+    {
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("stateSort visible groups");
     for (LLCullResult::sg_iterator iter = sCull->beginVisibleGroups(); iter != sCull->endVisibleGroups(); ++iter)
     {
         LLSpatialGroup* group = *iter;
@@ -4443,6 +4449,7 @@ void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
                 group->rebuildMesh();
             }
         }
+    }
     }
 
     {
@@ -4831,6 +4838,7 @@ void LLPipeline::postSort(LLCamera &camera)
 
     if (!gCubeSnapshot)
     {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("postSort rebuild");
         // rebuild drawable geometry
         for (LLCullResult::sg_iterator i = sCull->beginDrawableGroups(); i != sCull->endDrawableGroups(); ++i)
         {
@@ -4851,6 +4859,8 @@ void LLPipeline::postSort(LLCamera &camera)
     }
 
     // build render map
+    {
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("postSort render map");
     for (LLCullResult::sg_iterator i = sCull->beginVisibleGroups(); i != sCull->endVisibleGroups(); ++i)
     {
         LLSpatialGroup *group = *i;
@@ -4929,6 +4939,7 @@ void LLPipeline::postSort(LLCamera &camera)
             }
         }
     }
+    }
 
     // pack vertex buffers for groups that chose to delay their updates
     {
@@ -4947,6 +4958,7 @@ void LLPipeline::postSort(LLCamera &camera)
     // visor, a skirt over stockings) blending in octree order instead of back-to-front.
     if (!sShadowRender || sImpostorRender)
     {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("postSort alpha order");
         // order alpha groups by distance
         std::sort(sCull->beginAlphaGroups(), sCull->endAlphaGroups(), LLSpatialGroup::CompareDepthGreater());
 

@@ -432,6 +432,8 @@ void ALSky::drawStarPoints(const ALStarField::Frustum& frustum, U32 faintest)
     }
     if (!mStarDraws.mFirst.empty())
     {
+        LL_PROFILE_ZONE_NAMED("sky stars draw");
+        LL_PROFILE_ZONE_NUM((int64_t)mStarDraws.mFirst.size());
         mStarsVerts->setBuffer();
         mStarsVerts->drawMultiArrays(LLRender::POINTS, mStarDraws.mFirst.data(), mStarDraws.mCount.data(),
                                      (U32)mStarDraws.mFirst.size());
@@ -490,6 +492,14 @@ void ALSky::renderStars()
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
 
     if (!(mViewLayers & ALSkyLayers::STARS) || !buildStars())
+    {
+        return;
+    }
+
+    // Quasar: a reflection probe's faces take the stars at a cube face's resolution, where the faintest are gone and the
+    // brightest a pixel or two; the main view, mirrors and the water draw them as ever (QuasarProbeStars).
+    static LLCachedControl<bool> probe_stars(gSavedSettings, "QuasarProbeStars", false);
+    if (mView.mProbe && !mView.mMirror && !probe_stars())
     {
         return;
     }
@@ -615,15 +625,21 @@ void ALSky::renderStars()
 
     // The stars add into one attachment of the G-buffer, the emissive with the emissive buffer and the albedo without
     // it (starsF.glsl), and leave the rest unread and unwritten.
-    gbuffer->setDrawAttachment(attachment);
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_DRAWPOOL("sky stars attachment");
+        gbuffer->setDrawAttachment(attachment);
+    }
 
     {
         LL_PROFILE_GPU_ZONE("sky stars");
 
         // The spiked stars, few and bright, as quads (ALStarField::SPIKE_INTENSITY).
-        bind_stars(gDeferredStarQuadProgram);
-        drawStarQuads(faintest);
-        unbind_stars(gDeferredStarQuadProgram);
+        {
+            LL_PROFILE_ZONE_NAMED_CATEGORY_DRAWPOOL("sky stars quads");
+            bind_stars(gDeferredStarQuadProgram);
+            drawStarQuads(faintest);
+            unbind_stars(gDeferredStarQuadProgram);
+        }
 
         // Every other star as a point, sized by its vertex shader, from the cells the view takes in: its frustum in
         // the stars' frame, through the matrices that draw them.
@@ -632,13 +648,17 @@ void ALSky::renderStars()
         const ALStarField::Frustum frustum =
             ALStarField::pointFrustum(mvp, LLRenderTarget::sCurResX, LLRenderTarget::sCurResY);
 
+        LL_PROFILE_ZONE_NAMED_CATEGORY_DRAWPOOL("sky stars points");
         LLGLEnable point_size(GL_PROGRAM_POINT_SIZE);
         bind_stars(gDeferredStarProgram);
         drawStarPoints(frustum, faintest);
         unbind_stars(gDeferredStarProgram);
     }
 
-    gbuffer->setDrawBuffers();
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_DRAWPOOL("sky stars restore");
+        gbuffer->setDrawBuffers();
+    }
 
     gGL.popMatrix();
     gGL.setSceneBlendType(LLRender::BT_ALPHA);
