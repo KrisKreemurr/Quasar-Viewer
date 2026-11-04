@@ -661,6 +661,13 @@ public:
                                              gQLDrawStats.mLastMergeSorted, gQLDrawStats.mLastMergeSortedNoMatrix));
                 ypos += y_inc;
             }
+            addText(xpos, ypos, llformat("Quasar draws by view: %u %u %u %u %u",
+                                         gQLDrawStats.mLastViewDraws[QLDrawStats::VIEW_WORLD],
+                                         gQLDrawStats.mLastViewDraws[QLDrawStats::VIEW_SHADOW],
+                                         gQLDrawStats.mLastViewDraws[QLDrawStats::VIEW_SPOT],
+                                         gQLDrawStats.mLastViewDraws[QLDrawStats::VIEW_PROBE],
+                                         gQLDrawStats.mLastViewDraws[QLDrawStats::VIEW_OTHER]));
+            ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar cull: %.2f %.2f %.2f %.2f %.2f",
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_WORLD],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SHADOW],

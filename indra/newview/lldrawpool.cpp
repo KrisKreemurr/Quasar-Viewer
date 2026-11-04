@@ -805,7 +805,7 @@ void LLRenderPass::pushBatch(LLDrawInfo& params, bool texture, bool batch_textur
         }
     }
 
-    gQLDrawStats.noteDraw(params.mVertexBuffer.get());  // Quasar
+    gQLDrawStats.noteDraw(params.mVertexBuffer.get(), ql_cull_view());  // Quasar
     params.mVertexBuffer->setBuffer();
     params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
 
@@ -828,7 +828,7 @@ void LLRenderPass::pushUntexturedBatch(LLDrawInfo& params)
 
     applyModelMatrix(params);
 
-    gQLDrawStats.noteDraw(params.mVertexBuffer.get());  // Quasar
+    gQLDrawStats.noteDraw(params.mVertexBuffer.get(), ql_cull_view());  // Quasar
     params.mVertexBuffer->setBuffer();
     params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
 }

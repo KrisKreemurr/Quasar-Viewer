@@ -69,9 +69,14 @@ struct QLDrawStats
     U32 mLastMergeSorted       = 0;
     U32 mLastMergeSortedNoMatrix = 0;
 
-    void noteDraw(const void* buffer)
+    // Batch draws by the kind of view they were drawn for (the same kinds as mCullMs).
+    U32 mViewDraws[NUM_VIEWS]     = {};
+    U32 mLastViewDraws[NUM_VIEWS] = {};
+
+    void noteDraw(const void* buffer, U32 view)
     {
         ++mDraws;
+        ++mViewDraws[view];
         if (buffer != mLastBuffer)
         {
             ++mBufferSwitches;
@@ -95,6 +100,8 @@ struct QLDrawStats
         {
             mLastCullMs[i] = mCullMs[i];
             mCullMs[i] = 0.f;
+            mLastViewDraws[i] = mViewDraws[i];
+            mViewDraws[i] = 0;
         }
     }
 };
@@ -117,3 +124,6 @@ private:
 };
 
 extern QLDrawStats gQLDrawStats;
+
+/// Which kind of view the cull, sort or draw under way is for (QLDrawStats::EView); defined in pipeline.cpp.
+U32 ql_cull_view();

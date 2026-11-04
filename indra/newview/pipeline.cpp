@@ -3557,8 +3557,8 @@ void LLPipeline::updateReverseZ(bool reverse_z)
     }
 }
 
-// Quasar: which kind of view the cull or sort under way is for (QLDrawStats::mCullMs).
-static U32 ql_cull_view()
+// Quasar: which kind of view the cull, sort or draw under way is for (QLDrawStats).
+U32 ql_cull_view()
 {
     if (gCubeSnapshot)
     {
