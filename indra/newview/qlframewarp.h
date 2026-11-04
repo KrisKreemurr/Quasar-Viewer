@@ -106,6 +106,11 @@ private:
     LLMatrix4a   mViewProjection;
     LLVector3    mOrigin;
     LLQuaternion mRotation;
+    // The next frame's camera, taken once the idle step has moved it and before the frame's display can move the
+    // main camera about for its own passes (the mirrors, the probes), as the next frame will be drawn with it.
+    LLVector3    mNextOrigin;
+    LLQuaternion mNextRotation;
+    bool         mNextKept = false;
     U64          mDepthSerial = 0;  // the G-buffer depth's build the kept frame was drawn into
     U32          mDepthWidth  = 0;
     U32          mDepthHeight = 0;

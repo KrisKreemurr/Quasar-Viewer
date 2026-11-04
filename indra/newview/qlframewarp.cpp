@@ -232,6 +232,7 @@ void QLFrameWarp::noteRealSwap(bool presented)
     }
     mShown = false;
     mWorldKept = false;
+    mNextKept = false;
 
     if (now - mCountStart >= 1.0)
     {
@@ -243,6 +244,16 @@ void QLFrameWarp::noteRealSwap(bool presented)
 
 void QLFrameWarp::between(bool last)
 {
+    // The first point is straight after the idle step, before anything in the next frame's display can have moved
+    // the main camera about; the camera there is the one the next frame is drawn with.
+    if (!mNextKept)
+    {
+        const LLViewerCamera* camera = LLViewerCamera::getInstance();
+        mNextOrigin = camera->getOrigin();
+        mNextRotation = camera->getQuaternion();
+        mNextKept = true;
+    }
+
     if (!mValid || mShown)
     {
         return;
@@ -284,8 +295,7 @@ void QLFrameWarp::between(bool last)
         return;
     }
 
-    const LLViewerCamera* camera = LLViewerCamera::getInstance();
-    if ((camera->getOrigin() - mOrigin).length() > MAX_EYE_JUMP)
+    if ((mNextOrigin - mOrigin).length() > MAX_EYE_JUMP)
     {
         mValid = false;
         return;
@@ -312,9 +322,9 @@ void QLFrameWarp::present(F32 alpha)
     // projection, which the depth was stored with.
     const LLViewerCamera* camera = LLViewerCamera::getInstance();
     LLCamera mid = *camera;
-    const LLVector3 next_origin = camera->getOrigin();
+    const LLVector3 next_origin = mNextOrigin;
     mid.setOrigin(mOrigin + (next_origin - mOrigin) * alpha);
-    mid.setAxes(slerp(alpha, mRotation, camera->getQuaternion()));
+    mid.setAxes(slerp(alpha, mRotation, mNextRotation));
 
     LLMatrix4a mid_view_projection;
     mid_view_projection.setMul(mid.frameModelview(), mProjection);
