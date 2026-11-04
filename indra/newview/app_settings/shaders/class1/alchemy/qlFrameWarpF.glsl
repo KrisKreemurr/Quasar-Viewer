@@ -330,11 +330,18 @@ void main()
     {
         // Both saw a surface here. The same surface, each a little off: the nearer frame in time counts for more.
         // Different surfaces: the nearer hides the farther, which the other frame saw past an edge.
+        // The same surface, each a little off, and alike in colour: the nearer frame in time counts for more. Two
+        // colours far apart there mean one of the frames found the wrong thing (a see-through surface holds the depth
+        // of what is behind it): blended, both would show, a double image, so the newer is taken alone.
         float closest = min(dist_a, dist_b);
+        vec4 col_a = source_world(0, src_a);
+        vec4 col_b = source_world(1, src_b);
+        vec3 apart = abs(col_a.rgb - col_b.rgb);
+        bool alike = max(max(apart.r, apart.g), apart.b) < 0.12;
         if (abs(dist_a - dist_b) <= closest * 0.03 + 0.02)
         {
-            frag_color = mix(source_world(0, src_a), source_world(1, src_b), qlWarpAlpha);
-            blended = true;
+            frag_color = alike ? mix(col_a, col_b, qlWarpAlpha) : col_b;
+            blended = alike;
             rule = max(rule_a, rule_b);
         }
         else if (dist_a < dist_b)

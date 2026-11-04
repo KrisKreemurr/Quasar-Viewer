@@ -64,6 +64,12 @@ namespace
     // A box this much larger than the avatar's on every side takes in the edge of what it wears, and little floor.
     constexpr F32 AVATAR_BOX_PAD = 0.05f;
 
+    // A box from an avatar's skeleton reaches this far past its joints: sideways to the skin and close clothes, up
+    // past the skull to the top of the hair, and down past the ankles to just above the floor.
+    constexpr F32 AVATAR_BODY_PAD = 0.22f;
+    constexpr F32 AVATAR_HAIR_PAD = 0.18f;
+    constexpr F32 AVATAR_FEET_PAD = 0.05f;
+
     // An avatar that moved further than this between two frames jumped (a teleport, a sit): it is left where it was.
     constexpr F32 MAX_AVATAR_JUMP = 4.f;
 
@@ -254,14 +260,50 @@ void QLFrameWarp::keepAvatars(Kept& kept)
         {
             continue;
         }
-        const LLVector4a* extents = avatar->mDrawable->getSpatialExtents();
         KeptAvatar one;
         one.mID = character->getID();
         one.mPosition = position;
-        one.mMin.set(extents[0].getF32ptr());
-        one.mMax.set(extents[1].getF32ptr());
-        one.mMin -= LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
-        one.mMax += LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        if (!avatar->isImpostor() && avatar->mPelvisp && avatar->mHeadp && avatar->mFootLeftp && avatar->mFootRightp)
+        {
+            // The box the body is in, from its skeleton. The drawable's extents take in the bounds of everything it
+            // wears, often metres wider than the body, and the floor under it: floor and wall inside them rode along
+            // with the avatar, and the hair rule held the world behind it as the avatar.
+            LLJoint* joints[] = { avatar->mPelvisp, avatar->mChestp, avatar->mNeckp, avatar->mHeadp, avatar->mSkullp,
+                                  avatar->mFootLeftp, avatar->mFootRightp, avatar->mWristLeftp, avatar->mWristRightp };
+            bool first = true;
+            for (LLJoint* joint : joints)
+            {
+                if (!joint)
+                {
+                    continue;
+                }
+                const LLVector3 at = joint->getWorldPosition();
+                if (first)
+                {
+                    one.mMin = at;
+                    one.mMax = at;
+                    first = false;
+                }
+                else
+                {
+                    one.mMin.set(llmin(one.mMin.mV[VX], at.mV[VX]), llmin(one.mMin.mV[VY], at.mV[VY]), llmin(one.mMin.mV[VZ], at.mV[VZ]));
+                    one.mMax.set(llmax(one.mMax.mV[VX], at.mV[VX]), llmax(one.mMax.mV[VY], at.mV[VY]), llmax(one.mMax.mV[VZ], at.mV[VZ]));
+                }
+            }
+            // Out to the skin and what is worn close on it, up past the skull to the top of the hair, and down to just
+            // above the floor: the ankles are a little above the soles, and the floor stays out of the box.
+            one.mMin -= LLVector3(AVATAR_BODY_PAD, AVATAR_BODY_PAD, AVATAR_FEET_PAD);
+            one.mMax += LLVector3(AVATAR_BODY_PAD, AVATAR_BODY_PAD, AVATAR_HAIR_PAD);
+        }
+        else
+        {
+            // An impostor is a picture on a card, in its drawable's box.
+            const LLVector4a* extents = avatar->mDrawable->getSpatialExtents();
+            one.mMin.set(extents[0].getF32ptr());
+            one.mMax.set(extents[1].getF32ptr());
+            one.mMin -= LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+            one.mMax += LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        }
         one.mDistance = distance;
         if (!one.mMin.isFinite() || !one.mMax.isFinite())
         {
