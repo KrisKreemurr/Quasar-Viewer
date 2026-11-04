@@ -2608,6 +2608,17 @@
             <key>Value</key>
             <integer>2</integer>
         </map>
+        <key>QuasarFrameWarpDebug</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: tint generated frames by what each part of the warp did to a pixel: red where an uncovered strip was filled from the background, green where it moved with an avatar, blue where it was held to an avatar as hair. Untinted pixels moved with the camera alone. Real frames are never tinted, so the tint flickers.</string>
+            <key>Persist</key>
+            <integer>0</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarFrameWarpFill</key>
         <map>
             <key>Comment</key>

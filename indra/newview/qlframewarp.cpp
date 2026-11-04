@@ -331,6 +331,7 @@ void QLFrameWarp::present(F32 alpha)
     static LLCachedControl<S32> avatar_mode(gSavedSettings, "QuasarFrameWarpAvatars", 2);
     static LLCachedControl<bool> fill(gSavedSettings, "QuasarFrameWarpFill", true);
     static LLCachedControl<F32> hair_distance(gSavedSettings, "QuasarFrameWarpHairDistance", 10.f);
+    static LLCachedControl<bool> debug_tint(gSavedSettings, "QuasarFrameWarpDebug", false);
 
     // How far each kept avatar has moved by the generated frame: the idle step has moved them on to the next frame.
     F32 avatar_min[MAX_AVATARS * 4] = {};
@@ -394,7 +395,7 @@ void QLFrameWarp::present(F32 alpha)
         const S32 depth_unit = shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &gPipeline.mMainRT.deferredScreen);
         shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, kept_inverse);
         shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
-        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars | (fill() ? 0x100 : 0));
+        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars | (fill() ? 0x100 : 0) | (debug_tint() ? 0x200 : 0));
         if (avatars > 0)
         {
             shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);

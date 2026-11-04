@@ -53,6 +53,10 @@ uniform vec4 qlWarpAvatarMax[MAX_WARP_AVATARS];
 uniform vec4 qlWarpAvatarMove[MAX_WARP_AVATARS];
 uniform int qlWarpAvatarCount;    // the boxes given in the low byte; above it, WARP_FILL
 #define WARP_FILL 0x100           // fill uncovered strips from the background
+#define WARP_DEBUG 0x200          // tint what each rule did: red filled, green moved with an avatar, blue held as hair
+
+// What forward() last did with a surface, for WARP_DEBUG: 0 nothing, 1 moved with an avatar, 2 held as hair.
+int g_rule = 0;
 uniform vec4 qlWarpWorldRect;   // left, bottom, width, height, window pixels
 uniform vec2 qlWarpWindowSize;
 
@@ -109,6 +113,7 @@ bool forward(vec2 src, out vec2 dst, out float depth)
         // See-through hair writes no depth, so its pixels hold the depth of what is behind it, and would slide over
         // the head as the camera orbits. A surface seen through the top of an avatar's box is taken to be there, in
         // the box's middle along the ray, and moves with it; of the boxes the ray passes, the nearest.
+        g_rule = hit >= 0 ? 1 : 0;
         if (hit < 0)
         {
             vec3 ray = pos - eye;
@@ -135,6 +140,7 @@ bool forward(vec2 src, out vec2 dst, out float depth)
                 {
                     nearest = enter;
                     hit = i;
+                    g_rule = 2;
                     pos = eye + ray * (0.5 * (enter + leave));
                 }
             }
@@ -184,6 +190,28 @@ float settle(vec2 want, inout vec2 src, out float depth)
     return err;
 }
 
+// settle() with the depth held at `depth` and the camera alone moving: where a surface at that depth under the pixel
+// came from, for a strip the kept frame did not see, taken to be the background around it.
+vec2 settle_at(vec2 want, float depth)
+{
+    vec2 src = want;
+    for (int i = 0; i < 4; ++i)
+    {
+        vec4 c = qlWarpViewProj * (qlWarpInvViewProj * vec4(src, ndc_depth(depth), 1.0));
+        if (c.w <= 1e-6)
+        {
+            break;
+        }
+        vec2 delta = want - c.xy / c.w;
+        src += delta;
+        if (dot(delta, delta) < 1e-9)
+        {
+            break;
+        }
+    }
+    return src;
+}
+
 void main()
 {
     ivec2 px = ivec2(gl_FragCoord.xy);
@@ -214,31 +242,43 @@ void main()
     float err = settle(want, src, depth);
     vec2 miss = want - src;                     // how far the source was found from the pixel itself
 
+    int rule = g_rule;
+    bool filled = false;
     if (err > settled && (qlWarpAvatarCount & WARP_FILL) != 0)
     {
-        // Uncovered: try starts either side along the way the guess was pulled, and keep the farthest that settles.
-        vec2 best = src;
-        float best_depth = depth;
-        bool found = false;
-        vec2 dir = length(miss) > 1e-6 ? normalize(miss) : vec2(1.0, 0.0);
-        float reach = max(length(miss), 4.0 * length(pixel));
-        for (int k = 0; k < 4; ++k)
+        // Uncovered: something nearer moved off a strip the kept frame never saw, and the guess swings between it and
+        // what is behind. What belongs there is the background, so the farthest depth around the pixel is taken for
+        // it, and the strip is found as a surface at that depth moved by the camera alone. A strip as wide as the
+        // guess swung is searched, and at least a few pixels.
+        float reach = max(length(miss), 3.0 * length(pixel));
+        float bg = depth;
+        for (int k = 0; k < 8; ++k)
         {
-            float t = (k < 2 ? 1.0 : 2.0) * reach * ((k & 1) == 0 ? 1.0 : -1.0);
-            vec2 alt = want + dir * t;
-            float alt_depth;
-            float alt_err = settle(want, alt, alt_depth);
-            if (alt_err <= settled && (!found || farther(alt_depth, best_depth)))
+            float a = float(k) * 0.785398;
+            for (int r = 1; r <= 2; ++r)
             {
-                best = alt;
-                best_depth = alt_depth;
-                found = true;
+                vec2 at = clamp((want + vec2(cos(a), sin(a)) * reach * (0.5 * float(r))) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+                float d = textureLod(depthMap, at, 0.0).r;
+                if (farther(d, bg))
+                {
+                    bg = d;
+                }
             }
         }
-        src = best;
+        src = settle_at(want, bg);
+        filled = true;
     }
 
     vec2 uv = clamp(src * 0.5 + 0.5, vec2(0.0), vec2(1.0));
     vec2 win = qlWarpWorldRect.xy + uv * qlWarpWorldRect.zw;
     frag_color = textureLod(qlWarpWorldMap, win / qlWarpWindowSize, 0.0);
+
+    if ((qlWarpAvatarCount & WARP_DEBUG) != 0)
+    {
+        vec3 tint = filled ? vec3(1.0, 0.0, 0.0) : rule == 1 ? vec3(0.0, 1.0, 0.0) : rule == 2 ? vec3(0.0, 0.3, 1.0) : vec3(0.0);
+        if (filled || rule != 0)
+        {
+            frag_color.rgb = mix(frag_color.rgb, tint, 0.5);
+        }
+    }
 }
