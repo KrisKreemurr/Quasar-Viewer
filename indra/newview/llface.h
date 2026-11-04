@@ -251,7 +251,8 @@ private:
     // Main thread, before measuring a due face: brings its rigging info and the world matrices of the joints it is
     // rigged to up to date, which the measure would otherwise do lazily, and returns how long the measure is to stand
     // (throttle is QuasarRiggedPixelAreaThrottle).
-    F32         preparePixelArea(bool throttle);
+    // prepare_joints false leaves the joints to the caller, who has brought the whole avatar's up to date already.
+    F32         preparePixelArea(bool throttle, bool prepare_joints = true);
     // The measure itself, once prepared. Reads the face, its object, drawable, avatar and joints and the camera, writes
     // only this face. jitter1 and jitter2 are in [0, 1) and take the place of the random spread of the next update;
     // period is what preparePixelArea returned. Different faces may be measured at the same time.

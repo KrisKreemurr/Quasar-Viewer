@@ -2045,7 +2045,7 @@ bool LLFace::pixelAreaDue() const
     return !(gFrameTimeSeconds - mLastPixelAreaUpdate < PIXEL_AREA_UPDATE_PERIOD);
 }
 
-F32 LLFace::preparePixelArea(bool throttle)
+F32 LLFace::preparePixelArea(bool throttle, bool prepare_joints)
 {
     if (!isState(LLFace::RIGGED) || mVObjp.isNull())
     {
@@ -2074,6 +2074,10 @@ F32 LLFace::preparePixelArea(bool throttle)
 
     // A joint's world matrix is brought up to date when it is asked for (LLJoint::getWorldMatrix), its parents' with
     // it: asked for here, on this thread, the measure only reads what it holds.
+    if (!prepare_joints)
+    {
+        return period;
+    }
     for (S32 i = 0; i < rigInfo.size(); i++)
     {
         if (rigInfo[i].isRiggedTo())

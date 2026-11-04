@@ -68,6 +68,9 @@
 #include "llspatialpartition.h"
 #include "llviewercamera.h"
 #include "llrand.h"
+#include "llvoavatar.h"
+#include "llviewerjointattachment.h"
+#include <unordered_set>
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -1433,6 +1436,33 @@ void LLViewerTextureList::measureDuePixelAreas(const std::vector<LLPointer<LLVie
     static LLCachedControl<bool> throttle(gSavedSettings, "QuasarRiggedPixelAreaThrottle", true);
     const bool throttle_rigged = throttle();
     constexpr U32 max_faces_to_check = 1024;  // as updateImageDecodePriority
+
+    // Every joint a face can be rigged to: the bones, the collision volumes and the attachment points (LLVOAvatar::getJoint's
+    // numbering), each asked for its world matrix, which brings it up to date with its parents.
+    static std::unordered_set<LLVOAvatar*> prepared_avatars;
+    prepared_avatars.clear();
+    auto prepare_avatar_joints = [](LLVOAvatar* avatar)
+    {
+        if (avatar->mDrawable.isNull())
+        {
+            return;
+        }
+        const S32 joints = avatar->mNumBones + avatar->mNumCollisionVolumes;
+        for (S32 i = 0; i < joints; ++i)
+        {
+            if (LLJoint* joint = avatar->getJoint(i))
+            {
+                joint->getWorldMatrix();
+            }
+        }
+        for (auto& attachment : avatar->mAttachmentPoints)
+        {
+            if (attachment.second)
+            {
+                attachment.second->getWorldMatrix();
+            }
+        }
+    };
     constexpr U32 faces_per_visit = 32;
 
     {
@@ -1496,7 +1526,18 @@ void LLViewerTextureList::measureDuePixelAreas(const std::vector<LLPointer<LLVie
                 Due d;
                 d.mFace    = face;
                 d.mMeasure = face->pixelAreaDue();
-                d.mPeriod  = d.mMeasure ? face->preparePixelArea(throttle_rigged) : 0.f;
+                if (d.mMeasure && face->isState(LLFace::RIGGED))
+                {
+                    // Its avatar's joints, every one, brought up to date once for all its faces (below), rather than
+                    // those each face is rigged to, face by face: a crowd's faces are rigged to much the same joints.
+                    LLViewerObject* objp = face->getViewerObject();
+                    LLVOAvatar* avatar = objp ? objp->getAvatar() : nullptr;
+                    if (avatar && prepared_avatars.insert(avatar).second)
+                    {
+                        prepare_avatar_joints(avatar);
+                    }
+                }
+                d.mPeriod  = d.mMeasure ? face->preparePixelArea(throttle_rigged, false) : 0.f;
                 d.mJitter1 = ll_frand();
                 d.mJitter2 = ll_frand();
                 d.mResult  = true;
