@@ -3557,9 +3557,37 @@ void LLPipeline::updateReverseZ(bool reverse_z)
     }
 }
 
+// Quasar: which kind of view the cull or sort under way is for (QLDrawStats::mCullMs).
+static U32 ql_cull_view()
+{
+    if (gCubeSnapshot)
+    {
+        return QLDrawStats::VIEW_PROBE;
+    }
+    if (LLPipeline::sImpostorRender)
+    {
+        return QLDrawStats::VIEW_OTHER;
+    }
+    switch (LLViewerCamera::sCurCameraID)
+    {
+    case LLViewerCamera::CAMERA_WORLD:
+        return QLDrawStats::VIEW_WORLD;
+    case LLViewerCamera::CAMERA_SUN_SHADOW0:
+    case LLViewerCamera::CAMERA_SUN_SHADOW1:
+    case LLViewerCamera::CAMERA_SUN_SHADOW2:
+    case LLViewerCamera::CAMERA_SUN_SHADOW3:
+    case LLViewerCamera::CAMERA_SPOT_SHADOW0:
+    case LLViewerCamera::CAMERA_SPOT_SHADOW1:
+        return QLDrawStats::VIEW_SHADOW;
+    default:
+        return QLDrawStats::VIEW_OTHER;
+    }
+}
+
 void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
+    QLCullTimer ql_cull_timer(gQLDrawStats.mCullMs[ql_cull_view()]);
     LL_PROFILE_GPU_ZONE("updateCull"); // should always be zero GPU time, but drop a timer to flush stuff out
 
     bool water_clip = isWaterClip();
@@ -4312,6 +4340,7 @@ void LLPipeline::markRebuild(LLDrawable *drawablep, LLDrawable::EDrawableFlags f
 void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
+    QLCullTimer ql_sort_timer(gQLDrawStats.mCullMs[ql_cull_view()]);
     LL_PROFILE_GPU_ZONE("stateSort");
 
     if (hasAnyRenderType(LLPipeline::RENDER_TYPE_AVATAR,
@@ -5230,13 +5259,17 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             LL_PROFILE_PLOT("quasar batch draws", (int64_t)gQLDrawStats.mDraws);
             LL_PROFILE_PLOT("quasar vertex buffer switches", (int64_t)gQLDrawStats.mBufferSwitches);
             LL_PROFILE_PLOT("quasar model matrix changes", (int64_t)gQLDrawStats.mMatrixChanges);
+            LL_PROFILE_PLOT("quasar cull+sort ms world", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_WORLD]);
+            LL_PROFILE_PLOT("quasar cull+sort ms shadows", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_SHADOW]);
+            LL_PROFILE_PLOT("quasar cull+sort ms probes", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_PROBE]);
+            LL_PROFILE_PLOT("quasar cull+sort ms other", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_OTHER]);
             gQLDrawStats.clear();
             gQLDrawStats.mLastFastSwitches = LLVertexBuffer::sAttribBindingSwitches;
             gQLDrawStats.mLastFullSetups = LLVertexBuffer::sAttribPointerSetups;
             LLVertexBuffer::sAttribBindingSwitches = 0;
             LLVertexBuffer::sAttribPointerSetups = 0;
             // Quasar: buffer switches under formats already given (LLVertexBuffer::bindVertexBuffers), set for the frame.
-            static LLCachedControl<bool> attrib_binding(gSavedSettings, "QuasarVertexAttribBinding", false);
+            static LLCachedControl<bool> attrib_binding(gSavedSettings, "QuasarVertexAttribBinding", true);
             LLVertexBuffer::sUseAttribBinding = attrib_binding;
         }
     }

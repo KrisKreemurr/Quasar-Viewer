@@ -652,6 +652,12 @@ public:
                                          gQLDrawStats.mLastDraws, gQLDrawStats.mLastBufferSwitches,
                                          gQLDrawStats.mLastMatrixChanges));
             ypos += y_inc;
+            addText(xpos, ypos, llformat("Quasar cull+sort ms: world %.2f | shadows %.2f | probes %.2f | other %.2f",
+                                         gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_WORLD],
+                                         gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SHADOW],
+                                         gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_PROBE],
+                                         gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_OTHER]));
+            ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffer setups: %u fast | %u full (QuasarVertexAttribBinding %s)",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
                                          LLVertexBuffer::sUseAttribBinding ? "on" : "off"));

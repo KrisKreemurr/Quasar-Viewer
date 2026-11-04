@@ -25,6 +25,8 @@
 
 #include "stdtypes.h"
 
+#include <chrono>
+
 /// What LLRenderPass's batch draws (pushBatch, pushUntexturedBatch) did in a frame, every pass and view counted. Plotted
 /// in Tracy at the start of each main frame (LLPipeline::renderGeomDeferred), then cleared. They tell which batching
 /// would pay: draws that share a vertex buffer can be merged into a multi-draw as they are, while draws that each move
@@ -46,6 +48,12 @@ struct QLDrawStats
     U32 mLastFastSwitches   = 0;
     U32 mLastFullSetups     = 0;
 
+    // The time culling and sorting took, by the kind of view (LLPipeline::updateCull and stateSort, postSort
+    // included), in milliseconds: the main view, the sun and spot shadows, reflection probes and mirrors, the rest.
+    enum EView { VIEW_WORLD, VIEW_SHADOW, VIEW_PROBE, VIEW_OTHER, NUM_VIEWS };
+    F32 mCullMs[NUM_VIEWS]     = {};
+    F32 mLastCullMs[NUM_VIEWS] = {};
+
     void noteDraw(const void* buffer)
     {
         ++mDraws;
@@ -63,7 +71,29 @@ struct QLDrawStats
         mLastMatrixChanges  = mMatrixChanges;
         mDraws = mBufferSwitches = mMatrixChanges = 0;
         mLastBuffer = nullptr;
+        for (U32 i = 0; i < NUM_VIEWS; ++i)
+        {
+            mLastCullMs[i] = mCullMs[i];
+            mCullMs[i] = 0.f;
+        }
     }
+};
+
+/// Adds the time from its making to its end to a kind of view's culling and sorting.
+class QLCullTimer
+{
+public:
+    explicit QLCullTimer(F32& total) : mTotal(total), mStart(std::chrono::steady_clock::now()) {}
+    ~QLCullTimer()
+    {
+        mTotal += std::chrono::duration<F32, std::milli>(std::chrono::steady_clock::now() - mStart).count();
+    }
+    QLCullTimer(const QLCullTimer&) = delete;
+    QLCullTimer& operator=(const QLCullTimer&) = delete;
+
+private:
+    F32& mTotal;
+    std::chrono::steady_clock::time_point mStart;
 };
 
 extern QLDrawStats gQLDrawStats;
