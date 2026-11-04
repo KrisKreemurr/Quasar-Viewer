@@ -331,6 +331,7 @@ void QLFrameWarp::present(F32 alpha)
     F32 avatar_max[MAX_AVATARS * 4] = {};
     F32 avatar_move[MAX_AVATARS * 4] = {};
     S32 avatars = 0;
+    U32 moving = 0;
     for (const KeptAvatar& kept : mAvatars)
     {
         LLViewerObject* object = gObjectList.findObject(kept.mID);
@@ -338,11 +339,17 @@ void QLFrameWarp::present(F32 alpha)
         {
             continue;
         }
-        const LLVector3 moved = object->getPositionAgent() - kept.mPosition;
+        // An avatar standing still keeps its box too, with no move: its see-through hair is held to it as the camera
+        // orbits (the shader's hair rule).
+        LLVector3 moved = object->getPositionAgent() - kept.mPosition;
         const F32 length = moved.length();
-        if (length < 1e-4f || length > MAX_AVATAR_JUMP || !moved.isFinite())
+        if (length > MAX_AVATAR_JUMP || !moved.isFinite())
         {
-            continue;
+            moved.clear();
+        }
+        else if (length >= 1e-4f)
+        {
+            ++moving;
         }
         const LLVector3 move = moved * alpha;
         for (S32 i = 0; i < 3; ++i)
@@ -353,7 +360,7 @@ void QLFrameWarp::present(F32 alpha)
         }
         ++avatars;
     }
-    mLastAvatars = (U32)avatars;
+    mLastAvatars = moving;
 
     const S32 width = (S32)mFrame.getWidth();
     const S32 height = (S32)mFrame.getHeight();

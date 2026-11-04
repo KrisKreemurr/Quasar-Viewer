@@ -74,6 +74,10 @@ bool farther(float a, float b)
 #endif
 }
 
+// What of an avatar's box see-through hair can be in: its top part, the head and shoulders. Lower down, what is seen
+// through the box past the body (the floor between the legs, a wall past an arm) is more often the world behind.
+#define HAIR_FRACTION 0.3
+
 // The kept frame's surface under ndc xy, carried to the generated camera's ndc xy; false where it falls behind it.
 bool forward(vec2 src, out vec2 dst, out float depth)
 {
@@ -81,20 +85,63 @@ bool forward(vec2 src, out vec2 dst, out float depth)
     depth = textureLod(depthMap, uv, 0.0).r;
     vec4 p = qlWarpInvViewProj * vec4(src, ndc_depth(depth), 1.0);
 
-    // A surface at a finite distance moves with the avatar it belongs to.
-    if (abs(p.w) > 1e-6)
+    int count = min(qlWarpAvatarCount, MAX_WARP_AVATARS);
+    if (count > 0)
     {
-        vec3 pos = p.xyz / p.w;
-        int count = min(qlWarpAvatarCount, MAX_WARP_AVATARS);
+        // The kept frame's eye: the point its projection sends to w = 0.
+        vec4 e = qlWarpInvViewProj * vec4(0.0, 0.0, 1.0, 0.0);
+        vec3 eye = e.xyz / e.w;
+        // The surface, or for the sky a point far along its direction.
+        vec3 pos = abs(p.w) > 1e-6 ? p.xyz / p.w : eye + normalize(p.xyz) * 1.0e4;
+
+        // A surface in an avatar's box moves with that avatar.
+        int hit = -1;
         for (int i = 0; i < count; ++i)
         {
             if (all(greaterThanEqual(pos, qlWarpAvatarMin[i].xyz)) && all(lessThanEqual(pos, qlWarpAvatarMax[i].xyz)))
             {
-                pos += qlWarpAvatarMove[i].xyz;
+                hit = i;
                 break;
             }
         }
-        p = vec4(pos, 1.0);
+
+        // See-through hair writes no depth, so its pixels hold the depth of what is behind it, and would slide over
+        // the head as the camera orbits. A surface seen through the top of an avatar's box is taken to be there, in
+        // the box's middle along the ray, and moves with it; of the boxes the ray passes, the nearest.
+        if (hit < 0)
+        {
+            vec3 ray = pos - eye;
+            float nearest = 2.0;
+            for (int i = 0; i < count; ++i)
+            {
+                vec3 lo = qlWarpAvatarMin[i].xyz;
+                vec3 hi = qlWarpAvatarMax[i].xyz;
+                lo.z = hi.z - (hi.z - lo.z) * HAIR_FRACTION;
+                vec3 inv = 1.0 / ray;
+                vec3 t0 = (lo - eye) * inv;
+                vec3 t1 = (hi - eye) * inv;
+                vec3 tmin = min(t0, t1);
+                vec3 tmax = max(t0, t1);
+                float enter = max(max(tmin.x, tmin.y), max(tmin.z, 0.0));
+                float leave = min(min(tmax.x, tmax.y), tmax.z);
+                // The ray passes through, and the surface lies beyond the box.
+                if (enter < leave && leave < 1.0 && enter < nearest)
+                {
+                    nearest = enter;
+                    hit = i;
+                    pos = eye + ray * (0.5 * (enter + leave));
+                }
+            }
+        }
+
+        if (hit >= 0)
+        {
+            p = vec4(pos + qlWarpAvatarMove[hit].xyz, 1.0);
+        }
+        else if (abs(p.w) > 1e-6)
+        {
+            p = vec4(pos, 1.0);
+        }
     }
 
     vec4 c = qlWarpViewProj * p;
