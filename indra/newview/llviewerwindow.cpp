@@ -656,12 +656,12 @@ public:
             static LLCachedControl<bool> batch_merge_stats(gSavedSettings, "QuasarBatchMergeStats", false);
             if (batch_merge_stats)
             {
-                addText(xpos, ypos, llformat("Quasar merge (main opaque): %u draws | as ordered %u | sorted %u | sorted, any matrix %u",
+                addText(xpos, ypos, llformat("Quasar merge: %u | ord %u | sort %u | nomat %u",
                                              gQLDrawStats.mLastMergeDraws, gQLDrawStats.mLastMergeAsOrdered,
                                              gQLDrawStats.mLastMergeSorted, gQLDrawStats.mLastMergeSortedNoMatrix));
                 ypos += y_inc;
             }
-            addText(xpos, ypos, llformat("Quasar cull ms: world %.2f | sun %.2f | spot %.2f | probe %.2f | other %.2f",
+            addText(xpos, ypos, llformat("Quasar cull: %.2f %.2f %.2f %.2f %.2f",
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_WORLD],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SHADOW],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_SPOT],
