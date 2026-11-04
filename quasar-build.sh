@@ -34,11 +34,23 @@ STATUS=0
 # the same. The whole command goes to cmd as one argument that does not begin with a slash, so Git Bash passes it on
 # as written, and no window title is quoted.
 # /nodeReuse:false: a build helper left running by an earlier build would keep its old priority, so start fresh ones.
-cmd //c "start /b /belownormal /wait cmake --build $BUILD_DIR --config $CONFIG $PARALLEL -- /nodeReuse:false" </dev/null || STATUS=$?
+# The output is also kept in a log: cmd's start does not always hand the build's exit code back, so the log's error
+# lines are what tell a failed build from a good one.
+LOG="$BUILD_DIR/quasar-build.log"
+cmd //c "start /b /belownormal /wait cmake --build $BUILD_DIR --config $CONFIG $PARALLEL -- /nodeReuse:false" </dev/null 2>&1 | tee "$LOG" || STATUS=$?
+
+ERRORS="$(grep -E "error (C|LNK|MSB)[0-9]+|fatal error" "$LOG" | sort -u || true)"
+if [ -n "$ERRORS" ] && [ $STATUS -eq 0 ]; then
+    STATUS=1
+fi
 
 if [ $STATUS -eq 0 ]; then
     echo "Done. The viewer is in $BUILD_DIR/newview/$CONFIG/"
 else
-    echo "The build failed (exit code $STATUS). Copy the error lines above and paste them to Claude."
+    echo
+    echo "The build FAILED. Errors:"
+    echo "$ERRORS"
+    echo
+    echo "Copy the error lines above and paste them to Claude (the whole output is in $LOG)."
 fi
 exit $STATUS
