@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarShadowMinCasterPixels</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): leave out of the sun's shadow maps whatever would cast a shadow smaller than this many pixels across on screen, as seen from your camera: distant small attachments, small objects far off. 0 draws every caster as before. Try 2 to 4. Lower sun means longer shadows, which is allowed for.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>0</real>
+        </map>
         <key>QuasarParallelPixelArea</key>
         <map>
             <key>Comment</key>

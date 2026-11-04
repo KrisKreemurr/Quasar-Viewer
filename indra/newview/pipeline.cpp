@@ -13968,6 +13968,81 @@ namespace
     constexpr F32 STAGGER_MIN_LIGHT_COS = 0.99999f;  // about a quarter of a degree
 }
 
+namespace
+{
+    // Quasar: the main camera as the sun's cascades are culled, for sunShadowCasterTooSmall.
+    struct QLSunCasterCull
+    {
+        bool       mActive   = false;
+        LLVector4a mEye;
+        F32        mPxPerRad = 0.f;  // the main view's pixels per radian, up the screen
+        F32        mStretch  = 1.f;  // how much longer than the caster a low sun draws its shadow, at most 4
+        F32        mMinPx    = 0.f;  // the setting: the smallest shadow, in pixels across, worth drawing
+    };
+    QLSunCasterCull sSunCasterCull;
+
+    // Arms the test for the scope of one generateSunShadow, and disarms it on every way out.
+    struct QLSunCasterCullScope
+    {
+        QLSunCasterCullScope(const LLCamera& main_camera, const LLVector3& to_light)
+        {
+            static LLCachedControl<F32> min_px(gSavedSettings, "QuasarShadowMinCasterPixels", 0.f);
+            QLSunCasterCull& c = sSunCasterCull;
+            c.mActive = min_px() > 0.f && !gCubeSnapshot && main_camera.getView() > 0.f;
+            if (!c.mActive)
+            {
+                return;
+            }
+            c.mEye.load3(main_camera.getOrigin().mV);
+            c.mPxPerRad = (F32)gViewerWindow->getWindowHeightRaw() / main_camera.getView();
+            // A shadow on the ground is as long as the caster over the sine of the sun's height; its width stays the
+            // caster's. Taking the length keeps more than needed, never less.
+            LLVector3 l = to_light;
+            l.normVec();
+            c.mStretch = 1.f / llclamp(l.mV[VZ], 0.25f, 1.f);
+            c.mMinPx   = min_px();
+        }
+        ~QLSunCasterCullScope() { sSunCasterCull.mActive = false; }
+    };
+}
+
+// static
+bool LLPipeline::sunShadowCasterTooSmall(const LLVector4a& center, const LLVector4a& half)
+{
+    const QLSunCasterCull& c = sSunCasterCull;
+    if (!c.mActive)
+    {
+        return false;
+    }
+    switch (LLViewerCamera::sCurCameraID)
+    {
+    case LLViewerCamera::CAMERA_SUN_SHADOW0:
+    case LLViewerCamera::CAMERA_SUN_SHADOW1:
+    case LLViewerCamera::CAMERA_SUN_SHADOW2:
+    case LLViewerCamera::CAMERA_SUN_SHADOW3:
+        break;
+    default:
+        return false;
+    }
+    // A box that is not finite bounds nothing, and is kept.
+    if (!center.isFinite3() || !half.isFinite3())
+    {
+        return false;
+    }
+
+    LLVector4a to_center;
+    to_center.setSub(center, c.mEye);
+    const F32 radius = half.getLength3().getF32();
+    // From the eye to the nearest the box can reach. A caster the eye is within, or near, is always drawn.
+    const F32 dist = to_center.getLength3().getF32() - radius;
+    if (dist <= 1.f)
+    {
+        return false;
+    }
+    // Its shadow's size across, in pixels of the main view, against the least worth drawing.
+    return 2.f * radius * c.mStretch * c.mPxPerRad < c.mMinPx * dist;
+}
+
 void LLPipeline::generateSunShadow(LLCamera& camera)
 {
     if (!sRenderDeferred || sunCascades() == 0)
@@ -14099,6 +14174,9 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
 
     LLVector3 lightDir = -caster_dir;
     lightDir.normVec();
+
+    // Quasar: casters whose shadow would be too small to see are left out of the cascades (QuasarShadowMinCasterPixels).
+    QLSunCasterCullScope ql_caster_cull(camera, caster_dir);
 
     //create light space camera matrix
     LLVector3 at = lightDir;

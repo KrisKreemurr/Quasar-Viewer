@@ -1133,6 +1133,33 @@ public:
     }
 };
 
+// Quasar: the shadow culler that also leaves out groups too small to cast a visible shadow
+// (LLPipeline::sunShadowCasterTooSmall, QuasarShadowMinCasterPixels): a group's bounds hold everything below it, so a
+// group too small is left out with all its children. Only the casters' cull uses it, not the receivers' walks below.
+class LLOctreeCullShadowCasters : public LLOctreeCullShadow
+{
+public:
+    LLOctreeCullShadowCasters(LLCamera* camera)
+        : LLOctreeCullShadow(camera) { }
+
+    virtual bool earlyFail(LLViewerOctreeGroup* base_group)
+    {
+        if (LLOctreeCullShadow::earlyFail(base_group))
+        {
+            return true;
+        }
+        LLSpatialGroup* group = (LLSpatialGroup*)base_group;
+        // Never the root; and a bridge's groups are in its own space, not the agent's.
+        if (!group->getOctreeNode() || !group->getOctreeNode()->getParent() ||
+            !group->getSpatialPartition() || group->getSpatialPartition()->isBridge())
+        {
+            return false;
+        }
+        const LLVector4a* bounds = group->getBounds();
+        return LLPipeline::sunShadowCasterTooSmall(bounds[0], bounds[1]);
+    }
+};
+
 class LLOctreeCullVisExtents: public LLOctreeCullShadow
 {
 public:
@@ -1485,7 +1512,7 @@ S32 LLSpatialPartition::cull(LLCamera &camera, bool do_occlusion)
 
     if (LLPipeline::sShadowRender)
     {
-        LLOctreeCullShadow culler(&camera);
+        LLOctreeCullShadowCasters culler(&camera);
         culler.traverse(mOctree);
     }
     // Terrain in the main view, when an infinite projection no longer bounds it.

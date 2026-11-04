@@ -551,6 +551,10 @@ public:
 
     //calculate pixel area of given box from vantage point of given camera
     static F32 calcPixelArea(LLVector3 center, LLVector3 size, LLCamera& camera);
+    // Quasar (QuasarShadowMinCasterPixels): while a sun shadow cascade is culled, whether a caster with this box (agent
+    // space, centre and half size) would cast a shadow too small to see from the main camera. False outside the sun's
+    // cascades, in probe captures, and with the setting at 0.
+    static bool sunShadowCasterTooSmall(const LLVector4a& center, const LLVector4a& half);
     static F32 calcPixelArea(const LLVector4a& center, const LLVector4a& size, LLCamera &camera);
 
     void stateSort(LLCamera& camera, LLCullResult& result);

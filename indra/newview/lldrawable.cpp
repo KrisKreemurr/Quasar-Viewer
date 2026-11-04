@@ -1593,6 +1593,15 @@ void LLSpatialBridge::setVisible(LLCamera& camera_in, std::vector<LLDrawable*>* 
             return;
         }
 
+        // Quasar: an attachment, avatar or moving linkset too small to cast a shadow anyone would see is left out of
+        // the sun's cascades whole (QuasarShadowMinCasterPixels): the bridge's groups are all marked seen below, with
+        // nothing smaller tested.
+        if (LLPipeline::sShadowRender && !LLPipeline::sImpostorRender &&
+            LLPipeline::sunShadowCasterTooSmall(center, size))
+        {
+            return;
+        }
+
         LLDrawable::setVisible(camera_in);
 
         if (for_select)
