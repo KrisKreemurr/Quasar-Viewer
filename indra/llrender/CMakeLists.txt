@@ -15,6 +15,7 @@ set(
   altexture3d.cpp
   altextureblit.cpp
   altexturereadback.cpp
+  qlglread.cpp
   altextureslot.cpp
   alfontcolrv1.cpp
   alfontface.cpp
@@ -61,6 +62,7 @@ set(
   altexture3d.h
   altextureblit.h
   altexturereadback.h
+  qlglread.h
   altextureslot.h
   alfontcolrv1.h
   alfontface.h

@@ -2630,6 +2630,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarFrameWarpDump</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: save pictures of generated frames to the logs folder, for finding what goes wrong in them: eight sets, a third of a second apart, then this turns itself off. Each set is the frame before, the generated frame, the same tinted as QuasarFrameWarpDebug tints it, and the frame after, as QuasarWarp_NN_*.png, with QuasarWarp_info.txt. Each set stutters the viewer for a moment while it saves.</string>
+            <key>Persist</key>
+            <integer>0</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarFrameWarpFill</key>
         <map>
             <key>Comment</key>

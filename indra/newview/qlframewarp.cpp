@@ -26,8 +26,12 @@
 #include "qlframewarp.h"
 
 #include "llcharacter.h"
+#include "lldir.h"
 #include "lldrawable.h"
+#include "llfile.h"
 #include "llglstates.h"
+#include "llimage.h"
+#include "llimagepng.h"
 #include "llrender.h"
 #include "llstartup.h"
 #include "lltimer.h"
@@ -40,6 +44,7 @@
 #include "llviewerwindow.h"
 #include "llwindow.h"
 #include "pipeline.h"
+#include "qlglread.h"
 
 #include <algorithm>
 
@@ -61,6 +66,10 @@ namespace
 
     // An avatar that moved further than this between two frames jumped (a teleport, a sit): it is left where it was.
     constexpr F32 MAX_AVATAR_JUMP = 4.f;
+
+    // QuasarFrameWarpDump saves this many sets, this far apart, then turns itself off.
+    constexpr U32 DUMP_SETS = 8;
+    constexpr F64 DUMP_SPACING = 0.3;
 
     // The shader's switches, above the box count in qlWarpAvatarCount.
     constexpr S32 WARP_FILL  = 0x100;
@@ -151,6 +160,8 @@ void QLFrameWarp::release()
     mNewest = -1;
     mFilling = -1;
     mHeld = -1;
+    mDumpGen.release();
+    mDumpTint.release();
 }
 
 void QLFrameWarp::invalidate()
@@ -515,43 +526,67 @@ bool QLFrameWarp::present(const Kept& from, const Kept* next, const LLMatrix4a& 
         LLGLDepthTest depth_test(GL_FALSE, GL_FALSE);
         gGL.setColorMask(true, true);
 
-        const Kept& later = next ? *next : from;
-        LLGLSLShader& shader = gQLFrameWarpProgram;
-        shader.bind();
-        const S32 units[] = {
-            shader.bindTexture(LLShaderMgr::QL_WARP_WORLD_MAP, const_cast<LLRenderTarget*>(&from.mWorld), ALSamplers::BilinearClamp),
-            shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, const_cast<LLRenderTarget*>(&from.mDepth)),
-            shader.bindTexture(LLShaderMgr::QL_WARP_NEXT_WORLD_MAP, const_cast<LLRenderTarget*>(&later.mWorld), ALSamplers::BilinearClamp),
-            shader.bindDepthTexture(LLShaderMgr::QL_WARP_NEXT_DEPTH_MAP, const_cast<LLRenderTarget*>(&later.mDepth)),
-            shader.bindTexture(LLShaderMgr::QL_WARP_FRAME_MAP, const_cast<LLRenderTarget*>(&newest.mFrame), ALSamplers::PointClamp),
-        };
-        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, from_inverse);
-        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_NEXT_INV_VIEW_PROJ, next_inverse);
-        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
-        shader.uniform1f(LLShaderMgr::QL_WARP_ALPHA, alpha);
-        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, flags);
-        if (avatars > 0)
+        auto draw = [&](S32 draw_flags)
         {
-            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);
-            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MAX, (U32)avatars, avatar_max);
-            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MOVE, (U32)avatars, avatar_move);
-        }
-        shader.uniform4f(LLShaderMgr::QL_WARP_WORLD_RECT, (F32)world.mLeft, (F32)world.mBottom, (F32)world.getWidth(),
-                         (F32)world.getHeight());
-        shader.uniform2f(LLShaderMgr::QL_WARP_WINDOW_SIZE, (F32)width, (F32)height);
-
-        gPipeline.mScreenTriangleVB->setBuffer();
-        gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
-
-        for (S32 unit : units)
-        {
-            if (unit >= 0)
+            const Kept& later = next ? *next : from;
+            LLGLSLShader& shader = gQLFrameWarpProgram;
+            shader.bind();
+            const S32 units[] = {
+                shader.bindTexture(LLShaderMgr::QL_WARP_WORLD_MAP, const_cast<LLRenderTarget*>(&from.mWorld), ALSamplers::BilinearClamp),
+                shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, const_cast<LLRenderTarget*>(&from.mDepth)),
+                shader.bindTexture(LLShaderMgr::QL_WARP_NEXT_WORLD_MAP, const_cast<LLRenderTarget*>(&later.mWorld), ALSamplers::BilinearClamp),
+                shader.bindDepthTexture(LLShaderMgr::QL_WARP_NEXT_DEPTH_MAP, const_cast<LLRenderTarget*>(&later.mDepth)),
+                shader.bindTexture(LLShaderMgr::QL_WARP_FRAME_MAP, const_cast<LLRenderTarget*>(&newest.mFrame), ALSamplers::PointClamp),
+            };
+            shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, from_inverse);
+            shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_NEXT_INV_VIEW_PROJ, next_inverse);
+            shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
+            shader.uniform1f(LLShaderMgr::QL_WARP_ALPHA, alpha);
+            shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, draw_flags);
+            if (avatars > 0)
             {
-                gGL.getTextureSlot(unit)->unbind();
+                shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);
+                shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MAX, (U32)avatars, avatar_max);
+                shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MOVE, (U32)avatars, avatar_move);
+            }
+            shader.uniform4f(LLShaderMgr::QL_WARP_WORLD_RECT, (F32)world.mLeft, (F32)world.mBottom, (F32)world.getWidth(),
+                             (F32)world.getHeight());
+            shader.uniform2f(LLShaderMgr::QL_WARP_WINDOW_SIZE, (F32)width, (F32)height);
+
+            gPipeline.mScreenTriangleVB->setBuffer();
+            gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+
+            for (S32 unit : units)
+            {
+                if (unit >= 0)
+                {
+                    gGL.getTextureSlot(unit)->unbind();
+                }
+            }
+            shader.unbind();
+            LLVertexBuffer::unbind();
+        };
+
+        // QuasarFrameWarpDump: a set of pictures of this generated frame and what it was made of, the tinted frame
+        // drawn and kept first, then the frame shown over it.
+        const bool dumping = dumpDue();
+        if (dumping)
+        {
+            draw(flags | WARP_DEBUG);
+            if (ensureDumpTarget(mDumpTint, width, height))
+            {
+                mDumpTint.copyFromWindow(0, 0, width, height);
             }
         }
-        shader.unbind();
-        LLVertexBuffer::unbind();
+        draw(flags);
+        if (dumping)
+        {
+            if (ensureDumpTarget(mDumpGen, width, height))
+            {
+                mDumpGen.copyFromWindow(0, 0, width, height);
+            }
+            writeDump(from, next, alpha, avatars, moving);
+        }
     }
 
     {
@@ -564,4 +599,93 @@ bool QLFrameWarp::present(const Kept& from, const Kept* next, const LLMatrix4a& 
     mStatus = ACTIVE;
     mLastWarpMs = (F32)(((F64)LLTimer::getTotalSeconds() - started) * 1000.0);
     return true;
+}
+
+bool QLFrameWarp::dumpDue() const
+{
+    static LLCachedControl<bool> dump(gSavedSettings, "QuasarFrameWarpDump", false);
+    return dump() && (F64)LLTimer::getTotalSeconds() >= mNextDump;
+}
+
+bool QLFrameWarp::ensureDumpTarget(LLRenderTarget& target, S32 width, S32 height)
+{
+    if ((S32)target.getWidth() == width && (S32)target.getHeight() == height && target.isComplete())
+    {
+        return true;
+    }
+    target.release();
+    return target.allocate((U32)width, (U32)height, GL_RGBA8);
+}
+
+namespace
+{
+    // A window-sized copy saved as a PNG in the logs folder, its alpha dropped (the window's is not the picture's).
+    void save_target_png(LLRenderTarget& target, const std::string& name)
+    {
+        std::vector<U8> rgba;
+        if (!ql_read_target_rgba(target, rgba))
+        {
+            return;
+        }
+        const U32 width = target.getWidth();
+        const U32 height = target.getHeight();
+        LLPointer<LLImageRaw> raw = new LLImageRaw((U16)width, (U16)height, 3);
+        U8* rgb = raw->getData();
+        if (!rgb)
+        {
+            return;
+        }
+        const size_t pixels = (size_t)width * height;
+        for (size_t i = 0; i < pixels; ++i)
+        {
+            rgb[i * 3 + 0] = rgba[i * 4 + 0];
+            rgb[i * 3 + 1] = rgba[i * 4 + 1];
+            rgb[i * 3 + 2] = rgba[i * 4 + 2];
+        }
+        LLPointer<LLImagePNG> png = new LLImagePNG();
+        if (png->encode(raw, 0.f))
+        {
+            png->save(gDirUtilp->getExpandedFilename(LL_PATH_LOGS, name));
+        }
+    }
+}
+
+void QLFrameWarp::writeDump(const Kept& from, const Kept* next, F32 alpha, S32 avatars, U32 moving)
+{
+    LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp dump");
+    const U32 set = mDumpSets + 1;
+    const std::string stem = llformat("QuasarWarp_%02u_", set);
+
+    // From the earliest in time to the latest, so that the names sort as the frames went by.
+    save_target_png(const_cast<LLRenderTarget&>(from.mWorld), stem + "1_earlier.png");
+    save_target_png(mDumpGen, stem + "2_generated.png");
+    save_target_png(mDumpTint, stem + "2_generated_tinted.png");
+    if (next)
+    {
+        save_target_png(const_cast<LLRenderTarget&>(next->mWorld), stem + "3_later.png");
+    }
+
+    // What the set was made from, a line a set.
+    const std::string info_path = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, "QuasarWarp_info.txt");
+    llofstream info(info_path.c_str(), set == 1 ? std::ios::trunc : std::ios::app);
+    if (info.is_open())
+    {
+        const LLVector3& eye_a = from.mOrigin;
+        const LLVector3& eye_b = next ? next->mOrigin : mNextOrigin;
+        info << llformat("set %u: %s, alpha %.3f, base frame %.2f ms, camera moved %.3f m, %d avatar boxes (%u moving), "
+                         "frames %llu%s\n",
+                         set, next ? "from two frames" : "from one frame", alpha, mInterval * 1000.0,
+                         (eye_b - eye_a).length(), avatars, moving, (unsigned long long)from.mSerial,
+                         next ? llformat(" and %llu", (unsigned long long)next->mSerial).c_str() : "");
+    }
+
+    mNextDump = (F64)LLTimer::getTotalSeconds() + DUMP_SPACING;
+    mDumpSets = set;
+    if (mDumpSets >= DUMP_SETS)
+    {
+        LL_INFOS("Quasar") << "Frame warp dump: " << mDumpSets << " sets saved to " << gDirUtilp->getExpandedFilename(LL_PATH_LOGS, "")
+                           << LL_ENDL;
+        mDumpSets = 0;
+        gSavedSettings.setBOOL("QuasarFrameWarpDump", false);
+    }
 }

@@ -136,6 +136,10 @@ private:
     bool present(const Kept& from, const Kept* next, const LLMatrix4a& mid_view_projection, F32 alpha);
     // Shows the held-back real frame.
     void showHeld();
+    // QuasarFrameWarpDump: whether this generated frame is one to save, and saving it.
+    bool dumpDue() const;
+    bool ensureDumpTarget(LLRenderTarget& target, S32 width, S32 height);
+    void writeDump(const Kept& from, const Kept* next, F32 alpha, S32 avatars, U32 moving);
 
     Kept mKept[2];
     S32  mNewest  = -1;             // the newest complete kept frame
@@ -160,4 +164,10 @@ private:
     F64     mCountStart = 0.0;
     F32     mLastWarpMs = 0.f;
     U32     mLastAvatars = 0;       // avatars moving in the last generated frame
+
+    // QuasarFrameWarpDump: the generated frame shown and tinted, the sets saved, and when the next is due.
+    LLRenderTarget mDumpGen;
+    LLRenderTarget mDumpTint;
+    U32            mDumpSets = 0;
+    F64            mNextDump = 0.0;
 };
