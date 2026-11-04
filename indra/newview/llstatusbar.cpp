@@ -76,6 +76,7 @@
 #include "llfocusmgr.h"
 #include "llappviewer.h"
 #include "lltrans.h"
+#include "qlframewarp.h"
 
 // library includes
 #include "llfloaterreg.h"
@@ -309,7 +310,22 @@ void LLStatusBar::refresh()
     {
         mFPSUpdateTimer.reset();
         F32 fps = (F32)LLTrace::get_frame_recording().getLastRecording().getMean(LLStatViewer::FPS_SAMPLE);
-        mTextFPS->setText(fmt::format("{:d}", ll_round(fps)));
+        // Quasar: while frame generation runs, the frames shown, marked so they are not taken for frames rendered.
+        static const std::string rendered_tip = mTextFPS->getToolTip();
+        const QLFrameWarp& warp = QLFrameWarp::instance();
+        if (warp.status() == QLFrameWarp::ACTIVE && warp.lastGenerated() > 0)
+        {
+            const S32 rendered = ll_round(fps);
+            const S32 shown = rendered + (S32)warp.lastGenerated();
+            mTextFPS->setText(fmt::format("{:d}*", shown));
+            mTextFPS->setToolTip(fmt::format("{:d} FPS shown: {:d} rendered + {:d} generated (Quasar frame generation)",
+                                             shown, rendered, warp.lastGenerated()));
+        }
+        else
+        {
+            mTextFPS->setText(fmt::format("{:d}", ll_round(fps)));
+            mTextFPS->setToolTip(rendered_tip);
+        }
     }
 }
 
