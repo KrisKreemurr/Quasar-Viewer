@@ -166,13 +166,14 @@ bool forward(vec2 src, out vec2 dst, out float depth)
     return true;
 }
 
-// Moves a guess at the source toward the one whose surface lands on `want`; the squared distance it still lands from
-// it, in ndc, and the depth it found.
+// Moves a guess at the source toward the one whose surface lands on `want`; the squared distance the last guess's
+// surface still lands from it, in ndc, and the depth it found. A slanted floor seen at a grazing angle closes in
+// slowly, so it is given six steps.
 float settle(vec2 want, inout vec2 src, out float depth)
 {
     float err = 1e9;
     depth = 0.0;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         vec2 lands;
         if (!forward(src, lands, depth))
@@ -235,12 +236,11 @@ void main()
 
     vec2 want = rel * 2.0 - 1.0;
     vec2 pixel = 2.0 / qlWarpWorldRect.zw;      // one pixel, in ndc
-    float settled = dot(pixel, pixel) * 0.5;    // within about seven tenths of a pixel
+    float settled = dot(pixel, pixel) * 2.25;   // within a pixel and a half
 
     vec2 src = want;
     float depth;
     float err = settle(want, src, depth);
-    vec2 miss = want - src;                     // how far the source was found from the pixel itself
 
     int rule = g_rule;
     bool filled = false;
@@ -248,16 +248,18 @@ void main()
     {
         // Uncovered: something nearer moved off a strip the kept frame never saw, and the guess swings between it and
         // what is behind. What belongs there is the background, so the farthest depth around the pixel is taken for
-        // it, and the strip is found as a surface at that depth moved by the camera alone. A strip as wide as the
-        // guess swung is searched, and at least a few pixels.
-        float reach = max(length(miss), 3.0 * length(pixel));
+        // it, and the strip is found as a surface at that depth moved by the camera alone. The search is around where
+        // the guess ended, in the kept frame, as wide as the guess still missed by, between two pixels and twelve: the
+        // whole way the surface moved would reach across to the far side of the nearest edge in view, and floor beside
+        // a doorway would take the room's depth.
+        float reach = clamp(sqrt(err), 2.0 * length(pixel), 12.0 * length(pixel));
         float bg = depth;
         for (int k = 0; k < 8; ++k)
         {
             float a = float(k) * 0.785398;
             for (int r = 1; r <= 2; ++r)
             {
-                vec2 at = clamp((want + vec2(cos(a), sin(a)) * reach * (0.5 * float(r))) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+                vec2 at = clamp((src + vec2(cos(a), sin(a)) * reach * (0.5 * float(r))) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
                 float d = textureLod(depthMap, at, 0.0).r;
                 if (farther(d, bg))
                 {
