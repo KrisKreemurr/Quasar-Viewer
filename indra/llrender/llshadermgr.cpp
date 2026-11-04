@@ -2312,7 +2312,12 @@ void LLShaderMgr::initAttribsAndUniforms()
     mReservedUniforms.push_back("smaaPredicationStrength");
 
     // Quasar's frame warp
-    mReservedUniforms.push_back("qlWarpReproject");
+    mReservedUniforms.push_back("qlWarpInvViewProj");
+    mReservedUniforms.push_back("qlWarpViewProj");
+    mReservedUniforms.push_back("qlWarpAvatarMin");
+    mReservedUniforms.push_back("qlWarpAvatarMax");
+    mReservedUniforms.push_back("qlWarpAvatarMove");
+    mReservedUniforms.push_back("qlWarpAvatarCount");
     mReservedUniforms.push_back("qlWarpWorldRect");
     mReservedUniforms.push_back("qlWarpWindowSize");
     mReservedUniforms.push_back("qlWarpWorldMap");

@@ -25,6 +25,8 @@
 
 #include "qlframewarp.h"
 
+#include "llcharacter.h"
+#include "lldrawable.h"
 #include "llglstates.h"
 #include "llrender.h"
 #include "llstartup.h"
@@ -32,10 +34,14 @@
 #include "llviewercamera.h"
 #include "llviewercontrol.h"
 #include "llviewerdisplay.h"
+#include "llviewerobjectlist.h"
 #include "llviewershadermgr.h"
+#include "llvoavatar.h"
 #include "llviewerwindow.h"
 #include "llwindow.h"
 #include "pipeline.h"
+
+#include <algorithm>
 
 namespace
 {
@@ -46,6 +52,15 @@ namespace
     // A frame shown at the first point is shown only once this much of the real frames' interval has passed, so that
     // it lands between the two real frames rather than just after the first.
     constexpr F64 EARLIEST_FRACTION = 0.42;
+
+    // Avatars further than this move too little on screen in a frame's interval to be worth a box.
+    constexpr F32 MAX_AVATAR_DISTANCE = 96.f;
+
+    // A box this much larger than the avatar's on every side takes in the edge of what it wears, and little floor.
+    constexpr F32 AVATAR_BOX_PAD = 0.05f;
+
+    // An avatar that moved further than this between two frames jumped (a teleport, a sit): it is left where it was.
+    constexpr F32 MAX_AVATAR_JUMP = 4.f;
 
     bool frame_warp_wanted()
     {
@@ -85,6 +100,7 @@ void QLFrameWarp::release()
 {
     mWorld.release();
     mFrame.release();
+    mAvatars.clear();
     mValid = false;
     mWorldKept = false;
 }
@@ -134,12 +150,56 @@ void QLFrameWarp::captureWorld(bool normal)
     mOrigin = camera->getOrigin();
     mRotation = camera->getQuaternion();
 
+    keepAvatars(mOrigin);
+
     const LLRenderTarget& depth = gPipeline.mMainRT.deferredScreen;
     mDepthSerial = depth.getDepthSerial();
     mDepthWidth = depth.getWidth();
     mDepthHeight = depth.getHeight();
 
     mWorldKept = true;
+}
+
+void QLFrameWarp::keepAvatars(const LLVector3& eye)
+{
+    LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp keep avatars");
+    mAvatars.clear();
+    for (LLCharacter* character : LLCharacter::sInstances)
+    {
+        LLVOAvatar* avatar = dynamic_cast<LLVOAvatar*>(character);
+        // A seated avatar's drawable hangs from its seat's, its box in the seat's space: it is left where it was.
+        if (!avatar || avatar->isDead() || avatar->mDrawable.isNull() || !avatar->mDrawable->isRoot() ||
+            !avatar->mDrawable->isVisible())
+        {
+            continue;
+        }
+        const LLVector3 position = avatar->getPositionAgent();
+        const F32 distance = (position - eye).length();
+        if (distance > MAX_AVATAR_DISTANCE)
+        {
+            continue;
+        }
+        const LLVector4a* extents = avatar->mDrawable->getSpatialExtents();
+        KeptAvatar kept;
+        kept.mID = character->getID();
+        kept.mPosition = position;
+        kept.mMin.set(extents[0].getF32ptr());
+        kept.mMax.set(extents[1].getF32ptr());
+        kept.mMin -= LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        kept.mMax += LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        kept.mDistance = distance;
+        if (!kept.mMin.isFinite() || !kept.mMax.isFinite())
+        {
+            continue;
+        }
+        mAvatars.push_back(kept);
+    }
+
+    // The nearest first: they move furthest on screen, and the shader takes the first box a surface is in.
+    const size_t keep = llmin(mAvatars.size(), (size_t)MAX_AVATARS);
+    std::partial_sort(mAvatars.begin(), mAvatars.begin() + keep, mAvatars.end(),
+                      [](const KeptAvatar& a, const KeptAvatar& b) { return a.mDistance < b.mDistance; });
+    mAvatars.resize(keep);
 }
 
 void QLFrameWarp::captureFrame()
@@ -258,15 +318,42 @@ void QLFrameWarp::present(F32 alpha)
 
     LLMatrix4a mid_view_projection;
     mid_view_projection.setMul(mid.frameModelview(), mProjection);
+    // The kept frame's clip space back to the agent's, where the avatars move.
     LLMatrix4a kept_inverse;
     if (!kept_inverse.setInverse(mViewProjection))
     {
         mValid = false;
         return;
     }
-    // The kept frame's clip space, back to the world and on into the generated camera's.
-    LLMatrix4a reproject;
-    reproject.setMul(kept_inverse, mid_view_projection);
+
+    // How far each kept avatar has moved by the generated frame: the idle step has moved them on to the next frame.
+    F32 avatar_min[MAX_AVATARS * 4] = {};
+    F32 avatar_max[MAX_AVATARS * 4] = {};
+    F32 avatar_move[MAX_AVATARS * 4] = {};
+    S32 avatars = 0;
+    for (const KeptAvatar& kept : mAvatars)
+    {
+        LLViewerObject* object = gObjectList.findObject(kept.mID);
+        if (!object || object->isDead() || !object->asAvatar())
+        {
+            continue;
+        }
+        const LLVector3 moved = object->getPositionAgent() - kept.mPosition;
+        const F32 length = moved.length();
+        if (length < 1e-4f || length > MAX_AVATAR_JUMP || !moved.isFinite())
+        {
+            continue;
+        }
+        const LLVector3 move = moved * alpha;
+        for (S32 i = 0; i < 3; ++i)
+        {
+            avatar_min[avatars * 4 + i] = kept.mMin.mV[i];
+            avatar_max[avatars * 4 + i] = kept.mMax.mV[i];
+            avatar_move[avatars * 4 + i] = move.mV[i];
+        }
+        ++avatars;
+    }
+    mLastAvatars = (U32)avatars;
 
     const S32 width = (S32)mFrame.getWidth();
     const S32 height = (S32)mFrame.getHeight();
@@ -287,7 +374,15 @@ void QLFrameWarp::present(F32 alpha)
         const S32 world_unit = shader.bindTexture(LLShaderMgr::QL_WARP_WORLD_MAP, &mWorld, ALSamplers::BilinearClamp);
         const S32 frame_unit = shader.bindTexture(LLShaderMgr::QL_WARP_FRAME_MAP, &mFrame, ALSamplers::PointClamp);
         const S32 depth_unit = shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &gPipeline.mMainRT.deferredScreen);
-        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_REPROJECT, reproject);
+        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, kept_inverse);
+        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
+        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars);
+        if (avatars > 0)
+        {
+            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);
+            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MAX, (U32)avatars, avatar_max);
+            shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MOVE, (U32)avatars, avatar_move);
+        }
         shader.uniform4f(LLShaderMgr::QL_WARP_WORLD_RECT, (F32)world.mLeft, (F32)world.mBottom, (F32)world.getWidth(),
                          (F32)world.getHeight());
         shader.uniform2f(LLShaderMgr::QL_WARP_WINDOW_SIZE, (F32)width, (F32)height);

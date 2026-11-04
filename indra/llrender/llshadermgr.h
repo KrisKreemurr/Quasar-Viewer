@@ -737,7 +737,12 @@ public:
         SMAA_PREDICATION_STRENGTH,          //  "smaaPredicationStrength"  how much it lowers the threshold locally, 0 to 1
 
         // Quasar's frame warp (QLFrameWarp)
-        QL_WARP_REPROJECT,                  //  "qlWarpReproject"  mat4, the generated frame's clip space to the captured frame's
+        QL_WARP_INV_VIEW_PROJ,              //  "qlWarpInvViewProj"  mat4, the kept frame's clip space to the agent's
+        QL_WARP_VIEW_PROJ,                  //  "qlWarpViewProj"  mat4, the agent's space to the generated frame's clip space
+        QL_WARP_AVATAR_MIN,                 //  "qlWarpAvatarMin"  vec4[], each moving avatar's box in the kept frame, low corner
+        QL_WARP_AVATAR_MAX,                 //  "qlWarpAvatarMax"  vec4[], and high corner
+        QL_WARP_AVATAR_MOVE,                //  "qlWarpAvatarMove"  vec4[], how far each has moved by the generated frame
+        QL_WARP_AVATAR_COUNT,               //  "qlWarpAvatarCount"  int, the boxes given
         QL_WARP_WORLD_RECT,                 //  "qlWarpWorldRect"  vec4, the world view in window pixels: left, bottom, width, height
         QL_WARP_WINDOW_SIZE,                //  "qlWarpWindowSize"  vec2, the window in pixels
         QL_WARP_WORLD_MAP,                  //  "qlWarpWorldMap"  sampler2D, the captured world before the interface

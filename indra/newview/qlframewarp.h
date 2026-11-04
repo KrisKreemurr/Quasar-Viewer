@@ -25,8 +25,11 @@
 
 #include "llmatrix4a.h"
 #include "llquaternion.h"
+#include "lluuid.h"
 #include "llrendertarget.h"
 #include "v3math.h"
+
+#include <vector>
 
 /// One generated frame between each two real ones (QuasarFrameWarp).
 ///
@@ -36,9 +39,11 @@
 /// cleared, to a camera part of the way from the kept frame's camera to the next one's, with the interface laid over
 /// it as it was. It is swapped in on its own, so the screen shows two frames for each one the viewer renders.
 ///
-/// It moves the camera only: what moves in the world (avatars walking, a door) moves at the rendered rate, where the
-/// kept frame put it. Surfaces the kept frame did not see (behind an edge the camera moves past) take the nearest
-/// surface it did, the stretch every reprojection shows at an edge.
+/// The camera moves, and so do the nearest avatars: each is kept with its box and position, and a surface in its box
+/// moves with it by the generated frame, so one walking, flying or riding moves as smoothly as the camera. Only the
+/// whole avatar moves; its limbs keep the kept frame's pose, so a dance still steps at the rendered rate, as does
+/// anything else that moves (a door, a vehicle). Surfaces the kept frame did not see (behind an edge something moved
+/// past) are filled from the background behind them.
 ///
 /// It is shown at the first of two points that is far enough from the last real frame's swap to land between it and
 /// the next: after the idle step, or, failing that, once the next frame has culled and sorted and is about to draw.
@@ -81,11 +86,16 @@ public:
     U32 lastGenerated() const { return mLastGenerated; }
     F32 lastWarpMs() const { return mLastWarpMs; }
     F32 baseIntervalMs() const { return (F32)(mInterval * 1000.0); }
+    U32 lastAvatars() const { return mLastAvatars; }
+
+    /// The most avatars that move on their own in a generated frame; the shader's MAX_WARP_AVATARS.
+    static constexpr U32 MAX_AVATARS = 32;
 
 private:
     QLFrameWarp() = default;
 
     bool ensureTargets(U32 width, U32 height);
+    void keepAvatars(const LLVector3& eye);
     void present(F32 alpha);
 
     LLRenderTarget mWorld;          // the world before the interface, window sized
@@ -99,6 +109,18 @@ private:
     U64          mDepthSerial = 0;  // the G-buffer depth's build the kept frame was drawn into
     U32          mDepthWidth  = 0;
     U32          mDepthHeight = 0;
+
+    // The nearest avatars as the kept frame drew them, nearest first.
+    struct KeptAvatar
+    {
+        LLUUID    mID;
+        LLVector3 mPosition;    // the agent's space
+        LLVector3 mMin;         // its box, padded
+        LLVector3 mMax;
+        F32       mDistance;
+    };
+    std::vector<KeptAvatar> mAvatars;
+    U32                     mLastAvatars = 0;   // avatars moved in the last generated frame
 
     bool mWorldKept = false;        // captureWorld ran for the frame being shown
     bool mValid     = false;        // a whole frame is kept and its depth stands
