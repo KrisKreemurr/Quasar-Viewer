@@ -166,6 +166,9 @@ public:
 private:
     F32  updateImagesCreateTextures(F32 max_time);
     F32  updateImagesFetchTextures(F32 max_time);
+    // Quasar (QuasarParallelPixelArea): measures, across QLJobPool, the pixel areas the decode priority walks of these
+    // textures would measure one at a time, so the walks find them measured.
+    void measureDuePixelAreas(const std::vector<LLPointer<LLViewerFetchedTexture> >& entries);
     void updateImagesUpdateStats();
     F32  updateImagesLoadingFastCache(F32 max_time);
 

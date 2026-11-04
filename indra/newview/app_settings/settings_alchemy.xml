@@ -2696,6 +2696,28 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarParallelPixelArea</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): work out the on-screen size of the faces the texture priority update looks at this frame across several cores (QuasarJobThreads) rather than one at a time on the main thread. Rigged faces in a crowd are the bulk of it. Applies from the next frame.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarThrottleHiddenFolderFilter</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): inventory and folder views no one can see (hidden tabs, closed floaters) run their filter one frame in four rather than every frame, while the filter is unchanged. Saves a little main-thread time each frame.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarJobThreads</key>
         <map>
             <key>Comment</key>

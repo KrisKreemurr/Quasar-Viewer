@@ -38,6 +38,7 @@
 #include "lltextbox.h"
 #include "lltrans.h"
 #include "llui.h"
+#include "llframetimer.h"
 #include "lluictrlfactory.h"
 
 // Linden library includes
@@ -1788,8 +1789,23 @@ void LLFolderView::update()
         mNeedsAutoSelect = true;
     }
 
-    // Filter to determine visibility before arranging
-    filter(filter_object);
+    // Filter to determine visibility before arranging.
+    // Quasar (QuasarThrottleHiddenFolderFilter): a folder view no one can see, an inventory tab or panel that is hidden
+    // or in a closed floater, filters one frame in four while its filter is unchanged, each view on its own frame so
+    // that they do not all land on one. The viewer keeps several (the inventory's tabs, outfits, the places and
+    // landmark panels), and each walked its items every frame. A changed filter, or a view coming into sight, filters
+    // the next frame as before.
+    static LLUICachedControl<bool> throttle_hidden("QuasarThrottleHiddenFolderFilter", false);
+    bool run_filter = true;
+    if (throttle_hidden && !filter_object.isModified() && mParentPanel.get() && !mParentPanel.get()->isInVisibleChain())
+    {
+        const U32 offset = (U32)(((uintptr_t)this) >> 6);
+        run_filter = ((LLFrameTimer::getFrameCount() + offset) & 3) == 0;
+    }
+    if (run_filter)
+    {
+        filter(filter_object);
+    }
 
     // Clear the modified setting on the filter only if the filter finished after running the filter process
     // Note: if the filter count has timed out, that means the filter halted before completing the entire set of items

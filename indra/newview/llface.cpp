@@ -2010,9 +2010,8 @@ namespace
     // rigged faces. The area only steers texture priority and LOD, so an avatar drawn as an impostor, or far off, is
     // measured less often: once a second as an impostor, and otherwise every tenth of a second out to 8 m, slowing to
     // every four tenths by 32 m. Your own avatar always every tenth.
-    F32 rigged_pixel_area_period(LLVOAvatar* avatar, F32 base)
+    F32 rigged_pixel_area_period(LLVOAvatar* avatar, F32 base, bool throttle)
     {
-        static LLCachedControl<bool> throttle(gSavedSettings, "QuasarRiggedPixelAreaThrottle", true);
         if (!throttle || !avatar || avatar->isSelf() || avatar->mDrawable.isNull())
         {
             return base;
@@ -2023,33 +2022,85 @@ namespace
         }
         return base * llclamp(avatar->mDrawable->mDistanceWRTCamera / 8.f, 1.f, 4.f);
     }
+
+    constexpr F32 PIXEL_AREA_UPDATE_PERIOD = 0.1f;
 }
 
 bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
 {
-    constexpr F32 PIXEL_AREA_UPDATE_PERIOD = 0.1f;
     // this is an expensive operation and the result is valid (enough) for several frames
     // don't update every frame
-    if (gFrameTimeSeconds - mLastPixelAreaUpdate < PIXEL_AREA_UPDATE_PERIOD)
+    if (!pixelAreaDue())
     {
         return true;
     }
 
+    static LLCachedControl<bool> throttle(gSavedSettings, "QuasarRiggedPixelAreaThrottle", true);
+    const F32 period = preparePixelArea(throttle());
+    return measurePixelArea(*LLViewerCamera::getInstance(), ll_frand(), ll_frand(), period, cos_angle_to_view_dir, radius);
+}
+
+bool LLFace::pixelAreaDue() const
+{
+    return !(gFrameTimeSeconds - mLastPixelAreaUpdate < PIXEL_AREA_UPDATE_PERIOD);
+}
+
+F32 LLFace::preparePixelArea(bool throttle)
+{
+    if (!isState(LLFace::RIGGED) || mVObjp.isNull())
+    {
+        return PIXEL_AREA_UPDATE_PERIOD;
+    }
+    LLVOAvatar* avatar = mVObjp->getAvatar();
+    // Worked out here, not in the measure: whether the avatar is an impostor asks the mute list and its render cost.
+    const F32 period = rigged_pixel_area_period(avatar, PIXEL_AREA_UPDATE_PERIOD, throttle);
+    LLVolume* volume = mVObjp->getVolume();
+    if (!avatar || !avatar->mDrawable || !volume)
+    {
+        return period;
+    }
+
+    LLVolumeFace& face = volume->getVolumeFace(mTEOffset);
+    auto& rigInfo = face.mJointRiggingInfoTab;
+    if (rigInfo.needsUpdate())
+    {
+        LLVOVolume* vo_volume = (LLVOVolume*)mVObjp.get();
+        const LLMeshSkinInfo* skin = vo_volume->getSkinInfo();
+        if (skin)
+        {
+            LLSkinningUtil::updateRiggingInfo(skin, avatar, face);
+        }
+    }
+
+    // A joint's world matrix is brought up to date when it is asked for (LLJoint::getWorldMatrix), its parents' with
+    // it: asked for here, on this thread, the measure only reads what it holds.
+    for (S32 i = 0; i < rigInfo.size(); i++)
+    {
+        if (rigInfo[i].isRiggedTo())
+        {
+            if (LLJoint* joint = avatar->getJoint(i))
+            {
+                joint->getWorldMatrix();
+            }
+        }
+    }
+    return period;
+}
+
+bool LLFace::measurePixelArea(LLViewerCamera& camera_ref, F32 jitter1, F32 jitter2, F32 period,
+                              F32& cos_angle_to_view_dir, F32& radius)
+{
     LL_PROFILE_ZONE_SCOPED_CATEGORY_FACE;
 
     //get area of circle around face
     LLVector4a center;
     LLVector4a size;
 
-    // Quasar: a rigged face's avatar, looked up once for the box and the update period below.
-    LLVOAvatar* rigged_avatar = nullptr;
-
     if (isState(LLFace::RIGGED))
     {
         LL_PROFILE_ZONE_NAMED_CATEGORY_FACE("calcPixelArea - rigged");
         //override with joint volume face joint bounding boxes
         LLVOAvatar* avatar = mVObjp.notNull() ? mVObjp->getAvatar() : nullptr;
-        rigged_avatar = avatar;
         bool hasRiggedExtents = false;
 
         if (avatar && avatar->mDrawable)
@@ -2059,17 +2110,8 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
             {
                 LLVolumeFace& face = volume->getVolumeFace(mTEOffset);
 
+                // Its rigging info was brought up to date by preparePixelArea.
                 auto& rigInfo = face.mJointRiggingInfoTab;
-
-                if (rigInfo.needsUpdate())
-                {
-                    LLVOVolume* vo_volume = (LLVOVolume*)mVObjp.get();
-                    const LLMeshSkinInfo* skin = vo_volume->getSkinInfo();
-                    if (skin)
-                    {
-                        LLSkinningUtil::updateRiggingInfo(skin, avatar, face);
-                    }
-                }
 
                 // calculate the world space bounding box of the face by combining the bounding boxes of all the joints
                 LLVector4a& minp = mRiggedExtents[0];
@@ -2086,8 +2128,8 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
 
                         if (joint)
                         {
-                            LLMatrix4a worldMat;
-                            worldMat = joint->getWorldMatrix();
+                            // Brought up to date by preparePixelArea: read as it is held.
+                            const LLMatrix4a& worldMat = joint->getXform()->getWorldMatrix();
 
                             LLVector4a extents[2];
 
@@ -2129,7 +2171,7 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
     }
     size.mul(0.5f);
 
-    LLViewerCamera* camera = LLViewerCamera::getInstance();
+    LLViewerCamera* camera = &camera_ref;
 
     // An active drawable's face extents are in the drawable's frame: its box in agent space is theirs transformed.
     LLVector4a box_center = center;
@@ -2163,17 +2205,16 @@ bool LLFace::calcPixelArea(F32& cos_angle_to_view_dir, F32& radius)
     mPixelArea = radius*radius * 3.14159f;
 
     // remember last update time, add 10% noise to avoid all faces updating at the same time
-    mLastPixelAreaUpdate = gFrameTimeSeconds + ll_frand() * PIXEL_AREA_UPDATE_PERIOD * 0.1f;
+    mLastPixelAreaUpdate = gFrameTimeSeconds + jitter1 * PIXEL_AREA_UPDATE_PERIOD * 0.1f;
 
     // Quasar: a rigged face of an avatar far off or drawn as an impostor waits longer for its next update. The wait is
     // folded into the time stamped, so the check at the top, which runs far more often than this, stays as it was.
     if (isState(LLFace::RIGGED))
     {
-        const F32 period = rigged_pixel_area_period(rigged_avatar, PIXEL_AREA_UPDATE_PERIOD);
         if (period > PIXEL_AREA_UPDATE_PERIOD)
         {
             // Spread over the whole wait, so a crowd's faces do not come due together.
-            mLastPixelAreaUpdate += (period - PIXEL_AREA_UPDATE_PERIOD) * (0.9f + 0.2f * ll_frand());
+            mLastPixelAreaUpdate += (period - PIXEL_AREA_UPDATE_PERIOD) * (0.9f + 0.2f * jitter2);
         }
     }
 

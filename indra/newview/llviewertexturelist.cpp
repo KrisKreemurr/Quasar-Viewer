@@ -62,6 +62,12 @@
 #include "llviewerdisplay.h"
 #include "llviewerwindow.h"
 #include "llprogressview.h"
+#include "qljobpool.h"
+#include "llface.h"
+#include "lldrawable.h"
+#include "llspatialpartition.h"
+#include "llviewercamera.h"
+#include "llrand.h"
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -1359,6 +1365,13 @@ F32 LLViewerTextureList::updateImagesFetchTextures(F32 max_time)
         });
     }
 
+    // Quasar: the faces these textures' walks would measure, measured together across the job pool's threads.
+    static LLCachedControl<bool> parallel_pixel_area(gSavedSettings, "QuasarParallelPixelArea", false);
+    if (parallel_pixel_area && QLJobPool::instance().workers() > 0)
+    {
+        measureDuePixelAreas(entries);
+    }
+
     LLTimer timer;
 
     {
@@ -1389,6 +1402,135 @@ F32 LLViewerTextureList::updateImagesFetchTextures(F32 max_time)
     }
 
     return timer.getElapsedTimeF32();
+}
+
+// Quasar (QuasarParallelPixelArea). updateImageDecodePriority measures a face's pixel area (LLFace::calcPixelArea) as its
+// walk of a texture's faces reaches it, at most once in ten frames, and a crowd's rigged faces each take their box
+// through every joint they are rigged to. Here the faces the walks of this frame's textures will reach and find due are
+// gathered first, by the same slices those walks take, and measured across the job pool, then stamped as the walk
+// would stamp them, so the walk finds them measured and moves on. A face shared by several textures is gathered once.
+// Faces of textures the walks run out of time before reaching are measured anyway; their measures are as good.
+//
+// What the measure would do lazily is done here first, on this thread: a rigged face's rigging info and its joints'
+// world matrices (LLFace::preparePixelArea), and the random spread of the next update. The measure then reads the
+// face, its object, drawable, avatar and joints and the main camera, and writes only its own face.
+void LLViewerTextureList::measureDuePixelAreas(const std::vector<LLPointer<LLViewerFetchedTexture> >& entries)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
+
+    struct Due
+    {
+        LLFace* mFace;
+        F32     mPeriod;
+        F32     mJitter1;
+        F32     mJitter2;
+        bool    mMeasure;  // its period has passed; otherwise it stands as it is (calcPixelArea's early return)
+        bool    mResult;
+    };
+    static std::vector<Due> due;
+    due.clear();
+
+    static LLCachedControl<bool> throttle(gSavedSettings, "QuasarRiggedPixelAreaThrottle", true);
+    const bool throttle_rigged = throttle();
+    constexpr U32 max_faces_to_check = 1024;  // as updateImageDecodePriority
+    constexpr U32 faces_per_visit = 32;
+
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_TEXTURE("pixel area gather");
+        for (const auto& imagep : entries)
+        {
+            if (imagep->getNumRefs() <= 1)
+            {
+                continue;
+            }
+
+            U32 channel_faces[LLRender::NUM_TEXTURE_CHANNELS];
+            U32 face_count = 0;
+            for (U32 i = 0; i < LLRender::NUM_TEXTURE_CHANNELS; ++i)
+            {
+                channel_faces[i] = imagep->getNumFaces(i);
+                face_count += channel_faces[i];
+            }
+            if (face_count == 0 || face_count > max_faces_to_check)
+            {
+                continue;
+            }
+
+            // The slice the walk will take: from its cursor, which it moves itself.
+            U32 to_walk = face_count;
+            U32 position = 0;
+            if (face_count > faces_per_visit)
+            {
+                to_walk = faces_per_visit;
+                position = imagep->mFaceWalkCursor % face_count;
+            }
+            U32 channel = 0;
+            while (position >= channel_faces[channel])
+            {
+                position -= channel_faces[channel];
+                ++channel;
+            }
+
+            for (U32 walked = 0; walked < to_walk; ++walked)
+            {
+                while (position >= channel_faces[channel])
+                {
+                    position = 0;
+                    channel = (channel + 1) % LLRender::NUM_TEXTURE_CHANNELS;
+                }
+                LLFace* face = (*(imagep->getFaceList(channel)))[position];
+                ++position;
+
+                if (!face || !face->getViewerObject())
+                {
+                    continue;
+                }
+                LLDrawable* drawable = face->getDrawable();
+                LLSpatialGroup* group = drawable ? drawable->getSpatialGroup() : nullptr;
+                if (!group || !group->getAnyVisible() || (gFrameCount - face->mLastTextureUpdate) <= 10)
+                {
+                    continue;
+                }
+
+                face->mLastTextureUpdate = gFrameCount;  // gathered: not again, by this texture or another
+                Due d;
+                d.mFace    = face;
+                d.mMeasure = face->pixelAreaDue();
+                d.mPeriod  = d.mMeasure ? face->preparePixelArea(throttle_rigged) : 0.f;
+                d.mJitter1 = ll_frand();
+                d.mJitter2 = ll_frand();
+                d.mResult  = true;
+                due.push_back(d);
+            }
+        }
+    }
+
+    if (due.empty())
+    {
+        return;
+    }
+
+    LLViewerCamera& camera = *LLViewerCamera::getInstance();
+    QLJobPool::instance().parallelFor((U32)due.size(), 32, [&](U32 begin, U32 end)
+    {
+        for (U32 i = begin; i < end; ++i)
+        {
+            Due& d = due[i];
+            if (d.mMeasure)
+            {
+                F32 cos_angle_to_view_dir;
+                F32 radius;
+                d.mResult = d.mFace->measurePixelArea(camera, d.mJitter1, d.mJitter2, d.mPeriod, cos_angle_to_view_dir, radius);
+            }
+        }
+    });
+
+    for (const Due& d : due)
+    {
+        // As updateImageDecodePriority sets it: seen, its drawable drawn this frame or the last, and its own box in view.
+        d.mFace->mInFrustum = d.mResult && d.mFace->mBoxInFrustum && d.mFace->getDrawable()->isRecentlyVisible();
+        ++sPixelAreaCalcCount;
+    }
 }
 
 void LLViewerTextureList::updateImagesUpdateStats()

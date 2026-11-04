@@ -49,6 +49,7 @@ class LLViewerTexture;
 class LLGeometryManager;
 class LLDrawInfo;
 class LLMeshSkinInfo;
+class LLViewerCamera;
 
 const F32 MIN_ALPHA_SIZE = 1024.f;
 const F32 MIN_TEX_ANIM_SIZE = 512.f;
@@ -243,6 +244,19 @@ private:
     friend class LLViewerTextureList;
     F32         adjustPartialOverlapPixelArea(F32 cos_angle_to_view_dir, F32 radius );
     bool        calcPixelArea(F32& cos_angle_to_view_dir, F32& radius) ;
+
+    // Quasar: calcPixelArea in parts, so the measuring can run on QLJobPool (QuasarParallelPixelArea).
+    // Whether the measure is due again (its update period has passed).
+    bool        pixelAreaDue() const;
+    // Main thread, before measuring a due face: brings its rigging info and the world matrices of the joints it is
+    // rigged to up to date, which the measure would otherwise do lazily, and returns how long the measure is to stand
+    // (throttle is QuasarRiggedPixelAreaThrottle).
+    F32         preparePixelArea(bool throttle);
+    // The measure itself, once prepared. Reads the face, its object, drawable, avatar and joints and the camera, writes
+    // only this face. jitter1 and jitter2 are in [0, 1) and take the place of the random spread of the next update;
+    // period is what preparePixelArea returned. Different faces may be measured at the same time.
+    bool        measurePixelArea(LLViewerCamera& camera, F32 jitter1, F32 jitter2, F32 period,
+                                 F32& cos_angle_to_view_dir, F32& radius);
 public:
     static F32 calcImportanceToCamera(F32 to_view_dir, F32 dist);
     static F32 adjustPixelArea(F32 importance, F32 pixel_area) ;
