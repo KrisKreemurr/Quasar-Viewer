@@ -4830,6 +4830,155 @@ void renderSoundHighlights(LLDrawable *drawablep)
     }
 }
 
+// Quasar: how many of the main view's opaque draws could join the draw before them in one multi-draw, were vertex storage
+// shared (QuasarBatchMergeStats, QLDrawStats). Two draws can share a multi-draw when everything bound for them is the
+// same but where their vertices sit: the vertex format, the textures, the material and its values, the model and
+// texture matrices, the avatar and skin. That state is hashed per draw, the vertex buffer and index range left out.
+// Counted as the passes are ordered now (nearest first, the cull's order), and with each pass sorted by the hash; a
+// second hash leaves the model matrix out, for what a per-draw matrix buffer would add on top. Blended passes are
+// left out: the alpha pool draws them in depth order.
+namespace
+{
+    inline void ql_mix(U64& h, U64 v)
+    {
+        h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+
+    inline void ql_mix_ptr(U64& h, const void* p)
+    {
+        ql_mix(h, (U64)(uintptr_t)p);
+    }
+
+    inline void ql_mix_f32(U64& h, F32 f)
+    {
+        U32 bits;
+        memcpy(&bits, &f, sizeof(bits));
+        ql_mix(h, bits);
+    }
+
+    U64 ql_draw_state_hash(const LLDrawInfo& info, bool with_matrix)
+    {
+        U64 h = 0;
+        ql_mix(h, info.mVertexBuffer.notNull() ? info.mVertexBuffer->getTypeMask() : 0);
+        ql_mix_ptr(h, info.mTexture.get());
+        ql_mix_ptr(h, info.mSpecularMap.get());
+        ql_mix_ptr(h, info.mNormalMap.get());
+        ql_mix_ptr(h, info.mSpecularMapMatrix);
+        ql_mix_ptr(h, info.mNormalMapMatrix);
+        ql_mix_ptr(h, info.mTextureMatrix);
+        if (with_matrix)
+        {
+            ql_mix_ptr(h, info.mModelMatrix);
+        }
+        ql_mix_ptr(h, info.mAvatar.get());
+        ql_mix_ptr(h, info.mSkinInfo.get());
+        ql_mix_ptr(h, info.mMaterial.get());
+        ql_mix_ptr(h, info.mGLTFMaterial.get());
+        for (const auto& mat : info.mGLTFMaterialList)
+        {
+            ql_mix_ptr(h, mat.get());
+        }
+        for (const LLDrawInfo::MaterialSlot& slot : info.mMaterialSlotList)
+        {
+            ql_mix_ptr(h, slot.mDiffuse.get());
+            ql_mix_ptr(h, slot.mNormalMap.get());
+            ql_mix_ptr(h, slot.mSpecularMap.get());
+            for (U32 c = 0; c < 4; ++c)
+            {
+                ql_mix_f32(h, slot.mSpecColor.mV[c]);
+            }
+            ql_mix_f32(h, slot.mEnvIntensity);
+            ql_mix_f32(h, slot.mAlphaMaskCutoff);
+            ql_mix_f32(h, slot.mFullbright);
+        }
+        for (const auto& tex : info.mTextureList)
+        {
+            ql_mix_ptr(h, tex.get());
+        }
+        for (U32 c = 0; c < 4; ++c)
+        {
+            ql_mix_f32(h, info.mSpecColor.mV[c]);
+        }
+        ql_mix(h, info.mShaderMask);
+        ql_mix_f32(h, info.mEnvIntensity);
+        ql_mix_f32(h, info.mAlphaMaskCutoff);
+        ql_mix(h, ((U64)info.mBlendFuncSrc << 32) | (U64)info.mBlendFuncDst);
+        ql_mix(h, ((U64)info.mDiffuseAlphaMode << 24) | ((U64)info.mBump << 16) | ((U64)info.mShiny << 8) |
+                      ((U64)info.mFullbright << 1) | (U64)info.mHasGlow);
+        return h;
+    }
+
+    bool ql_blended_pass(U32 pass)
+    {
+        switch (pass)
+        {
+            case LLRenderPass::PASS_ALPHA:
+            case LLRenderPass::PASS_ALPHA_RIGGED:
+            case LLRenderPass::PASS_MATERIAL_ALPHA:
+            case LLRenderPass::PASS_MATERIAL_ALPHA_RIGGED:
+            case LLRenderPass::PASS_SPECMAP_BLEND:
+            case LLRenderPass::PASS_SPECMAP_BLEND_RIGGED:
+            case LLRenderPass::PASS_NORMMAP_BLEND:
+            case LLRenderPass::PASS_NORMMAP_BLEND_RIGGED:
+            case LLRenderPass::PASS_NORMSPEC_BLEND:
+            case LLRenderPass::PASS_NORMSPEC_BLEND_RIGGED:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Draws in a sorted list of hashes that equal the one before them.
+    U32 ql_sorted_repeats(std::vector<U64>& hashes)
+    {
+        std::sort(hashes.begin(), hashes.end());
+        U32 repeats = 0;
+        for (size_t i = 1; i < hashes.size(); ++i)
+        {
+            repeats += hashes[i] == hashes[i - 1];
+        }
+        return repeats;
+    }
+
+    void ql_count_batch_merges(LLCullResult* cull)
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar count batch merges");
+
+        static std::vector<U64> with_matrix;
+        static std::vector<U64> without_matrix;
+
+        for (U32 pass = LLRenderPass::PASS_SIMPLE; pass < LLRenderPass::NUM_RENDER_TYPES; ++pass)
+        {
+            if (ql_blended_pass(pass))
+            {
+                continue;
+            }
+
+            with_matrix.clear();
+            without_matrix.clear();
+            for (LLCullResult::drawinfo_iterator i = cull->beginRenderMap(pass); i != cull->endRenderMap(pass); ++i)
+            {
+                const LLDrawInfo* info = *i;
+                if (!info || !info->mCount)
+                {
+                    continue;
+                }
+                const U64 h = ql_draw_state_hash(*info, true);
+                if (!with_matrix.empty() && with_matrix.back() == h)
+                {
+                    ++gQLDrawStats.mMergeAsOrdered;
+                }
+                with_matrix.push_back(h);
+                without_matrix.push_back(ql_draw_state_hash(*info, false));
+            }
+
+            gQLDrawStats.mMergeDraws += (U32)with_matrix.size();
+            gQLDrawStats.mMergeSorted += ql_sorted_repeats(with_matrix);
+            gQLDrawStats.mMergeSortedNoMatrix += ql_sorted_repeats(without_matrix);
+        }
+    }
+}
+
 void LLPipeline::postSort(LLCamera &camera)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
@@ -4939,6 +5088,16 @@ void LLPipeline::postSort(LLCamera &camera)
             }
         }
     }
+    }
+
+    // Quasar: what shared vertex storage would let multi-draws merge in the main view (QuasarBatchMergeStats).
+    {
+        static LLCachedControl<bool> batch_merge_stats(gSavedSettings, "QuasarBatchMergeStats", false);
+        if (batch_merge_stats() && LLViewerCamera::sCurCameraID == LLViewerCamera::CAMERA_WORLD && !sShadowRender &&
+            !sImpostorRender && !gCubeSnapshot)
+        {
+            ql_count_batch_merges(sCull);
+        }
     }
 
     // pack vertex buffers for groups that chose to delay their updates

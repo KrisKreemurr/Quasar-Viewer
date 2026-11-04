@@ -2685,6 +2685,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarBatchMergeStats</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (measurement): count, in the main view's opaque passes, how many draws could join the draw before them in one multi-draw if they shared vertex storage: as the draws are ordered now, and once sorted by their state. Shown on the Quasar status line (QuasarShowHiZInfo). Costs a sort of the main view's draws each frame while on.</string>
+            <key>Persist</key>
+            <integer>0</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarJobThreads</key>
         <map>
             <key>Comment</key>

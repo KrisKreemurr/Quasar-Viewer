@@ -55,6 +55,20 @@ struct QLDrawStats
     F32 mCullMs[NUM_VIEWS]     = {};
     F32 mLastCullMs[NUM_VIEWS] = {};
 
+    // What shared vertex storage would let multi-draws merge, in the main view's opaque passes (QuasarBatchMergeStats,
+    // LLPipeline::countBatchMerges): the draws counted, those whose state (vertex format, textures, material, matrix,
+    // skin, every other thing a draw binds) equals the draw's before them in the pass as ordered now, and as many once
+    // each pass is sorted by that state; and once sorted ignoring the model matrix, what a per-draw matrix buffer
+    // would add. Filled during postSort, before the clear that ends the frame, so they land in the mLast* copies.
+    U32 mMergeDraws        = 0;
+    U32 mMergeAsOrdered    = 0;
+    U32 mMergeSorted       = 0;
+    U32 mMergeSortedNoMatrix = 0;
+    U32 mLastMergeDraws        = 0;
+    U32 mLastMergeAsOrdered    = 0;
+    U32 mLastMergeSorted       = 0;
+    U32 mLastMergeSortedNoMatrix = 0;
+
     void noteDraw(const void* buffer)
     {
         ++mDraws;
@@ -72,6 +86,11 @@ struct QLDrawStats
         mLastMatrixChanges  = mMatrixChanges;
         mDraws = mBufferSwitches = mMatrixChanges = 0;
         mLastBuffer = nullptr;
+        mLastMergeDraws          = mMergeDraws;
+        mLastMergeAsOrdered      = mMergeAsOrdered;
+        mLastMergeSorted         = mMergeSorted;
+        mLastMergeSortedNoMatrix = mMergeSortedNoMatrix;
+        mMergeDraws = mMergeAsOrdered = mMergeSorted = mMergeSortedNoMatrix = 0;
         for (U32 i = 0; i < NUM_VIEWS; ++i)
         {
             mLastCullMs[i] = mCullMs[i];
