@@ -659,9 +659,9 @@ public:
             {
                 const QLFrameWarp& warp = QLFrameWarp::instance();
                 static const char* const warp_status[] = { "off", "no program", "waiting", "active", "base fps above limit" };
-                addText(xpos, ypos, llformat("Quasar frame gen: %s | %u generated/s | base frame %.1f ms | warp %.2f ms | %u avatars moved",
-                                             warp_status[warp.status()], warp.lastGenerated(), warp.baseIntervalMs(),
-                                             warp.lastWarpMs(), warp.lastAvatars()));
+                addText(xpos, ypos, llformat("Quasar frame gen: %s, %s | %u generated/s | base frame %.1f ms | warp %.2f ms | %u avatars moved",
+                                             warp_status[warp.status()], warp.twoFrames() ? "from two frames" : "from one frame",
+                                             warp.lastGenerated(), warp.baseIntervalMs(), warp.lastWarpMs(), warp.lastAvatars()));
                 ypos += y_inc;
             }
         }

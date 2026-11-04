@@ -49,8 +49,8 @@ namespace
     // agent's coordinates, a camera reset): nothing between the two frames would be right.
     constexpr F32 MAX_EYE_JUMP = 8.f;
 
-    // A frame shown at the first point is shown only once this much of the real frames' interval has passed, so that
-    // it lands between the two real frames rather than just after the first.
+    // A frame sent at the first point is sent only once this much of the real frames' interval has passed, so that it
+    // lands between the two real frames rather than just after the first.
     constexpr F64 EARLIEST_FRACTION = 0.42;
 
     // Avatars further than this move too little on screen in a frame's interval to be worth a box.
@@ -62,10 +62,34 @@ namespace
     // An avatar that moved further than this between two frames jumped (a teleport, a sit): it is left where it was.
     constexpr F32 MAX_AVATAR_JUMP = 4.f;
 
+    // The shader's switches, above the box count in qlWarpAvatarCount.
+    constexpr S32 WARP_FILL  = 0x100;
+    constexpr S32 WARP_DEBUG = 0x200;
+    constexpr S32 WARP_BOTH  = 0x400;
+
     bool frame_warp_wanted()
     {
         static LLCachedControl<bool> frame_warp(gSavedSettings, "QuasarFrameWarp", false);
         return frame_warp();
+    }
+
+    // Whether the window can be drawn to between real frames at all.
+    bool window_drawable()
+    {
+        return LLStartUp::getStartupState() == STATE_STARTED && gViewerWindow && gViewerWindow->getWindow() &&
+               !gViewerWindow->getWindow()->getMinimized() && !gTeleportDisplay;
+    }
+
+    // The camera's view and projection at a point between two cameras.
+    LLMatrix4a between_cameras(const LLVector3& from_origin, const LLQuaternion& from_rotation, const LLVector3& to_origin,
+                               const LLQuaternion& to_rotation, const LLMatrix4a& projection, F32 alpha)
+    {
+        LLCamera mid = *LLViewerCamera::getInstance();
+        mid.setOrigin(from_origin + (to_origin - from_origin) * alpha);
+        mid.setAxes(slerp(alpha, from_rotation, to_rotation));
+        LLMatrix4a view_projection;
+        view_projection.setMul(mid.frameModelview(), projection);
+        return view_projection;
     }
 }
 
@@ -75,20 +99,32 @@ QLFrameWarp& QLFrameWarp::instance()
     return warp;
 }
 
-bool QLFrameWarp::ensureTargets(U32 width, U32 height)
+bool QLFrameWarp::twoFrames() const
 {
-    if (mWorld.getWidth() != width || mWorld.getHeight() != height || !mWorld.isComplete())
+    static LLCachedControl<S32> mode(gSavedSettings, "QuasarFrameWarpMode", 1);
+    return mode() >= 1;
+}
+
+bool QLFrameWarp::ensureTargets(Kept& kept, U32 width, U32 height, U32 depth_width, U32 depth_height)
+{
+    for (LLRenderTarget* target : { &kept.mWorld, &kept.mFrame })
     {
-        mWorld.release();
-        if (!mWorld.allocate(width, height, GL_RGBA8))
+        if (target->getWidth() != width || target->getHeight() != height || !target->isComplete())
         {
-            return false;
+            target->release();
+            if (!target->allocate(width, height, GL_RGBA8))
+            {
+                return false;
+            }
         }
     }
-    if (mFrame.getWidth() != width || mFrame.getHeight() != height || !mFrame.isComplete())
+    const LLRenderTarget::eDepthFormat depth_format = LLPipeline::mainDepthFormat();
+    if (kept.mDepth.getWidth() != depth_width || kept.mDepth.getHeight() != depth_height || !kept.mDepth.isComplete() ||
+        kept.mDepth.getDepthFormat() != depth_format)
     {
-        mFrame.release();
-        if (!mFrame.allocate(width, height, GL_RGBA8))
+        kept.mDepth.release();
+        if (!kept.mDepth.allocate(depth_width, depth_height, 0, true, false, ALTextureSlot::TT_TEXTURE,
+                                  LLRenderTarget::MIPS_NONE, depth_format))
         {
             return false;
         }
@@ -96,19 +132,40 @@ bool QLFrameWarp::ensureTargets(U32 width, U32 height)
     return true;
 }
 
+bool QLFrameWarp::fitsWindow(const Kept& kept) const
+{
+    return gViewerWindow && (U32)gViewerWindow->getWindowWidthRaw() == kept.mFrame.getWidth() &&
+           (U32)gViewerWindow->getWindowHeightRaw() == kept.mFrame.getHeight();
+}
+
 void QLFrameWarp::release()
 {
-    mWorld.release();
-    mFrame.release();
-    mAvatars.clear();
-    mValid = false;
-    mWorldKept = false;
+    for (Kept& kept : mKept)
+    {
+        kept.mWorld.release();
+        kept.mFrame.release();
+        kept.mDepth.release();
+        kept.mAvatars.clear();
+        kept.mComplete = false;
+    }
+    mNewest = -1;
+    mFilling = -1;
+    mHeld = -1;
+}
+
+void QLFrameWarp::invalidate()
+{
+    for (Kept& kept : mKept)
+    {
+        kept.mComplete = false;
+    }
+    mNewest = -1;
+    mFilling = -1;
 }
 
 void QLFrameWarp::captureWorld(bool normal)
 {
-    mWorldKept = false;
-    mValid = false;
+    mFilling = -1;
 
     if (!frame_warp_wanted())
     {
@@ -119,8 +176,9 @@ void QLFrameWarp::captureWorld(bool normal)
         }
         return;
     }
-    if (!normal || !gViewerWindow)
+    if (!normal || !gViewerWindow || gPipeline.mRT != &gPipeline.mMainRT)
     {
+        invalidate();
         return;
     }
     if (!gQLFrameWarpProgram.isComplete())
@@ -136,34 +194,40 @@ void QLFrameWarp::captureWorld(bool normal)
     LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp keep world");
     LL_PROFILE_GPU_ZONE("quasar warp keep world");
 
-    const U32 width = (U32)gViewerWindow->getWindowWidthRaw();
-    const U32 height = (U32)gViewerWindow->getWindowHeightRaw();
-    if (width == 0 || height == 0 || !ensureTargets(width, height))
+    // Into the slot that is neither the newest frame nor one still held back to be shown.
+    const S32 slot = (mNewest == 0) ? 1 : 0;
+    if (slot == mHeld)
     {
         return;
     }
-    mWorld.copyFromWindow(0, 0, width, height);
+    Kept& kept = mKept[slot];
+    kept.mComplete = false;
+
+    const U32 width = (U32)gViewerWindow->getWindowWidthRaw();
+    const U32 height = (U32)gViewerWindow->getWindowHeightRaw();
+    LLRenderTarget& depth = gPipeline.mMainRT.deferredScreen;
+    if (width == 0 || height == 0 || !ensureTargets(kept, width, height, depth.getWidth(), depth.getHeight()))
+    {
+        return;
+    }
+    kept.mWorld.copyFromWindow(0, 0, width, height);
+    // A copy of its own: the next frame clears the G-buffer, and from two frames this one is read after it has.
+    gPipeline.copySceneDepth(kept.mDepth);
 
     const LLViewerCamera* camera = LLViewerCamera::getInstance();
-    mProjection = camera->getProjection();
-    mViewProjection.setMul(camera->getModelview(), mProjection);
-    mOrigin = camera->getOrigin();
-    mRotation = camera->getQuaternion();
+    kept.mProjection = camera->getProjection();
+    kept.mViewProjection.setMul(camera->getModelview(), kept.mProjection);
+    kept.mOrigin = camera->getOrigin();
+    kept.mRotation = camera->getQuaternion();
+    keepAvatars(kept);
 
-    keepAvatars(mOrigin);
-
-    const LLRenderTarget& depth = gPipeline.mMainRT.deferredScreen;
-    mDepthSerial = depth.getDepthSerial();
-    mDepthWidth = depth.getWidth();
-    mDepthHeight = depth.getHeight();
-
-    mWorldKept = true;
+    mFilling = slot;
 }
 
-void QLFrameWarp::keepAvatars(const LLVector3& eye)
+void QLFrameWarp::keepAvatars(Kept& kept)
 {
     LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp keep avatars");
-    mAvatars.clear();
+    kept.mAvatars.clear();
     for (LLCharacter* character : LLCharacter::sInstances)
     {
         LLVOAvatar* avatar = dynamic_cast<LLVOAvatar*>(character);
@@ -174,44 +238,87 @@ void QLFrameWarp::keepAvatars(const LLVector3& eye)
             continue;
         }
         const LLVector3 position = avatar->getPositionAgent();
-        const F32 distance = (position - eye).length();
+        const F32 distance = (position - kept.mOrigin).length();
         if (distance > MAX_AVATAR_DISTANCE)
         {
             continue;
         }
         const LLVector4a* extents = avatar->mDrawable->getSpatialExtents();
-        KeptAvatar kept;
-        kept.mID = character->getID();
-        kept.mPosition = position;
-        kept.mMin.set(extents[0].getF32ptr());
-        kept.mMax.set(extents[1].getF32ptr());
-        kept.mMin -= LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
-        kept.mMax += LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
-        kept.mDistance = distance;
-        if (!kept.mMin.isFinite() || !kept.mMax.isFinite())
+        KeptAvatar one;
+        one.mID = character->getID();
+        one.mPosition = position;
+        one.mMin.set(extents[0].getF32ptr());
+        one.mMax.set(extents[1].getF32ptr());
+        one.mMin -= LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        one.mMax += LLVector3(AVATAR_BOX_PAD, AVATAR_BOX_PAD, AVATAR_BOX_PAD);
+        one.mDistance = distance;
+        if (!one.mMin.isFinite() || !one.mMax.isFinite())
         {
             continue;
         }
-        mAvatars.push_back(kept);
+        kept.mAvatars.push_back(one);
     }
 
     // The nearest first: they move furthest on screen, and the shader takes the first box a surface is in.
-    const size_t keep = llmin(mAvatars.size(), (size_t)MAX_AVATARS);
-    std::partial_sort(mAvatars.begin(), mAvatars.begin() + keep, mAvatars.end(),
+    const size_t keep = llmin(kept.mAvatars.size(), (size_t)MAX_AVATARS);
+    std::partial_sort(kept.mAvatars.begin(), kept.mAvatars.begin() + keep, kept.mAvatars.end(),
                       [](const KeptAvatar& a, const KeptAvatar& b) { return a.mDistance < b.mDistance; });
-    mAvatars.resize(keep);
+    kept.mAvatars.resize(keep);
 }
 
 void QLFrameWarp::captureFrame()
 {
-    if (!mWorldKept)
+    if (mFilling < 0)
     {
         return;
     }
     LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp keep frame");
     LL_PROFILE_GPU_ZONE("quasar warp keep frame");
-    mFrame.copyFromWindow(0, 0, mFrame.getWidth(), mFrame.getHeight());
-    mValid = true;
+    Kept& kept = mKept[mFilling];
+    kept.mFrame.copyFromWindow(0, 0, kept.mFrame.getWidth(), kept.mFrame.getHeight());
+    kept.mComplete = true;
+    kept.mSerial = ++mSerial;
+    mNewest = mFilling;
+    mFilling = -1;
+}
+
+bool QLFrameWarp::swapInstead()
+{
+    // An earlier real frame neither point between frames showed (a snapshot came between) is dropped: shown now it
+    // would draw over this frame, which the window holds for the swap to come.
+    mHeld = -1;
+
+    if (!frame_warp_wanted() || !twoFrames() || mNewest < 0 || !window_drawable())
+    {
+        return false;
+    }
+    const Kept& next = mKept[mNewest];
+    const Kept& from = mKept[1 - mNewest];
+    if (!next.mComplete || !from.mComplete || from.mSerial + 1 != next.mSerial || !fitsWindow(from) ||
+        !fitsWindow(next) || (next.mOrigin - from.mOrigin).length() > MAX_EYE_JUMP)
+    {
+        return false;
+    }
+
+    // Above this the screen gains little from twice as many frames, and the second swap a frame costs more than it is
+    // worth.
+    static LLCachedControl<F32> below_fps(gSavedSettings, "QuasarFrameWarpBelowFPS", 170.f);
+    if (below_fps() > 0.f && mInterval < 1.0 / (F64)below_fps())
+    {
+        mStatus = FAST;
+        return false;
+    }
+
+    // Halfway between the two, which is where it lands in time: it goes out now, where the newer frame would have,
+    // and the newer goes out half an interval later, as the older did before it.
+    const F32 alpha = 0.5f;
+    const LLMatrix4a mid = between_cameras(from.mOrigin, from.mRotation, next.mOrigin, next.mRotation, next.mProjection, alpha);
+    if (!present(from, &next, mid, alpha))
+    {
+        return false;
+    }
+    mHeld = mNewest;
+    return true;
 }
 
 void QLFrameWarp::noteRealSwap(bool presented)
@@ -228,10 +335,9 @@ void QLFrameWarp::noteRealSwap(bool presented)
     }
     else
     {
-        mValid = false;
+        invalidate();
     }
     mShown = false;
-    mWorldKept = false;
     mNextKept = false;
 
     if (now - mCountStart >= 1.0)
@@ -254,139 +360,150 @@ void QLFrameWarp::between(bool last)
         mNextKept = true;
     }
 
-    if (!mValid || mShown)
+    const F64 elapsed = (F64)LLTimer::getTotalSeconds() - mLastSwap;
+    const bool due = last || elapsed >= mInterval * EARLIEST_FRACTION;
+
+    // From two frames: the real frame held back goes out halfway to the next generated one.
+    if (mHeld >= 0)
     {
+        if (due)
+        {
+            showHeld();
+        }
         return;
     }
-    if (!frame_warp_wanted())
+    if (twoFrames())
     {
-        mValid = false;
-        return;
-    }
-    if (LLStartUp::getStartupState() != STATE_STARTED || !gViewerWindow || !gViewerWindow->getWindow() ||
-        gViewerWindow->getWindow()->getMinimized() || gTeleportDisplay)
-    {
-        mValid = false;
         return;
     }
 
-    // Above this the screen gains little from twice as many frames, and the second swap a frame costs more than it is
-    // worth.
+    // From one frame: a generated frame between the last real one and the next.
+    if (mNewest < 0 || mShown || !due)
+    {
+        return;
+    }
+    if (!frame_warp_wanted() || !window_drawable())
+    {
+        invalidate();
+        return;
+    }
     static LLCachedControl<F32> below_fps(gSavedSettings, "QuasarFrameWarpBelowFPS", 170.f);
     if (below_fps() > 0.f && mInterval < 1.0 / (F64)below_fps())
     {
         mStatus = FAST;
         return;
     }
-
-    const F64 elapsed = (F64)LLTimer::getTotalSeconds() - mLastSwap;
-    if (!last && elapsed < mInterval * EARLIEST_FRACTION)
+    const Kept& kept = mKept[mNewest];
+    if (!kept.mComplete || !fitsWindow(kept) || (mNextOrigin - kept.mOrigin).length() > MAX_EYE_JUMP)
     {
-        return;
-    }
-
-    // What was kept must still be what is there: the window's size, and the G-buffer depth the kept frame drew.
-    const LLRenderTarget& depth = gPipeline.mMainRT.deferredScreen;
-    if ((U32)gViewerWindow->getWindowWidthRaw() != mFrame.getWidth() ||
-        (U32)gViewerWindow->getWindowHeightRaw() != mFrame.getHeight() || depth.getDepthSerial() != mDepthSerial ||
-        depth.getWidth() != mDepthWidth || depth.getHeight() != mDepthHeight)
-    {
-        mValid = false;
-        return;
-    }
-
-    if ((mNextOrigin - mOrigin).length() > MAX_EYE_JUMP)
-    {
-        mValid = false;
+        invalidate();
         return;
     }
 
     // Where between the two real frames this one lands, taking the next to come one interval after the last.
     const F32 alpha = (F32)llclamp(elapsed / llmax(mInterval, 1e-4), 0.1, 0.9);
-    present(alpha);
+    const LLMatrix4a mid = between_cameras(kept.mOrigin, kept.mRotation, mNextOrigin, mNextRotation, kept.mProjection, alpha);
+    mShown = present(kept, nullptr, mid, alpha);
 }
 
-void QLFrameWarp::present(F32 alpha)
+void QLFrameWarp::showHeld()
+{
+    const S32 held = mHeld;
+    mHeld = -1;
+    if (held < 0 || !gViewerWindow || !gViewerWindow->getWindow() || !fitsWindow(mKept[held]) ||
+        LLRenderTarget::getCurrentBoundTarget() != nullptr)
+    {
+        return;
+    }
+    LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar warp show held frame");
+    LL_PROFILE_GPU_ZONE("quasar warp show held frame");
+    LLRenderTarget& frame = mKept[held].mFrame;
+    {
+        LLGLDisable scissor(GL_SCISSOR_TEST);
+        LLRenderTarget::copyContentsToFramebuffer(frame, 0, 0, frame.getWidth(), frame.getHeight(), 0, 0, frame.getWidth(),
+                                                  frame.getHeight(), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    gViewerWindow->getWindow()->swapBuffers();
+}
+
+bool QLFrameWarp::present(const Kept& from, const Kept* next, const LLMatrix4a& mid_view_projection, F32 alpha)
 {
     // A target bound here would be drawn into instead of the window.
     if (LLRenderTarget::getCurrentBoundTarget() != nullptr)
     {
-        return;
+        return false;
     }
 
     LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("quasar frame warp");
     LL_PROFILE_GPU_ZONE("quasar frame warp");
     const F64 started = LLTimer::getTotalSeconds();
 
-    // The generated frame's camera: part of the way from the kept frame's to the next frame's, under the kept frame's
-    // projection, which the depth was stored with.
-    const LLViewerCamera* camera = LLViewerCamera::getInstance();
-    LLCamera mid = *camera;
-    const LLVector3 next_origin = mNextOrigin;
-    mid.setOrigin(mOrigin + (next_origin - mOrigin) * alpha);
-    mid.setAxes(slerp(alpha, mRotation, mNextRotation));
-
-    LLMatrix4a mid_view_projection;
-    mid_view_projection.setMul(mid.frameModelview(), mProjection);
-    // The kept frame's clip space back to the agent's, where the avatars move.
-    LLMatrix4a kept_inverse;
-    if (!kept_inverse.setInverse(mViewProjection))
+    // Each frame's clip space back to the agent's, where the avatars move.
+    LLMatrix4a from_inverse;
+    LLMatrix4a next_inverse;
+    if (!from_inverse.setInverse(from.mViewProjection) || (next && !next_inverse.setInverse(next->mViewProjection)))
     {
-        mValid = false;
-        return;
+        invalidate();
+        return false;
+    }
+    if (!next)
+    {
+        next_inverse = from_inverse;
     }
 
-    // QuasarFrameWarpAvatars: 0 leaves every avatar where the kept frame drew it, 1 moves them, 2 also holds the hair
+    // QuasarFrameWarpAvatars: 0 leaves every avatar where the frames drew them, 1 moves them, 2 also holds the hair
     // of the near ones to them. QuasarFrameWarpFill fills uncovered strips from the background.
     static LLCachedControl<S32> avatar_mode(gSavedSettings, "QuasarFrameWarpAvatars", 2);
     static LLCachedControl<bool> fill(gSavedSettings, "QuasarFrameWarpFill", true);
     static LLCachedControl<F32> hair_distance(gSavedSettings, "QuasarFrameWarpHairDistance", 10.f);
     static LLCachedControl<bool> debug_tint(gSavedSettings, "QuasarFrameWarpDebug", false);
 
-    // How far each kept avatar has moved by the generated frame: the idle step has moved them on to the next frame.
+    // Each kept avatar's box as the earlier frame drew it, and how far it moved since: to the later frame from two
+    // (which has just been drawn, so where it is now), or to the next frame from one (which the idle step has moved it
+    // on to). The shader moves it by its share of that.
     F32 avatar_min[MAX_AVATARS * 4] = {};
     F32 avatar_max[MAX_AVATARS * 4] = {};
     F32 avatar_move[MAX_AVATARS * 4] = {};
     S32 avatars = 0;
     U32 moving = 0;
-    for (const KeptAvatar& kept : mAvatars)
+    if (avatar_mode() > 0)
     {
-        if (avatar_mode() <= 0)
+        for (const KeptAvatar& kept : from.mAvatars)
         {
-            break;
+            LLViewerObject* object = gObjectList.findObject(kept.mID);
+            if (!object || object->isDead() || !object->asAvatar())
+            {
+                continue;
+            }
+            // An avatar standing still keeps its box too, with no move: its see-through hair is held to it as the
+            // camera orbits (the shader's hair rule).
+            LLVector3 moved = object->getPositionAgent() - kept.mPosition;
+            const F32 length = moved.length();
+            if (length > MAX_AVATAR_JUMP || !moved.isFinite())
+            {
+                moved.clear();
+            }
+            else if (length >= 1e-4f)
+            {
+                ++moving;
+            }
+            for (S32 i = 0; i < 3; ++i)
+            {
+                avatar_min[avatars * 4 + i] = kept.mMin.mV[i];
+                avatar_max[avatars * 4 + i] = kept.mMax.mV[i];
+                avatar_move[avatars * 4 + i] = moved.mV[i];
+            }
+            avatar_move[avatars * 4 + 3] = (avatar_mode() >= 2 && kept.mDistance < hair_distance()) ? 1.f : 0.f;
+            ++avatars;
         }
-        LLViewerObject* object = gObjectList.findObject(kept.mID);
-        if (!object || object->isDead() || !object->asAvatar())
-        {
-            continue;
-        }
-        // An avatar standing still keeps its box too, with no move: its see-through hair is held to it as the camera
-        // orbits (the shader's hair rule).
-        LLVector3 moved = object->getPositionAgent() - kept.mPosition;
-        const F32 length = moved.length();
-        if (length > MAX_AVATAR_JUMP || !moved.isFinite())
-        {
-            moved.clear();
-        }
-        else if (length >= 1e-4f)
-        {
-            ++moving;
-        }
-        const LLVector3 move = moved * alpha;
-        for (S32 i = 0; i < 3; ++i)
-        {
-            avatar_min[avatars * 4 + i] = kept.mMin.mV[i];
-            avatar_max[avatars * 4 + i] = kept.mMax.mV[i];
-            avatar_move[avatars * 4 + i] = move.mV[i];
-        }
-        avatar_move[avatars * 4 + 3] = (avatar_mode() >= 2 && kept.mDistance < hair_distance()) ? 1.f : 0.f;
-        ++avatars;
     }
     mLastAvatars = moving;
 
-    const S32 width = (S32)mFrame.getWidth();
-    const S32 height = (S32)mFrame.getHeight();
+    const Kept& newest = next ? *next : from;
+    const S32 width = (S32)newest.mFrame.getWidth();
+    const S32 height = (S32)newest.mFrame.getHeight();
     const LLRect world = gViewerWindow->getWorldViewRectRaw();
+    const S32 flags = avatars | (fill() ? WARP_FILL : 0) | (debug_tint() ? WARP_DEBUG : 0) | (next ? WARP_BOTH : 0);
 
     gGL.flush();
     const S32 saved_viewport[4] = { gGLViewport[0], gGLViewport[1], gGLViewport[2], gGLViewport[3] };
@@ -398,14 +515,21 @@ void QLFrameWarp::present(F32 alpha)
         LLGLDepthTest depth_test(GL_FALSE, GL_FALSE);
         gGL.setColorMask(true, true);
 
+        const Kept& later = next ? *next : from;
         LLGLSLShader& shader = gQLFrameWarpProgram;
         shader.bind();
-        const S32 world_unit = shader.bindTexture(LLShaderMgr::QL_WARP_WORLD_MAP, &mWorld, ALSamplers::BilinearClamp);
-        const S32 frame_unit = shader.bindTexture(LLShaderMgr::QL_WARP_FRAME_MAP, &mFrame, ALSamplers::PointClamp);
-        const S32 depth_unit = shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &gPipeline.mMainRT.deferredScreen);
-        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, kept_inverse);
+        const S32 units[] = {
+            shader.bindTexture(LLShaderMgr::QL_WARP_WORLD_MAP, const_cast<LLRenderTarget*>(&from.mWorld), ALSamplers::BilinearClamp),
+            shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, const_cast<LLRenderTarget*>(&from.mDepth)),
+            shader.bindTexture(LLShaderMgr::QL_WARP_NEXT_WORLD_MAP, const_cast<LLRenderTarget*>(&later.mWorld), ALSamplers::BilinearClamp),
+            shader.bindDepthTexture(LLShaderMgr::QL_WARP_NEXT_DEPTH_MAP, const_cast<LLRenderTarget*>(&later.mDepth)),
+            shader.bindTexture(LLShaderMgr::QL_WARP_FRAME_MAP, const_cast<LLRenderTarget*>(&newest.mFrame), ALSamplers::PointClamp),
+        };
+        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, from_inverse);
+        shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_NEXT_INV_VIEW_PROJ, next_inverse);
         shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
-        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars | (fill() ? 0x100 : 0) | (debug_tint() ? 0x200 : 0));
+        shader.uniform1f(LLShaderMgr::QL_WARP_ALPHA, alpha);
+        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, flags);
         if (avatars > 0)
         {
             shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);
@@ -419,7 +543,7 @@ void QLFrameWarp::present(F32 alpha)
         gPipeline.mScreenTriangleVB->setBuffer();
         gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
 
-        for (S32 unit : { world_unit, frame_unit, depth_unit })
+        for (S32 unit : units)
         {
             if (unit >= 0)
             {
@@ -436,8 +560,8 @@ void QLFrameWarp::present(F32 alpha)
     }
     gGL.setViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
 
-    mShown = true;
     ++mGenerated;
     mStatus = ACTIVE;
     mLastWarpMs = (F32)(((F64)LLTimer::getTotalSeconds() - started) * 1000.0);
+    return true;
 }

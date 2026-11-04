@@ -1167,7 +1167,11 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
             {
                 QLFrameWarp::instance().captureFrame();
             }
-            swap();
+            // From two frames the generated frame goes out here in this frame's place, and this one after it.
+            if (!presented || !QLFrameWarp::instance().swapInstead())
+            {
+                swap();
+            }
             QLFrameWarp::instance().noteRealSwap(presented);
         }
 

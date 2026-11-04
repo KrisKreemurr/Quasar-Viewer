@@ -2318,6 +2318,10 @@ void LLShaderMgr::initAttribsAndUniforms()
     mReservedUniforms.push_back("qlWarpAvatarMax");
     mReservedUniforms.push_back("qlWarpAvatarMove");
     mReservedUniforms.push_back("qlWarpAvatarCount");
+    mReservedUniforms.push_back("qlWarpNextWorldMap");
+    mReservedUniforms.push_back("qlWarpNextDepthMap");
+    mReservedUniforms.push_back("qlWarpNextInvViewProj");
+    mReservedUniforms.push_back("qlWarpAlpha");
     mReservedUniforms.push_back("qlWarpWorldRect");
     mReservedUniforms.push_back("qlWarpWindowSize");
     mReservedUniforms.push_back("qlWarpWorldMap");

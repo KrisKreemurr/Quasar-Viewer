@@ -25,28 +25,31 @@
 
 #include "llmatrix4a.h"
 #include "llquaternion.h"
-#include "lluuid.h"
 #include "llrendertarget.h"
+#include "lluuid.h"
 #include "v3math.h"
 
 #include <vector>
 
 /// One generated frame between each two real ones (QuasarFrameWarp).
 ///
-/// A real frame is kept twice as it is shown: the world as the final blit left it, before the interface, and the
-/// whole frame. Between that frame and the next, once the next frame's camera is known (the idle step has moved it),
-/// a frame is made of the kept one: the world reprojected by the G-buffer's depth, which the next frame has not yet
-/// cleared, to a camera part of the way from the kept frame's camera to the next one's, with the interface laid over
-/// it as it was. It is swapped in on its own, so the screen shows two frames for each one the viewer renders.
+/// Each real frame is kept as it is shown: its world as the final blit left it, before the interface, the whole frame,
+/// a copy of its depth, its camera, and the nearest avatars with their boxes and positions. A generated frame is made
+/// of kept frames by reprojecting their world by their depth to a camera between two real frames' cameras, the
+/// interface laid over it as the newest frame drew it, and swapped in on its own, so the screen shows two frames for
+/// each one the viewer renders. A surface in an avatar's box moves with that avatar, so one walking, flying or riding
+/// moves as smoothly as the camera; its limbs keep a real frame's pose, and anything else that moves (a door, a vehicle)
+/// moves at the rendered rate.
 ///
-/// The camera moves, and so do the nearest avatars: each is kept with its box and position, and a surface in its box
-/// moves with it by the generated frame, so one walking, flying or riding moves as smoothly as the camera. Only the
-/// whole avatar moves; its limbs keep the kept frame's pose, so a dance still steps at the rendered rate, as does
-/// anything else that moves (a door, a vehicle). Surfaces the kept frame did not see (behind an edge something moved
-/// past) are filled from the background behind them.
+/// QuasarFrameWarpMode picks how:
+///   0, from one frame: once the idle step has moved the camera on, the last real frame is warped part of the way
+///      toward it. No delay, but what the last frame did not see (behind an edge the camera moves past) is guessed.
+///   1, from two: each real frame, once drawn, is held back; the generated frame between it and the one before goes
+///      out in its place, made of both, and the held frame goes out halfway to the next. What one of the two did not
+///      see the other usually did. Every frame reaches the screen about half a rendered frame later.
 ///
-/// It is shown at the first of two points that is far enough from the last real frame's swap to land between it and
-/// the next: after the idle step, or, failing that, once the next frame has culled and sorted and is about to draw.
+/// A frame goes out between two real frames at the first of two points that is far enough from the last swap to land
+/// halfway: after the idle step, or, failing that, once the next frame has culled and sorted and is about to draw.
 class QLFrameWarp
 {
 public:
@@ -61,28 +64,34 @@ public:
 
     static QLFrameWarp& instance();
 
-    /// render_ui, just after renderFinalize: keeps the world as the final blit left it, and the camera it was drawn
-    /// with. `normal` is false for a frame that is not the main view's as the window shows it (a snapshot, a zoomed or
-    /// tiled render, a cutout), which drops what was kept.
+    /// render_ui, just after renderFinalize: keeps the world as the final blit left it, its depth, and the camera it
+    /// was drawn with. `normal` is false for a frame that is not the main view's as the window shows it (a snapshot, a
+    /// zoomed or tiled render, a cutout), which drops what was kept.
     void captureWorld(bool normal);
 
     /// display(), after the interface and just before the real frame's swap: keeps the frame as it will be shown.
     void captureFrame();
 
-    /// display(), just after the real frame's swap.
+    /// display(), in place of the real frame's swap. From two frames, shows the generated frame between the last real
+    /// frame and this one and holds this one back for later, and answers true: the caller does not swap. False where
+    /// nothing was generated, for the caller to swap this frame as it would.
+    bool swapInstead();
+
+    /// display(), just after the real frame's swap (or swapInstead's).
     void noteRealSwap(bool presented);
 
-    /// Drops what is kept: a snapshot drew over the depth, the world shifted, the window changed size.
-    void invalidate() { mValid = false; }
+    /// Drops the kept frames: a snapshot drew, the world shifted, the window changed. A held real frame is still shown.
+    void invalidate();
 
-    /// A point between two real frames where a generated one may be shown; `last` is the latest such point, which
-    /// shows it if no earlier point did.
+    /// A point between two real frames where a frame may go out (a generated one from one frame, the held real one
+    /// from two); `last` is the latest such point, which sends it if no earlier point did.
     void between(bool last);
 
-    /// Frees the targets (shutdown, or the setting switched off).
+    /// Frees the targets (shutdown, a context lost, or the setting switched off).
     void release();
 
     EStatus status() const { return mStatus; }
+    bool twoFrames() const;
     U32 lastGenerated() const { return mLastGenerated; }
     F32 lastWarpMs() const { return mLastWarpMs; }
     F32 baseIntervalMs() const { return (F32)(mInterval * 1000.0); }
@@ -94,28 +103,7 @@ public:
 private:
     QLFrameWarp() = default;
 
-    bool ensureTargets(U32 width, U32 height);
-    void keepAvatars(const LLVector3& eye);
-    void present(F32 alpha);
-
-    LLRenderTarget mWorld;          // the world before the interface, window sized
-    LLRenderTarget mFrame;          // the frame as shown, window sized
-
-    // The kept frame's camera.
-    LLMatrix4a   mProjection;
-    LLMatrix4a   mViewProjection;
-    LLVector3    mOrigin;
-    LLQuaternion mRotation;
-    // The next frame's camera, taken once the idle step has moved it and before the frame's display can move the
-    // main camera about for its own passes (the mirrors, the probes), as the next frame will be drawn with it.
-    LLVector3    mNextOrigin;
-    LLQuaternion mNextRotation;
-    bool         mNextKept = false;
-    U64          mDepthSerial = 0;  // the G-buffer depth's build the kept frame was drawn into
-    U32          mDepthWidth  = 0;
-    U32          mDepthHeight = 0;
-
-    // The nearest avatars as the kept frame drew them, nearest first.
+    // An avatar as a kept frame drew it.
     struct KeptAvatar
     {
         LLUUID    mID;
@@ -124,14 +112,46 @@ private:
         LLVector3 mMax;
         F32       mDistance;
     };
-    std::vector<KeptAvatar> mAvatars;
-    U32                     mLastAvatars = 0;   // avatars moved in the last generated frame
 
-    bool mWorldKept = false;        // captureWorld ran for the frame being shown
-    bool mValid     = false;        // a whole frame is kept and its depth stands
-    bool mShown     = false;        // a generated frame was shown since the last real swap
+    // A real frame as it was shown.
+    struct Kept
+    {
+        LLRenderTarget mWorld;          // the world before the interface, window sized
+        LLRenderTarget mFrame;          // the frame as shown, window sized
+        LLRenderTarget mDepth;          // the G-buffer's depth, at its size
+        LLMatrix4a     mProjection;
+        LLMatrix4a     mViewProjection;
+        LLVector3      mOrigin;
+        LLQuaternion   mRotation;
+        std::vector<KeptAvatar> mAvatars;   // the nearest, nearest first
+        U64            mSerial = 0;     // which real frame, counted from 1
+        bool           mComplete = false;
+    };
 
-    F64  mLastSwap  = 0.0;          // seconds, the last real frame's swap
+    bool ensureTargets(Kept& kept, U32 width, U32 height, U32 depth_width, U32 depth_height);
+    void keepAvatars(Kept& kept);
+    // Whether a kept frame still fits the window.
+    bool fitsWindow(const Kept& kept) const;
+    // Draws the generated frame from `from` (and `next`, from two) for the camera `mid_view_projection` and swaps it.
+    bool present(const Kept& from, const Kept* next, const LLMatrix4a& mid_view_projection, F32 alpha);
+    // Shows the held-back real frame.
+    void showHeld();
+
+    Kept mKept[2];
+    S32  mNewest  = -1;             // the newest complete kept frame
+    S32  mFilling = -1;             // the one this frame is being kept into
+    S32  mHeld    = -1;             // from two frames, the real frame drawn but not yet shown
+    U64  mSerial  = 0;
+
+    // The next frame's camera, taken once the idle step has moved it and before the frame's display can move the
+    // main camera about for its own passes (the mirrors, the probes), as the next frame will be drawn with it.
+    LLVector3    mNextOrigin;
+    LLQuaternion mNextRotation;
+    bool         mNextKept = false;
+
+    bool mShown = false;            // from one frame, a generated frame went out since the last real swap
+
+    F64  mLastSwap  = 0.0;          // seconds, the last real frame's swap (from two, its generated frame's)
     F64  mInterval  = 1.0 / 60.0;   // seconds between real swaps, smoothed
 
     EStatus mStatus = OFF;
@@ -139,4 +159,5 @@ private:
     U32     mLastGenerated = 0;     // generated frames over the last second
     F64     mCountStart = 0.0;
     F32     mLastWarpMs = 0.f;
+    U32     mLastAvatars = 0;       // avatars moving in the last generated frame
 };

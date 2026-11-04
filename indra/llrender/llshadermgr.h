@@ -742,7 +742,11 @@ public:
         QL_WARP_AVATAR_MIN,                 //  "qlWarpAvatarMin"  vec4[], each moving avatar's box in the kept frame, low corner
         QL_WARP_AVATAR_MAX,                 //  "qlWarpAvatarMax"  vec4[], and high corner
         QL_WARP_AVATAR_MOVE,                //  "qlWarpAvatarMove"  vec4[], how far each has moved by the generated frame
-        QL_WARP_AVATAR_COUNT,               //  "qlWarpAvatarCount"  int, the boxes given
+        QL_WARP_AVATAR_COUNT,               //  "qlWarpAvatarCount"  int, the boxes given, and the warp's switches above them
+        QL_WARP_NEXT_WORLD_MAP,             //  "qlWarpNextWorldMap"  sampler2D, the later of two real frames' world
+        QL_WARP_NEXT_DEPTH_MAP,             //  "qlWarpNextDepthMap"  sampler2D, and its depth
+        QL_WARP_NEXT_INV_VIEW_PROJ,         //  "qlWarpNextInvViewProj"  mat4, and its clip space to the agent's
+        QL_WARP_ALPHA,                      //  "qlWarpAlpha"  float, how far the generated frame is from the earlier frame to the later
         QL_WARP_WORLD_RECT,                 //  "qlWarpWorldRect"  vec4, the world view in window pixels: left, bottom, width, height
         QL_WARP_WINDOW_SIZE,                //  "qlWarpWindowSize"  vec2, the window in pixels
         QL_WARP_WORLD_MAP,                  //  "qlWarpWorldMap"  sampler2D, the captured world before the interface

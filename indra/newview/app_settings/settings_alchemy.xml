@@ -2619,6 +2619,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarFrameWarpMode</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: how frame generation makes its frames. 0 from the last rendered frame alone, warped toward where the next frame's camera will be: no delay, but what that frame did not see is guessed. 1 from the two rendered frames either side, the later held back until after it: far less guessing, and everything reaches the screen about half a rendered frame later.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarFrameWarpFill</key>
         <map>
             <key>Comment</key>
