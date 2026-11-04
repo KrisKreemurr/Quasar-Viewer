@@ -49,8 +49,9 @@ struct QLDrawStats
     U32 mLastFullSetups     = 0;
 
     // The time culling and sorting took, by the kind of view (LLPipeline::updateCull and stateSort, postSort
-    // included), in milliseconds: the main view, the sun and spot shadows, reflection probes and mirrors, the rest.
-    enum EView { VIEW_WORLD, VIEW_SHADOW, VIEW_PROBE, VIEW_OTHER, NUM_VIEWS };
+    // included), in milliseconds: the main view, the sun's shadow, the spot lights' shadows, reflection probes and
+    // mirrors, the rest.
+    enum EView { VIEW_WORLD, VIEW_SHADOW, VIEW_SPOT, VIEW_PROBE, VIEW_OTHER, NUM_VIEWS };
     F32 mCullMs[NUM_VIEWS]     = {};
     F32 mLastCullMs[NUM_VIEWS] = {};
 

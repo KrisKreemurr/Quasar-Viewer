@@ -3576,9 +3576,10 @@ static U32 ql_cull_view()
     case LLViewerCamera::CAMERA_SUN_SHADOW1:
     case LLViewerCamera::CAMERA_SUN_SHADOW2:
     case LLViewerCamera::CAMERA_SUN_SHADOW3:
+        return QLDrawStats::VIEW_SHADOW;
     case LLViewerCamera::CAMERA_SPOT_SHADOW0:
     case LLViewerCamera::CAMERA_SPOT_SHADOW1:
-        return QLDrawStats::VIEW_SHADOW;
+        return QLDrawStats::VIEW_SPOT;
     default:
         return QLDrawStats::VIEW_OTHER;
     }
@@ -5260,7 +5261,8 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             LL_PROFILE_PLOT("quasar vertex buffer switches", (int64_t)gQLDrawStats.mBufferSwitches);
             LL_PROFILE_PLOT("quasar model matrix changes", (int64_t)gQLDrawStats.mMatrixChanges);
             LL_PROFILE_PLOT("quasar cull+sort ms world", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_WORLD]);
-            LL_PROFILE_PLOT("quasar cull+sort ms shadows", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_SHADOW]);
+            LL_PROFILE_PLOT("quasar cull+sort ms sun shadow", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_SHADOW]);
+            LL_PROFILE_PLOT("quasar cull+sort ms spot shadows", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_SPOT]);
             LL_PROFILE_PLOT("quasar cull+sort ms probes", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_PROBE]);
             LL_PROFILE_PLOT("quasar cull+sort ms other", (double)gQLDrawStats.mCullMs[QLDrawStats::VIEW_OTHER]);
             gQLDrawStats.clear();
@@ -14104,6 +14106,39 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             occluding = sun_occlusion != 0;
         }
 
+        // Quasar: how far apart the far cascades are drawn (QuasarRenderShadowStagger): 0 every frame, 1 the two far
+        // ones on alternate frames, 2 the second every other frame and the far two every fourth. Which cascades keep
+        // their maps this frame is decided before any culling, so that the union cull below reaches only as far as the
+        // farthest cascade drawn: on most frames the far cascades, the widest, are kept, and their casters need no walk.
+        static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
+        const S32 stagger_level = llclamp((S32)shadow_stagger, 0, 2);
+        bool keep_cascade[ALRenderResourcePlan::SUN_CASCADES] = {};
+        U32 farthest_drawn = 0;
+        for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
+        {
+            if (stagger_level > 0 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot && mRT->shadow[j].isComplete())
+            {
+                const QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                const QLStagger stagger = cascade_stagger(stagger_level, (S32)j);
+                const U32 frame = LLFrameTimer::getFrameCount();
+                const U32 age = frame - kept.mFrame;
+                const bool due = ((frame + stagger.mPhase) % stagger.mInterval) == 0 || age >= stagger.mInterval * 2;
+                keep_cascade[j] = stagger.mInterval > 1 && !due && kept.mValid
+                    && kept.mEpoch == mShadowStaggerEpoch
+                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
+                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
+                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
+                    && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
+            }
+            if (!keep_cascade[j])
+            {
+                farthest_drawn = j;
+            }
+        }
+        // The union reaches to the far end of the farthest cascade drawn, past which it held only kept cascades' casters.
+        static LLCachedControl<bool> union_to_drawn(gSavedSettings, "QuasarShadowUnionToDrawn", true);
+        const F32 union_far = union_to_drawn() ? dist[llmin(farthest_drawn + 1, 4u)] : dist[4];
+
         if (sShadowCullMode() == 1 && !gCubeSnapshot)
         {
             LLCamera ucam = camera;
@@ -14120,7 +14155,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 delta.normVec();
                 F32 dp = delta*upn;
                 ufrust[i]   = ueye + (delta*dist[0]*0.75f)/dp;
-                ufrust[i+4] = ueye + (delta*dist[4]*1.25f)/dp;
+                ufrust[i+4] = ueye + (delta*union_far*1.25f)/dp;
             }
 
             {
@@ -14190,10 +14225,6 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             }
         }
 
-        // Quasar: how far apart the far cascades are drawn (QuasarRenderShadowStagger): 0 every frame, 1 the two far
-        // ones on alternate frames, 2 the second every other frame and the far two every fourth.
-        static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
-        const S32 stagger_level = llclamp((S32)shadow_stagger, 0, 2);
         if (mRT == &mMainRT && !gCubeSnapshot)
         {
             mShadowCascadesKeptLast = mShadowCascadesKept;
@@ -14215,21 +14246,10 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             // Quasar: whether this cascade's map, drawn a frame or few ago, can stand in for drawing it now. Decided
             // first, so a kept cascade skips its receivers' walk of every partition (getVisiblePointCloud) and its fit
             // as well as its draw. Only the main view's own maps, and never for a snapshot.
-            if (stagger_level > 0 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot && mRT->shadow[j].isComplete()
-                && j < (S32)ALRenderResourcePlan::SUN_CASCADES)
+            // (Decided above, before the union cull.)
+            if (j < (S32)ALRenderResourcePlan::SUN_CASCADES && keep_cascade[j])
             {
                 QLShadowCascadeKeep& kept = sCascadeKeep[j];
-                const QLStagger stagger = cascade_stagger(stagger_level, j);
-                const U32 frame = LLFrameTimer::getFrameCount();
-                const U32 age = frame - kept.mFrame;
-                const bool due = ((frame + stagger.mPhase) % stagger.mInterval) == 0 || age >= stagger.mInterval * 2;
-                const bool keep_map = stagger.mInterval > 1 && !due && kept.mValid
-                    && kept.mEpoch == mShadowStaggerEpoch
-                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
-                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
-                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
-                    && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
-                if (keep_map)
                 {
                     // Read the kept map through the light's view and projection it was drawn with.
                     const LLMatrix4a keep_trans = LLRender::sReverseZ ? clip_to_texture(1.f, 0.f) : clip_to_texture(0.5f, 0.5f);

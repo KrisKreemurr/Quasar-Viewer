@@ -2751,6 +2751,17 @@
             <key>Value</key>
             <integer>2</integer>
         </map>
+        <key>QuasarShadowUnionToDrawn</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: with RenderShadowCullMode 1 and the shadow stagger, the one cull of the sun's shadow casters reaches only as far as the farthest cascade drawn this frame, rather than always the whole shadow distance: the far cascades, kept from earlier frames on most frames, need no walk then.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarShadowBridgeFilter</key>
         <map>
             <key>Comment</key>
