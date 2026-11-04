@@ -88,6 +88,7 @@
 #include "llvograss.h"
 #include "llworld.h"
 #include "pipeline.h"
+#include "qlframewarp.h"
 
 #include <filesystem>
 #include <iomanip>
@@ -503,6 +504,12 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
     LL_PROFILE_GPU_ZONE("Render");
 
     LLPerfStats::RecordSceneTime T (LLPerfStats::StatType_t::RENDER_DISPLAY); // render time capture - This is the main stat for overall rendering.
+
+    // Quasar: a snapshot draws over the G-buffer depth the generated frame reprojects.
+    if (for_snapshot)
+    {
+        QLFrameWarp::instance().invalidate();
+    }
 
     // The frame the last pass showed is the main loop's to end (display_end_frame); one left unended ends here, unpaced.
     llassert(sFrameEndOwed == 0);
@@ -1064,6 +1071,12 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
 
         gGL.setColorMask(true, true);
 
+        // Quasar: the last point before this frame clears the G-buffer the generated frame reprojects from.
+        if (!for_snapshot && gPipeline.mRT == &gPipeline.mMainRT)
+        {
+            QLFrameWarp::instance().between(true);
+        }
+
         gPipeline.mRT->deferredScreen.bindTarget();
         if (gUseWireframe)
         {
@@ -1149,7 +1162,13 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
         {
             render_ui();
             presented = gDisplaySwapBuffers;
+            // Quasar: the frame as it is shown, for the generated frame that follows it.
+            if (presented)
+            {
+                QLFrameWarp::instance().captureFrame();
+            }
             swap();
+            QLFrameWarp::instance().noteRealSwap(presented);
         }
 
 
@@ -1681,6 +1700,10 @@ void render_ui(F32 zoom_factor, int subfield)
 
     // apply gamma correction and post effects
     gPipeline.renderFinalize();
+
+    // Quasar: the world as the final blit left it, before anything is drawn over it, for the generated frame.
+    QLFrameWarp::instance().captureWorld(!gSnapshot && !gCubeSnapshot && !LLPipeline::sCutoutRender && zoom_factor == 1.f &&
+                                         subfield == 0 && LLViewerCamera::getInstance()->getZoomFactor() == 1.f);
 
     // A cutout frame is its subject and nothing else. Nothing drawn over the
     // frame belongs to that, and the coverage the subject is lifted out by

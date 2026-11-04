@@ -2586,6 +2586,28 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarFrameWarp</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): native frame generation. Between each two rendered frames, show one more made from the last by reprojecting it with its depth to a camera part of the way to the next, the interface laid over it unchanged. Doubles the frames shown while the camera moves; what moves in the world (avatars, doors) still moves at the rendered rate. Keep VSync off. Not kept across restarts while experimental.</string>
+            <key>Persist</key>
+            <integer>0</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarFrameWarpBelowFPS</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: frame generation only runs while the rendered frame rate is below this (0 for always), since above it a second frame each costs more than the screen gains.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>170.0</real>
+        </map>
         <key>QuasarVertexAttribBinding</key>
         <map>
             <key>Comment</key>

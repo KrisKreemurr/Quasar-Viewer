@@ -213,6 +213,7 @@ LLGLSLShader            gExposureProgramNoFade;
 LLGLSLShader            gExposureHistogramProgram;
 LLGLSLShader            gLuminanceProgram;
 LLGLSLShader            gLensFlareStateProgram;
+LLGLSLShader            gQLFrameWarpProgram;
 LLGLSLShader            gFXAAProgram[4];
 LLGLSLShader            gSMAAEdgeDetectProgram[4];
 LLGLSLShader            gSMAABlendWeightsProgram[4];
@@ -1370,6 +1371,7 @@ void LLViewerShaderMgr::loadShadersDeferred()
         gExposureHistogramProgram.unload();
         gLuminanceProgram.unload();
         gLensFlareStateProgram.unload();
+        gQLFrameWarpProgram.unload();
 
         for (auto i = 0; i < 4; ++i)
         {
@@ -2879,6 +2881,17 @@ void LLViewerShaderMgr::loadShadersDeferred()
         gLensFlareStateProgram.mShaderFiles.push_back(make_pair("alchemy/lensFlareStateF.glsl", GL_FRAGMENT_SHADER));
         gLensFlareStateProgram.mShaderLevel = mShaderLevel[SHADER_DEFERRED];
         built(gLensFlareStateProgram.createShader(), gLensFlareStateProgram);
+    }
+
+    {
+        // Quasar: the generated frame, the last real one reprojected by its depth (QLFrameWarp).
+        gQLFrameWarpProgram.mName = "Quasar Frame Warp";
+        gQLFrameWarpProgram.mShaderFiles.clear();
+        gQLFrameWarpProgram.clearPermutations();
+        gQLFrameWarpProgram.mShaderFiles.push_back(make_pair("deferred/postDeferredNoTCV.glsl", GL_VERTEX_SHADER));
+        gQLFrameWarpProgram.mShaderFiles.push_back(make_pair("alchemy/qlFrameWarpF.glsl", GL_FRAGMENT_SHADER));
+        gQLFrameWarpProgram.mShaderLevel = mShaderLevel[SHADER_DEFERRED];
+        built(gQLFrameWarpProgram.createShader(), gQLFrameWarpProgram);
     }
 
     {

@@ -736,6 +736,13 @@ public:
         SMAA_PREDICATION_SCALE,             //  "smaaPredicationScale"  how much predication scales the edge threshold, 1 to 5
         SMAA_PREDICATION_STRENGTH,          //  "smaaPredicationStrength"  how much it lowers the threshold locally, 0 to 1
 
+        // Quasar's frame warp (QLFrameWarp)
+        QL_WARP_REPROJECT,                  //  "qlWarpReproject"  mat4, the generated frame's clip space to the captured frame's
+        QL_WARP_WORLD_RECT,                 //  "qlWarpWorldRect"  vec4, the world view in window pixels: left, bottom, width, height
+        QL_WARP_WINDOW_SIZE,                //  "qlWarpWindowSize"  vec2, the window in pixels
+        QL_WARP_WORLD_MAP,                  //  "qlWarpWorldMap"  sampler2D, the captured world before the interface
+        QL_WARP_FRAME_MAP,                  //  "qlWarpFrameMap"  sampler2D, the captured frame with the interface
+
         END_RESERVED_UNIFORMS
     } eGLSLReservedUniforms;
 

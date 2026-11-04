@@ -29,6 +29,7 @@
 #include "llappviewer.h"
 #include "qlcpuschedule.h"
 #include "qljobpool.h"
+#include "qlframewarp.h"
 
 #include "alcrashreporter.h"
 
@@ -1575,6 +1576,9 @@ bool LLAppViewer::doFrame()
                 LL_PROFILE_ZONE_NAMED_CATEGORY_APP("df Display");
                 pingMainloopTimeout("Main:Display");
                 gGLActive = true;
+
+                // Quasar: the next frame's camera is known; a generated frame between the last and this one may go out.
+                QLFrameWarp::instance().between(false);
 
                 display();
                 // The frame display() showed, if paced, ends here: the main loop's work in its slack, then the wait.

@@ -195,6 +195,7 @@
 #include "llworldmapview.h"
 #include "pipeline.h"
 #include "qldrawstats.h"
+#include "qlframewarp.h"
 #include "llappviewer.h"
 #include "llviewerdisplay.h"
 #include "llspatialpartition.h"
@@ -655,6 +656,14 @@ public:
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
                                          LLVertexBuffer::sUseAttribBinding ? "on" : "off"));
             ypos += y_inc;
+            {
+                const QLFrameWarp& warp = QLFrameWarp::instance();
+                static const char* const warp_status[] = { "off", "no program", "waiting", "active", "base fps above limit" };
+                addText(xpos, ypos, llformat("Quasar frame gen: %s | %u generated/s | base frame %.1f ms | warp %.2f ms",
+                                             warp_status[warp.status()], warp.lastGenerated(), warp.baseIntervalMs(),
+                                             warp.lastWarpMs()));
+                ypos += y_inc;
+            }
         }
 
         static LLCachedControl<bool> debug_show_render_info(gSavedSettings, "DebugShowRenderInfo", false);

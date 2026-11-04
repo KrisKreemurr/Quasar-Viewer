@@ -121,6 +121,7 @@
 #include "llcubemap.h"
 #include "llviewershadermgr.h"
 #include "qldrawstats.h"
+#include "qlframewarp.h"
 #include "qljobpool.h"
 #include "llviewerstats.h"
 #include "llviewerjoystick.h"
@@ -1619,6 +1620,8 @@ void LLPipeline::releaseDepthDependents()
     mWaterSurface.release();
     mDepthPyramid.release();
     mHiZCull.release();
+    // The generated frame's copies, and the depth it would read.
+    QLFrameWarp::instance().release();
 
     ALFarPlaneOverlay::release();
     if (ALSelectionOutline::instanceExists())
