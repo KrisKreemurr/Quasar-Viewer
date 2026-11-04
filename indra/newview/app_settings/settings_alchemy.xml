@@ -2597,6 +2597,39 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarFrameWarpAvatars</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: how generated frames treat the nearest avatars. 0 leaves them where the last rendered frame drew them, 1 moves each with its own motion, 2 also holds the see-through hair of the near ones (QuasarFrameWarpHairDistance) to their heads as the camera orbits.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>2</integer>
+        </map>
+        <key>QuasarFrameWarpFill</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: generated frames fill a strip the last rendered frame did not see (behind an edge something moved past) from the background behind it, rather than stretching the edge.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
+        <key>QuasarFrameWarpHairDistance</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: avatars nearer than this (metres) have their see-through hair held to their heads in generated frames (QuasarFrameWarpAvatars 2).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>10.0</real>
+        </map>
         <key>QuasarFrameWarpBelowFPS</key>
         <map>
             <key>Comment</key>

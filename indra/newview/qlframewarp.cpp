@@ -326,6 +326,12 @@ void QLFrameWarp::present(F32 alpha)
         return;
     }
 
+    // QuasarFrameWarpAvatars: 0 leaves every avatar where the kept frame drew it, 1 moves them, 2 also holds the hair
+    // of the near ones to them. QuasarFrameWarpFill fills uncovered strips from the background.
+    static LLCachedControl<S32> avatar_mode(gSavedSettings, "QuasarFrameWarpAvatars", 2);
+    static LLCachedControl<bool> fill(gSavedSettings, "QuasarFrameWarpFill", true);
+    static LLCachedControl<F32> hair_distance(gSavedSettings, "QuasarFrameWarpHairDistance", 10.f);
+
     // How far each kept avatar has moved by the generated frame: the idle step has moved them on to the next frame.
     F32 avatar_min[MAX_AVATARS * 4] = {};
     F32 avatar_max[MAX_AVATARS * 4] = {};
@@ -334,6 +340,10 @@ void QLFrameWarp::present(F32 alpha)
     U32 moving = 0;
     for (const KeptAvatar& kept : mAvatars)
     {
+        if (avatar_mode() <= 0)
+        {
+            break;
+        }
         LLViewerObject* object = gObjectList.findObject(kept.mID);
         if (!object || object->isDead() || !object->asAvatar())
         {
@@ -358,6 +368,7 @@ void QLFrameWarp::present(F32 alpha)
             avatar_max[avatars * 4 + i] = kept.mMax.mV[i];
             avatar_move[avatars * 4 + i] = move.mV[i];
         }
+        avatar_move[avatars * 4 + 3] = (avatar_mode() >= 2 && kept.mDistance < hair_distance()) ? 1.f : 0.f;
         ++avatars;
     }
     mLastAvatars = moving;
@@ -383,7 +394,7 @@ void QLFrameWarp::present(F32 alpha)
         const S32 depth_unit = shader.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &gPipeline.mMainRT.deferredScreen);
         shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_INV_VIEW_PROJ, kept_inverse);
         shader.uniformMatrix4fv(LLShaderMgr::QL_WARP_VIEW_PROJ, mid_view_projection);
-        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars);
+        shader.uniform1i(LLShaderMgr::QL_WARP_AVATAR_COUNT, avatars | (fill() ? 0x100 : 0));
         if (avatars > 0)
         {
             shader.uniform4fv(LLShaderMgr::QL_WARP_AVATAR_MIN, (U32)avatars, avatar_min);

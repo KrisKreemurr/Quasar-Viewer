@@ -51,7 +51,8 @@ uniform mat4 qlWarpViewProj;
 uniform vec4 qlWarpAvatarMin[MAX_WARP_AVATARS];
 uniform vec4 qlWarpAvatarMax[MAX_WARP_AVATARS];
 uniform vec4 qlWarpAvatarMove[MAX_WARP_AVATARS];
-uniform int qlWarpAvatarCount;
+uniform int qlWarpAvatarCount;    // the boxes given in the low byte; above it, WARP_FILL
+#define WARP_FILL 0x100           // fill uncovered strips from the background
 uniform vec4 qlWarpWorldRect;   // left, bottom, width, height, window pixels
 uniform vec2 qlWarpWindowSize;
 
@@ -85,7 +86,7 @@ bool forward(vec2 src, out vec2 dst, out float depth)
     depth = textureLod(depthMap, uv, 0.0).r;
     vec4 p = qlWarpInvViewProj * vec4(src, ndc_depth(depth), 1.0);
 
-    int count = min(qlWarpAvatarCount, MAX_WARP_AVATARS);
+    int count = min(qlWarpAvatarCount & 0xff, MAX_WARP_AVATARS);
     if (count > 0)
     {
         // The kept frame's eye: the point its projection sends to w = 0.
@@ -114,6 +115,11 @@ bool forward(vec2 src, out vec2 dst, out float depth)
             float nearest = 2.0;
             for (int i = 0; i < count; ++i)
             {
+                // Only for the avatars close enough for their hair to slide visibly (the move's w).
+                if (qlWarpAvatarMove[i].w < 0.5)
+                {
+                    continue;
+                }
                 vec3 lo = qlWarpAvatarMin[i].xyz;
                 vec3 hi = qlWarpAvatarMax[i].xyz;
                 lo.z = hi.z - (hi.z - lo.z) * HAIR_FRACTION;
@@ -208,7 +214,7 @@ void main()
     float err = settle(want, src, depth);
     vec2 miss = want - src;                     // how far the source was found from the pixel itself
 
-    if (err > settled)
+    if (err > settled && (qlWarpAvatarCount & WARP_FILL) != 0)
     {
         // Uncovered: try starts either side along the way the guess was pulled, and keep the farthest that settles.
         vec2 best = src;
