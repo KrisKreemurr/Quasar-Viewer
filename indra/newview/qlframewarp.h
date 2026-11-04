@@ -26,7 +26,7 @@
 #include "llmatrix4a.h"
 #include "llquaternion.h"
 #include "llrendertarget.h"
-#include "llvector3.h"
+#include "v3math.h"
 
 /// One generated frame between each two real ones (QuasarFrameWarp).
 ///
