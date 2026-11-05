@@ -14657,7 +14657,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
-            if (!keep_cascade[j] && cache_on && mRT->shadow[j].isComplete())
+            if (cache_on && mRT->shadow[j].isComplete())
             {
                 const QLShadowCascadeKeep& kept = sCascadeKeep[j];
                 const U32 frame = LLFrameTimer::getFrameCount();
@@ -14668,6 +14668,18 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
+            }
+            // Where the kept still map holds, what moves is drawn over it every frame rather than the whole map kept
+            // for the stagger's frames (QuasarSunCacheMovingEveryFrame): avatars' shadows then move at the frame rate
+            // in every cascade, for a few hundred draws instead of none.
+            static LLCachedControl<bool> moving_every_frame(gSavedSettings, "QuasarSunCacheMovingEveryFrame", true);
+            if (moving_only[j] && moving_every_frame())
+            {
+                keep_cascade[j] = false;
+            }
+            else if (keep_cascade[j])
+            {
+                moving_only[j] = false;
             }
             if (!keep_cascade[j])
             {

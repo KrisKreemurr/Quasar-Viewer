@@ -2729,6 +2729,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarSunCacheMovingEveryFrame</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: with QuasarSunShadowCache, draw avatars and moving objects into every sun shadow cascade every frame over the cached build, instead of keeping the far cascades whole for the shadow stagger's frames (QuasarRenderShadowStagger). Avatars' shadows then move smoothly at full frame rate, for a few hundred draws a frame. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarSunShadowCache</key>
         <map>
             <key>Comment</key>
