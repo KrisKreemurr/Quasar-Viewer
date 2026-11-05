@@ -17119,13 +17119,15 @@ namespace
 
     // Marks groups [begin, end) of `groups`, then every drawable group the bridges' culls pushed into `into` (sCull) as
     // they went, as the single-threaded walk reaches the ones pushed onto the end of the list it walks.
-    void ql_mark_groups(LLSpatialGroup* const* groups, U32 begin, U32 end, LLCullResult& into, LLCamera& camera)
+    // `nested_from`: where in `into`'s drawable groups the ones still to be walked begin.
+    void ql_mark_groups(LLSpatialGroup* const* groups, U32 begin, U32 end, LLCullResult& into, LLCamera& camera,
+                        U32 nested_from = 0)
     {
         for (U32 i = begin; i < end; ++i)
         {
             ql_mark_group(groups[i], camera);
         }
-        for (U32 i = 0; i < into.getDrawableGroupsSize(); ++i)
+        for (U32 i = nested_from; i < into.getDrawableGroupsSize(); ++i)
         {
             ql_mark_group(into.beginDrawableGroups()[i], camera);
         }
@@ -17194,6 +17196,46 @@ static void ql_cull_partitions_parallel(const std::vector<LLSpatialPartition*>& 
     }
 }
 
+namespace
+{
+    // One stage of the parallel walk: `groups` split into a few runs a thread, each into a slot of its own, merged onto
+    // `result` in order.
+    void ql_mark_stage(const std::vector<LLSpatialGroup*>& groups, std::vector<QLCullSlot>& slots, LLCamera& camera,
+                       LLCullResult& result, const QLCullThreadState& state)
+    {
+        const U32 count = (U32)groups.size();
+        if (count == 0)
+        {
+            return;
+        }
+        // A few runs a thread, so that one heavy run (a crowd's avatars, side by side) is not the whole job.
+        const U32 runs = llmin(count, (QLJobPool::instance().workers() + 1) * 4);
+        ql_prepare_slots(slots, runs);
+
+        QLJobPool::instance().parallelFor(runs, 1, [&](U32 begin, U32 end)
+        {
+            state.apply();
+            LLCullResult* const saved = sCull;
+            for (U32 r = begin; r < end; ++r)
+            {
+                QLCullSlot& slot = slots[r];
+                sCull = slot.mResult.get();
+                sQLVisibleNodes = &slot.mNodes;
+                ql_mark_groups(groups.data(), (U32)((U64)count * r / runs), (U32)((U64)count * (r + 1) / runs),
+                               *slot.mResult, camera);
+            }
+            sQLVisibleNodes = nullptr;
+            sCull = saved;
+        });
+
+        for (U32 r = 0; r < runs; ++r)
+        {
+            ql_merge_result(result, *slots[r].mResult);
+            gPipeline.mNumVisibleNodes += slots[r].mNodes;
+        }
+    }
+}
+
 static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& result)
 {
     // Too few groups to be worth waking the workers for.
@@ -17209,42 +17251,32 @@ static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& res
 
     ql_warm_avatars();
 
-    // The groups as the cull left them: the merge below pushes onto the same list.
-    static std::vector<LLSpatialGroup*> groups;
-    groups.assign(result.beginDrawableGroups(), result.endDrawableGroups());
-    const U32 count = (U32)groups.size();
+    // The groups as the cull left them (the merges below push onto the same list), in two stages: the avatars' and
+    // animesh's first, then the rest. An attachment is drawn only once its avatar has been seen this frame
+    // (LLSpatialBridge::setVisible), and its avatar is marked seen by the avatar's own cull; one after the other on one
+    // thread, that held or not by where each sat in the list, and across threads it would be a race, an attachment's
+    // shadow there one frame and gone the next. Avatars first, the answer is the same every time: seen if its avatar
+    // is in this map.
+    static std::vector<LLSpatialGroup*> all_groups, avatar_groups, other_groups;
+    all_groups.assign(result.beginDrawableGroups(), result.endDrawableGroups());
+    avatar_groups.clear();
+    other_groups.clear();
+    for (LLSpatialGroup* group : all_groups)
+    {
+        const LLSpatialPartition* part = group->getSpatialPartition();
+        const bool avatar = part && (part->mPartitionType == LLViewerRegion::PARTITION_AVATAR ||
+                                     part->mPartitionType == LLViewerRegion::PARTITION_CONTROL_AV);
+        (avatar ? avatar_groups : other_groups).push_back(group);
+    }
 
-    // A few runs a thread, so that one heavy run (a crowd's avatars, side by side in one partition) is not the whole job.
-    const U32 runs = llmin(count, (QLJobPool::instance().workers() + 1) * 4);
-    static std::vector<QLCullSlot> slots;
-    ql_prepare_slots(slots, runs);
     QLCullThreadState state;
     state.capture();
-
-    QLJobPool::instance().parallelFor(runs, 1, [&](U32 begin, U32 end)
-    {
-        state.apply();
-        LLCullResult* const saved = sCull;
-        for (U32 r = begin; r < end; ++r)
-        {
-            QLCullSlot& slot = slots[r];
-            sCull = slot.mResult.get();
-            sQLVisibleNodes = &slot.mNodes;
-            ql_mark_groups(groups.data(), (U32)((U64)count * r / runs), (U32)((U64)count * (r + 1) / runs),
-                           *slot.mResult, camera);
-        }
-        sQLVisibleNodes = nullptr;
-        sCull = saved;
-    });
-
+    static std::vector<QLCullSlot> avatar_slots, other_slots;
     const QLResultMarks marks = QLResultMarks::of(result);
-    for (U32 r = 0; r < runs; ++r)
-    {
-        ql_merge_result(result, *slots[r].mResult);
-        gPipeline.mNumVisibleNodes += slots[r].mNodes;
-    }
+    ql_mark_stage(avatar_groups, avatar_slots, camera, result, state);
+    ql_mark_stage(other_groups, other_slots, camera, result, state);
     ++stats.mMarkJobs;
-    stats.mGroups += count;
+    stats.mGroups += (U32)all_groups.size();
 
     if (ql_parallel_shadow_cull_mode() >= 2)
     {
@@ -17253,7 +17285,9 @@ static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& res
         sCull = &scratch;
         S32 nodes = 0;
         sQLVisibleNodes = &nodes;
-        ql_mark_groups(groups.data(), 0, count, scratch, camera);
+        ql_mark_groups(avatar_groups.data(), 0, (U32)avatar_groups.size(), scratch, camera);
+        const U32 nested = scratch.getDrawableGroupsSize();
+        ql_mark_groups(other_groups.data(), 0, (U32)other_groups.size(), scratch, camera, nested);
         sQLVisibleNodes = nullptr;
         sCull = &result;
         ql_compare("drawable groups", result, marks, scratch, QLResultMarks());
