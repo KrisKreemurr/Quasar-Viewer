@@ -1892,6 +1892,266 @@ struct QLVulkanPresenter::Impl
         mPassReady = false;
     }
 
+    // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
+
+    // GL draws the viewer's 2D interface into a layer of its own (newview's QLUILayer), premultiplied, and hands it over
+    // before the swap; copyBackBuffer copies it, turned over to Vulkan's rows, into mUI with the frame, and the present
+    // lays it over the frame (qlcomposite.comp) before the frame goes into the swapchain. The same image is DLSS Frame
+    // Generation's UI. mUI takes turns with GL through the presentation's own two semaphores, as the inputs do.
+    FGImage               mUI;
+    GLuint                mUIPendingTexture = 0;
+    U32                   mUIPendingWidth = 0;
+    U32                   mUIPendingHeight = 0;
+    bool                  mUIThisFrame = false;
+    VkShaderModule        mCompModule = VK_NULL_HANDLE;
+    VkDescriptorSetLayout mCompSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCompLayout = VK_NULL_HANDLE;
+    VkPipeline            mCompPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool      mCompPool = VK_NULL_HANDLE;
+    VkDescriptorSet       mCompSet = VK_NULL_HANDLE;
+    VkImageView           mSharedView = VK_NULL_HANDLE;  // the presentation image, for the composite to write
+    bool                  mCompReady = false;
+    bool                  mCompFailed = false;
+    bool                  mCompDirty = true;  // its descriptors name images made again since
+    U64                   mUIFrames = 0;
+    std::string           mUINote = "not used yet";
+    bool                  mFGRecompose = false;  // as Streamline was last told (enableUserInterfaceRecomposition)
+
+    bool compFail(const std::string& why)
+    {
+        mUINote = "failed: " + why;
+        mCompFailed = true;
+        LL_WARNS("Vulkan") << "Vulkan interface layer: " << why << LL_ENDL;
+        return false;
+    }
+
+    bool createCompositePipeline()
+    {
+        if (mCompReady || mCompFailed)
+        {
+            return mCompReady;
+        }
+        VkFormatProperties props = {};
+        vkGetPhysicalDeviceFormatProperties(mPhysical, VK_FORMAT_R8G8B8A8_UNORM, &props);
+        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        {
+            return compFail("RGBA8 images cannot be written by a compute shader here");
+        }
+        VkShaderModuleCreateInfo module = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        module.codeSize = sizeof(ql_spv_qlcomposite_comp);
+        module.pCode    = ql_spv_qlcomposite_comp;
+        VkResult result = vkCreateShaderModule(mDevice, &module, nullptr, &mCompModule);
+        if (result != VK_SUCCESS)
+        {
+            mCompModule = VK_NULL_HANDLE;
+            return compFail(llformat("vkCreateShaderModule (composite) failed (VkResult %d)", (S32)result));
+        }
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        for (U32 i = 0; i < 2; ++i)
+        {
+            bindings[i].binding         = i;
+            bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        set_info.bindingCount = 2;
+        set_info.pBindings    = bindings;
+        result = vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mCompSetLayout);
+        if (result != VK_SUCCESS)
+        {
+            mCompSetLayout = VK_NULL_HANDLE;
+            return compFail(llformat("vkCreateDescriptorSetLayout (composite) failed (VkResult %d)", (S32)result));
+        }
+        VkPushConstantRange push = {};
+        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push.size       = 8;
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layout_info.setLayoutCount         = 1;
+        layout_info.pSetLayouts            = &mCompSetLayout;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges    = &push;
+        result = vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &mCompLayout);
+        if (result != VK_SUCCESS)
+        {
+            mCompLayout = VK_NULL_HANDLE;
+            return compFail(llformat("vkCreatePipelineLayout (composite) failed (VkResult %d)", (S32)result));
+        }
+        VkComputePipelineCreateInfo pipe = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        pipe.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipe.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipe.stage.module = mCompModule;
+        pipe.stage.pName  = "main";
+        pipe.layout       = mCompLayout;
+        result = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &pipe, nullptr, &mCompPipeline);
+        if (result != VK_SUCCESS)
+        {
+            mCompPipeline = VK_NULL_HANDLE;
+            return compFail(llformat("vkCreateComputePipelines (composite) failed (VkResult %d)", (S32)result));
+        }
+        VkDescriptorPoolSize size = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 };
+        VkDescriptorPoolCreateInfo pool = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool.maxSets       = 1;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes    = &size;
+        result = vkCreateDescriptorPool(mDevice, &pool, nullptr, &mCompPool);
+        if (result != VK_SUCCESS)
+        {
+            mCompPool = VK_NULL_HANDLE;
+            return compFail(llformat("vkCreateDescriptorPool (composite) failed (VkResult %d)", (S32)result));
+        }
+        VkDescriptorSetAllocateInfo alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        alloc.descriptorPool     = mCompPool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts        = &mCompSetLayout;
+        result = vkAllocateDescriptorSets(mDevice, &alloc, &mCompSet);
+        if (result != VK_SUCCESS)
+        {
+            mCompSet = VK_NULL_HANDLE;
+            return compFail(llformat("vkAllocateDescriptorSets (composite) failed (VkResult %d)", (S32)result));
+        }
+        mCompReady = true;
+        mCompDirty = true;
+        mUINote    = "ready";
+        LL_INFOS("Vulkan") << "Vulkan interface layer ready (composite compute pipeline)" << LL_ENDL;
+        return true;
+    }
+
+    // The interface image at the window's size, made again only when it changes, with both APIs idle.
+    bool ensureUIImage(U32 width, U32 height)
+    {
+        if (mUI.image && mUIWidth == width && mUIHeight == height)
+        {
+            return true;
+        }
+        waitIdle();
+        destroyFGImage(mUI);
+        mMakingPassImages = true;
+        const bool made = createFGImage(mUI, VK_FORMAT_R8G8B8A8_UNORM, GL_RGBA8, width, height, "interface layer");
+        mMakingPassImages = false;
+        if (!made || !(mUI.usage & VK_IMAGE_USAGE_STORAGE_BIT))
+        {
+            destroyFGImage(mUI);
+            return compFail("the interface image could not be made");
+        }
+        mUIWidth   = width;
+        mUIHeight  = height;
+        mCompDirty = true;
+        return true;
+    }
+    U32 mUIWidth = 0;
+    U32 mUIHeight = 0;
+
+    // Names the presentation image and the interface image in the composite's descriptors, with nothing in flight.
+    bool updateCompositeDescriptors()
+    {
+        if (!mCompDirty)
+        {
+            return true;
+        }
+        vkDeviceWaitIdle(mDevice);
+        if (mSharedView)
+        {
+            vkDestroyImageView(mDevice, mSharedView, nullptr);
+            mSharedView = VK_NULL_HANDLE;
+        }
+        VkImageViewCreateInfo view = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view.image            = mShared;
+        view.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view.format           = VK_FORMAT_R8G8B8A8_UNORM;
+        view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(mDevice, &view, nullptr, &mSharedView) != VK_SUCCESS)
+        {
+            mSharedView = VK_NULL_HANDLE;
+            return compFail("no view of the presentation image");
+        }
+        VkDescriptorImageInfo infos[2] = { { VK_NULL_HANDLE, mSharedView, VK_IMAGE_LAYOUT_GENERAL },
+                                           { VK_NULL_HANDLE, mUI.view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet writes[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }, { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET } };
+        for (U32 i = 0; i < 2; ++i)
+        {
+            writes[i].dstSet          = mCompSet;
+            writes[i].dstBinding      = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writes[i].pImageInfo      = &infos[i];
+        }
+        vkUpdateDescriptorSets(mDevice, 2, writes, 0, nullptr);
+        mCompDirty = false;
+        return true;
+    }
+
+    // In copyBackBuffer, with GL's wait for Vulkan done: this frame's interface layer, if one was handed over at the
+    // window's size, into mUI; and, where frame generation's inputs are made, the back buffer as it is now (the world,
+    // HUD attachments and 3D overlays, without the interface) as their HUD-less colour, so that the two add up to the
+    // frame exactly.
+    void copyInterfaceLayer(U32 width, U32 height)
+    {
+        mUIThisFrame = false;
+        const GLuint texture = mUIPendingTexture;
+        const bool fits = mUIPendingWidth == width && mUIPendingHeight == height;
+        mUIPendingTexture = 0;
+        if (!texture || !fits || !createCompositePipeline() || !ensureUIImage(width, height) || !mShared)
+        {
+            return;
+        }
+        const GLint w = (GLint)width;
+        const GLint h = (GLint)height;
+        if (!mGLPassReadFB)
+        {
+            gl.CreateFramebuffers(1, &mGLPassReadFB);
+        }
+        gl.NamedFramebufferTexture(mGLPassReadFB, GL_COLOR_ATTACHMENT0, texture, 0);
+        gl.NamedFramebufferReadBuffer(mGLPassReadFB, GL_COLOR_ATTACHMENT0);
+        gl.BlitNamedFramebuffer(mGLPassReadFB, mUI.glFramebuffer, 0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLPassReadFB, GL_COLOR_ATTACHMENT0, 0, 0);
+        if (mFG[FG_HUDLESS].glFramebuffer && mFGWidth == width && mFGHeight == height)
+        {
+            gl.NamedFramebufferReadBuffer(0, GL_BACK);
+            gl.BlitNamedFramebuffer(0, mFG[FG_HUDLESS].glFramebuffer, 0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT,
+                                    GL_NEAREST);
+        }
+        mUIThisFrame = true;
+    }
+
+    void destroyCompositeObjects()
+    {
+        destroyFGImage(mUI);
+        mUIWidth = mUIHeight = 0;
+        if (mSharedView)
+        {
+            vkDestroyImageView(mDevice, mSharedView, nullptr);
+            mSharedView = VK_NULL_HANDLE;
+        }
+        if (mCompPool)
+        {
+            vkDestroyDescriptorPool(mDevice, mCompPool, nullptr);
+            mCompPool = VK_NULL_HANDLE;
+            mCompSet  = VK_NULL_HANDLE;
+        }
+        if (mCompPipeline)
+        {
+            vkDestroyPipeline(mDevice, mCompPipeline, nullptr);
+            mCompPipeline = VK_NULL_HANDLE;
+        }
+        if (mCompLayout)
+        {
+            vkDestroyPipelineLayout(mDevice, mCompLayout, nullptr);
+            mCompLayout = VK_NULL_HANDLE;
+        }
+        if (mCompSetLayout)
+        {
+            vkDestroyDescriptorSetLayout(mDevice, mCompSetLayout, nullptr);
+            mCompSetLayout = VK_NULL_HANDLE;
+        }
+        if (mCompModule)
+        {
+            vkDestroyShaderModule(mDevice, mCompModule, nullptr);
+            mCompModule = VK_NULL_HANDLE;
+        }
+        mCompReady = false;
+    }
+
     // Every GL texture over shared memory, in the layout both APIs leave it in, for GL's semaphore calls.
     U32 glInteropTextures(GLuint* textures, GLenum* layouts) const
     {
@@ -1909,6 +2169,11 @@ struct QLVulkanPresenter::Impl
                 layouts[count++] = GL_LAYOUT_GENERAL_EXT;
             }
         }
+        if (mUI.glTexture)
+        {
+            textures[count] = mUI.glTexture;
+            layouts[count++] = GL_LAYOUT_GENERAL_EXT;
+        }
         return count;
     }
 
@@ -1919,8 +2184,8 @@ struct QLVulkanPresenter::Impl
         {
             return;
         }
-        GLuint textures[1 + FG_COUNT];
-        GLenum layouts[1 + FG_COUNT];
+        GLuint textures[2 + FG_COUNT];
+        GLenum layouts[2 + FG_COUNT];
         const U32 count = glInteropTextures(textures, layouts);
         gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, count, textures, layouts);
         mGLMustWait = false;
@@ -2408,6 +2673,7 @@ struct QLVulkanPresenter::Impl
         if (mDevice)
         {
             destroyPassObjects();
+            destroyCompositeObjects();
         }
         if (mGLDoneGL)
         {
@@ -2530,6 +2796,7 @@ struct QLVulkanPresenter::Impl
         if (mSharedWidth != width || mSharedHeight != height || !mShared)
         {
             destroySharedImage();
+            mCompDirty = true;
             if (!createSharedImage(width, height))
             {
                 return false;
@@ -2565,6 +2832,8 @@ struct QLVulkanPresenter::Impl
         options.mvecBufferFormat    = (uint32_t)VK_FORMAT_R16G16_SFLOAT;
         options.depthBufferFormat   = (uint32_t)VK_FORMAT_R32_SFLOAT;
         options.hudLessBufferFormat = (uint32_t)VK_FORMAT_R8G8B8A8_UNORM;
+        options.uiBufferFormat      = (uint32_t)VK_FORMAT_R8G8B8A8_UNORM;
+        options.enableUserInterfaceRecomposition = mUIThisFrame ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         const sl::Result result = slDLSSGSetOptions(viewport(), options);
         if (result != sl::Result::eOk)
         {
@@ -2578,8 +2847,9 @@ struct QLVulkanPresenter::Impl
             }
         }
         mFGOn = on;
+        mFGRecompose = on && mUIThisFrame;
         LL_INFOS("Vulkan") << "DLSS Frame Generation " << (on ? "on" : "off") << ", " << mSwapWidth << "x" << mSwapHeight
-                           << LL_ENDL;
+                           << (mFGRecompose ? ", the interface interpolated apart" : "") << LL_ENDL;
     }
 
     // Each frame, once its inputs are in: whether frame generation runs for it, and if so the frame's camera.
@@ -2621,7 +2891,7 @@ struct QLVulkanPresenter::Impl
         {
             mFGNote = "off";
         }
-        if (want != mFGOn)
+        if (want != mFGOn || (want && mFGRecompose != mUIThisFrame))
         {
             setFrameGenMode(want);
         }
@@ -2699,7 +2969,23 @@ struct QLVulkanPresenter::Impl
             sl::ResourceTag(&resources[FG_HUDLESS], sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow,
                             &extent),
         };
-        const sl::Result result = slSetTagForFrame(*mFrameToken, viewport(), tags, FG_COUNT,
+        // The interface layer, where it was handed over this frame: Streamline then interpolates the world and the
+        // interface apart and lays the one over the other (enableUserInterfaceRecomposition).
+        sl::Resource ui_resource(sl::ResourceType::eTex2d, (void*)mUI.image, (void*)mUI.memory, (void*)mUI.view,
+                                 (uint32_t)VK_IMAGE_LAYOUT_GENERAL);
+        ui_resource.width        = mFGWidth;
+        ui_resource.height       = mFGHeight;
+        ui_resource.nativeFormat = (uint32_t)mUI.format;
+        ui_resource.mipLevels    = 1;
+        ui_resource.arrayLayers  = 1;
+        ui_resource.flags        = 0;
+        ui_resource.usage        = (uint32_t)mUI.usage;
+        sl::ResourceTag all_tags[FG_COUNT + 1] = {
+            tags[0], tags[1], tags[2],
+            sl::ResourceTag(&ui_resource, sl::kBufferTypeUIColorAndAlpha, sl::ResourceLifecycle::eOnlyValidNow, &extent),
+        };
+        const bool with_ui = mUIThisFrame && mUI.image && mUIWidth == mFGWidth && mUIHeight == mFGHeight;
+        const sl::Result result = slSetTagForFrame(*mFrameToken, viewport(), all_tags, with_ui ? FG_COUNT + 1 : FG_COUNT,
                                                    reinterpret_cast<sl::CommandBuffer*>(cmd));
         if (result != sl::Result::eOk && !mFGLoggedTags)
         {
@@ -2782,13 +3068,14 @@ struct QLVulkanPresenter::Impl
         gl.NamedFramebufferReadBuffer(0, GL_BACK);
         gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
                                 (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        copyInterfaceLayer(width, height);
         endGLCopy(state);
         const GLboolean scissor = state.scissor;
         const GLboolean srgb    = state.srgb;
 
         // Every shared image, the frame generation inputs too: Vulkan takes them all with this frame.
-        GLuint textures[1 + FG_COUNT];
-        GLenum layouts[1 + FG_COUNT];
+        GLuint textures[2 + FG_COUNT];
+        GLenum layouts[2 + FG_COUNT];
         const U32 count = glInteropTextures(textures, layouts);
         gl.SignalSemaphoreEXT(mGLDoneGL, 0, nullptr, count, textures, layouts);
         gl.Flush();
@@ -2887,15 +3174,20 @@ struct QLVulkanPresenter::Impl
         vkBeginCommandBuffer(cmd, &begin);
 
         // The shared image, from GL, as it left it; the swapchain's, whatever it held, to be written over.
-        imageBarrier(cmd, mShared, 0, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily,
-                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        imageBarrier(cmd, mShared, 0,
+                     VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily,
+                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         imageBarrier(cmd, mSwapImages[index], 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        // The frame generation inputs, which GL signalled with the frame, every frame they exist, read or not.
-        for (const FGImage& img : mFG)
+        // The frame generation inputs and the interface layer, which GL signalled with the frame, every frame they exist,
+        // read or not.
+        const FGImage* handed[] = { &mFG[FG_DEPTH], &mFG[FG_MOTION], &mFG[FG_HUDLESS], &mUI };
+        for (const FGImage* handed_img : handed)
         {
+            const FGImage& img = *handed_img;
             if (img.image)
             {
                 imageBarrier(cmd, img.image, 0, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
@@ -2909,6 +3201,21 @@ struct QLVulkanPresenter::Impl
             tagFrameGenInputs(cmd);
         }
 #endif
+
+        // The interface laid over the frame, in place, before the frame is turned into the swapchain.
+        if (mUIThisFrame && mCompReady && updateCompositeDescriptors())
+        {
+            const U32 size[2] = { width, height };
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompLayout, 0, 1, &mCompSet, 0, nullptr);
+            vkCmdPushConstants(cmd, mCompLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(size), size);
+            vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+            imageBarrier(cmd, mShared, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            ++mUIFrames;
+            mUINote = "laid over by Vulkan";
+        }
 
         // GL's rows run bottom up and Vulkan's top down: the copy turns the image over.
         VkImageBlit blit = {};
@@ -2928,8 +3235,9 @@ struct QLVulkanPresenter::Impl
         imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL,
                      VK_IMAGE_LAYOUT_GENERAL, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        for (const FGImage& img : mFG)
+        for (const FGImage* handed_img : handed)
         {
+            const FGImage& img = *handed_img;
             if (img.image)
             {
                 imageBarrier(cmd, img.image, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT, 0,
@@ -3072,6 +3380,33 @@ bool QLVulkanPresenter::sharpen(unsigned src_texture, unsigned dst_texture, unsi
 {
     return sActive && sActive->sharpen((GLuint)src_texture, (GLuint)dst_texture, (U32)width, (U32)height,
                                        reinterpret_cast<const U32*>(cas_const0), reinterpret_cast<const U32*>(cas_const1));
+}
+
+// static
+bool QLVulkanPresenter::uiLayerAvailable()
+{
+    return sActive && sActive->mActive && sActive->createCompositePipeline();
+}
+
+// static
+void QLVulkanPresenter::uiLayer(unsigned texture, unsigned width, unsigned height)
+{
+    if (sActive)
+    {
+        sActive->mUIPendingTexture = (GLuint)texture;
+        sActive->mUIPendingWidth   = (U32)width;
+        sActive->mUIPendingHeight  = (U32)height;
+    }
+}
+
+// static
+std::string QLVulkanPresenter::uiLayerInfo()
+{
+    if (!sActive || !sActive->mActive)
+    {
+        return "needs Vulkan presentation (QuasarVulkanPresent)";
+    }
+    return sActive->mUINote + llformat(", %llu frames", (unsigned long long)sActive->mUIFrames);
 }
 
 // static

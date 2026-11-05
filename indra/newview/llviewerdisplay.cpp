@@ -90,6 +90,7 @@
 #include "pipeline.h"
 #include "qldlssg.h"
 #include "qlframewarp.h"
+#include "qlvulkanpost.h"
 
 #include <filesystem>
 #include <iomanip>
@@ -1780,12 +1781,24 @@ static void render_ui_over_world()
         {
             LL_PROFILE_ZONE_NAMED_CATEGORY_UI("UI 2D");
             LLHUDObject::renderAll();
+        }
+
+        // Quasar: the 2D interface into a layer of its own, which Vulkan lays over the frame (QuasarUILayer). Name tags
+        // and hover text above, and everything before them, stay in the frame with the world.
+        const bool ui_layer = QLUILayer::begin();
+        if (render_ui)
+        {
+            LL_PROFILE_ZONE_NAMED_CATEGORY_UI("UI 2D");
             render_ui_2d();
         }
 
         gViewerWindow->setup2DRender();
         gViewerWindow->updateDebugText();
         gViewerWindow->drawDebugText();
+        if (ui_layer)
+        {
+            QLUILayer::end();
+        }
     }
 }
 

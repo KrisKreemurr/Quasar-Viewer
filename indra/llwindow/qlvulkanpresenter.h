@@ -150,6 +150,18 @@ public:
     /// For the status line.
     static std::string postInfo();
 
+    // ---- The interface layer (QuasarUILayer) ---------------------------------------------------------------------
+
+    /// Whether Vulkan can lay the viewer's interface layer over the frame (its compute pipeline made, or makeable).
+    static bool uiLayerAvailable();
+
+    /// Before the swap, once the interface is drawn: this frame's interface layer, a GL texture (RGBA8, premultiplied,
+    /// the window's size, GL's rows). The present lays it over the frame in Vulkan, and hands it to DLSS Frame
+    /// Generation as the frame's UI. A frame that hands none over shows the window's back buffer as it is.
+    static void uiLayer(unsigned texture, unsigned width, unsigned height);
+
+    static std::string uiLayerInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;

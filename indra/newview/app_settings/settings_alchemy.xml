@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarUILayer</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanPresent): draw the viewer's 2D interface (windows, chat, menus, toolbars) into a layer of its own, which Vulkan lays over the frame and hands to DLSS Frame Generation separately, so generated frames leave the interface sharp. HUD attachments and name tags stay drawn with the world. The picture should look the same. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanPost</key>
         <map>
             <key>Comment</key>

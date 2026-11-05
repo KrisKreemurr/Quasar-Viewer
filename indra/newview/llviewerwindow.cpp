@@ -686,6 +686,8 @@ public:
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan post: " + QLVulkanPost::statusLine());
             ypos += y_inc;
+            addText(xpos, ypos, "Quasar UI layer: " + QLUILayer::statusLine());
+            ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
                                          LLVertexBuffer::sUseAttribBinding ? "" : " (fast path off)"));

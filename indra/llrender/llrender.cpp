@@ -1178,6 +1178,7 @@ void LLRender::setColorMask(bool writeColor, bool writeAlpha)
 
 void LLRender::setColorMask(bool writeColorR, bool writeColorG, bool writeColorB, bool writeAlpha)
 {
+    writeAlpha = writeAlpha || gQLUILayerAlpha;  // Quasar: the interface layer's coverage (QLUILayer)
     if (mCurrColorMask[0] != writeColorR ||
         mCurrColorMask[1] != writeColorG ||
         mCurrColorMask[2] != writeColorB ||
@@ -1228,10 +1229,33 @@ void LLRender::setSceneBlendType(eBlendType type)
     }
 }
 
+// Quasar: while the viewer's 2D interface is drawn into a layer of its own (newview's QLUILayer, QuasarUILayer), what
+// the interface blends is blended into the layer's alpha as coverage, so the layer comes out premultiplied and lies over
+// the world as the interface would have been drawn over it: alpha blending's alpha by "over" (one, one minus source
+// alpha), additive blending's not at all (zero, one), and replacing blends as they are. Every alpha write is let
+// through. Set and cleared by newview only, around that one draw; declared there, not in llrender.h.
+bool gQLUILayerAlpha = false;
+
 void LLRender::blendFunc(eBlendFactor sfactor, eBlendFactor dfactor)
 {
     llassert(sfactor < BF_UNDEF);
     llassert(dfactor < BF_UNDEF);
+    if (gQLUILayerAlpha)
+    {
+        if (dfactor == BF_ONE)
+        {
+            blendFunc(sfactor, dfactor, BF_ZERO, BF_ONE);
+        }
+        else if (dfactor == BF_ZERO)
+        {
+            blendFunc(sfactor, dfactor, BF_ONE, BF_ZERO);
+        }
+        else
+        {
+            blendFunc(sfactor, dfactor, BF_ONE, BF_ONE_MINUS_SOURCE_ALPHA);
+        }
+        return;
+    }
     if (mCurrBlendColorSFactor != sfactor || mCurrBlendColorDFactor != dfactor ||
         mCurrBlendAlphaSFactor != sfactor || mCurrBlendAlphaDFactor != dfactor)
     {

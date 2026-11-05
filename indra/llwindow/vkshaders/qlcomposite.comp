@@ -1,0 +1,31 @@
+// Quasar Viewer: the viewer's 2D interface laid over the world in Vulkan (QuasarUILayer). GL draws the world, the HUD
+// attachments and the 3D overlays into the window as always, and the interface into a layer of its own, premultiplied;
+// the presenter copies both into images it shares, and this lays the layer over the frame in place before the frame is
+// turned the right way up into the swapchain. The same layer goes to DLSS Frame Generation as the frame's UI.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D frameImage;          // the frame, GL's rows (bottom up)
+layout(set = 0, binding = 1, rgba8) uniform readonly image2D uiImage;    // the interface, Vulkan's rows (top down)
+
+layout(push_constant) uniform Params
+{
+    uvec2 size;
+} params;
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(p), params.size)))
+    {
+        return;
+    }
+    vec4 ui = imageLoad(uiImage, ivec2(p.x, int(params.size.y) - 1 - p.y));
+    if (ui.a <= 0.0 && dot(ui.rgb, vec3(1.0)) <= 0.0)
+    {
+        return;  // nothing of the interface here: the frame stays as it is
+    }
+    vec4 frame = imageLoad(frameImage, p);
+    imageStore(frameImage, p, vec4(ui.rgb + frame.rgb * (1.0 - ui.a), frame.a));
+}

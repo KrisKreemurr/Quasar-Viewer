@@ -42,3 +42,21 @@ public:
 
     static std::string statusLine();
 };
+
+/// QuasarUILayer: the viewer's 2D interface (windows, chat, menus, toolbars, the debug text) drawn into a layer of its
+/// own, which the Vulkan presenter lays over the frame and hands to DLSS Frame Generation as the frame's UI, so the
+/// generated frames interpolate the world and leave the interface sharp. HUD attachments, name tags and the 3D overlays
+/// stay drawn into the frame with the world. The layer comes out premultiplied: llrender blends its alpha as coverage
+/// while it is drawn (gQLUILayerAlpha).
+class QLUILayer
+{
+public:
+    /// Before the 2D interface is drawn: true, with the layer bound and cleared, where it goes into the layer this
+    /// frame; false, with nothing changed, where it is drawn into the window as before.
+    static bool begin();
+
+    /// After it is drawn, when begin() was true: the layer let go and handed to the presenter for this frame's present.
+    static void end();
+
+    static std::string statusLine();
+};
