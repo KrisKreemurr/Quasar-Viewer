@@ -87,6 +87,10 @@ namespace
     typedef GLenum (APIENTRY* QL_PFN_CheckNamedFramebufferStatus)(GLuint, GLenum);
     typedef void (APIENTRY* QL_PFN_NamedFramebufferReadBuffer)(GLuint, GLenum);
     typedef void (APIENTRY* QL_PFN_ClearNamedFramebufferfv)(GLuint, GLenum, GLint, const GLfloat*);
+    typedef void (APIENTRY* QL_PFN_GetTextureSubImage)(GLuint, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei,
+                                                       GLenum, GLenum, GLsizei, void*);
+    typedef void (APIENTRY* QL_PFN_ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
+    typedef void (APIENTRY* QL_PFN_GetBooleanv)(GLenum, GLboolean*);
     typedef void (APIENTRY* QL_PFN_BlitNamedFramebuffer)(GLuint, GLuint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
                                                          GLint, GLbitfield, GLenum);
     typedef void (APIENTRY* QL_PFN_MemoryObjectParameteriv)(GLuint, GLenum, const GLint*);
@@ -115,6 +119,9 @@ namespace
         QL_PFN_CheckNamedFramebufferStatus  CheckNamedFramebufferStatus = nullptr;
         QL_PFN_NamedFramebufferReadBuffer   NamedFramebufferReadBuffer = nullptr;
         QL_PFN_ClearNamedFramebufferfv      ClearNamedFramebufferfv = nullptr;
+        QL_PFN_GetTextureSubImage           GetTextureSubImage = nullptr;
+        QL_PFN_ColorMask                    ColorMask = nullptr;
+        QL_PFN_GetBooleanv                  GetBooleanv = nullptr;
         QL_PFN_BlitNamedFramebuffer         BlitNamedFramebuffer = nullptr;
         QL_PFN_CreateObjects                CreateMemoryObjectsEXT = nullptr;
         QL_PFN_DeleteObjects                DeleteMemoryObjectsEXT = nullptr;
@@ -149,6 +156,9 @@ namespace
             QL_GL_LOAD(CheckNamedFramebufferStatus, "glCheckNamedFramebufferStatus");
             QL_GL_LOAD(NamedFramebufferReadBuffer, "glNamedFramebufferReadBuffer");
             QL_GL_LOAD(ClearNamedFramebufferfv, "glClearNamedFramebufferfv");
+            QL_GL_LOAD(GetTextureSubImage, "glGetTextureSubImage");
+            QL_GL_LOAD(ColorMask, "glColorMask");
+            QL_GL_LOAD(GetBooleanv, "glGetBooleanv");
             QL_GL_LOAD(BlitNamedFramebuffer, "glBlitNamedFramebuffer");
             QL_GL_LOAD(CreateMemoryObjectsEXT, "glCreateMemoryObjectsEXT");
             QL_GL_LOAD(DeleteMemoryObjectsEXT, "glDeleteMemoryObjectsEXT");
@@ -194,6 +204,26 @@ namespace
         case VK_PRESENT_MODE_FIFO_KHR:      return "fifo";
         default:                            return "other";
         }
+    }
+}
+
+namespace
+{
+    // The validation layer's findings, into the log.
+    VKAPI_ATTR VkBool32 VKAPI_CALL ql_vk_debug_message(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                                      VkDebugUtilsMessageTypeFlagsEXT,
+                                                      const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
+    {
+        const char* text = data && data->pMessage ? data->pMessage : "";
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+        {
+            LL_WARNS("Vulkan") << "Validation error: " << text << LL_ENDL;
+        }
+        else
+        {
+            LL_WARNS("Vulkan") << "Validation warning: " << text << LL_ENDL;
+        }
+        return VK_FALSE;
     }
 }
 
@@ -252,6 +282,15 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdPipelineBarrier);
     QL_VK_FN(vkCmdBlitImage);
     QL_VK_FN(vkCmdClearColorImage);
+    QL_VK_FN(vkCmdCopyImageToBuffer);
+    QL_VK_FN(vkCreateBuffer);
+    QL_VK_FN(vkDestroyBuffer);
+    QL_VK_FN(vkGetBufferMemoryRequirements);
+    QL_VK_FN(vkBindBufferMemory);
+    QL_VK_FN(vkMapMemory);
+    QL_VK_FN(vkUnmapMemory);
+    QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
+    QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
 #undef QL_VK_FN
 
@@ -259,6 +298,7 @@ struct QLVulkanPresenter::Impl
 
     HWND             mWindow = nullptr;
     VkInstance       mInstance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT mMessenger = VK_NULL_HANDLE;
     VkSurfaceKHR     mSurface = VK_NULL_HANDLE;
     VkPhysicalDevice mPhysical = VK_NULL_HANDLE;
     VkDevice         mDevice = VK_NULL_HANDLE;
@@ -396,6 +436,13 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdPipelineBarrier);
         QL_VK_DEVICE(vkCmdBlitImage);
         QL_VK_DEVICE(vkCmdClearColorImage);
+        QL_VK_DEVICE(vkCmdCopyImageToBuffer);
+        QL_VK_DEVICE(vkCreateBuffer);
+        QL_VK_DEVICE(vkDestroyBuffer);
+        QL_VK_DEVICE(vkGetBufferMemoryRequirements);
+        QL_VK_DEVICE(vkBindBufferMemory);
+        QL_VK_DEVICE(vkMapMemory);
+        QL_VK_DEVICE(vkUnmapMemory);
         QL_VK_DEVICE(vkQueueSubmit);
 #undef QL_VK_DEVICE
         return true;
@@ -449,7 +496,7 @@ struct QLVulkanPresenter::Impl
         app.engineVersion      = 1;
         app.apiVersion         = VK_API_VERSION_1_1;
 
-        const char* extensions[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
+        std::vector<const char*> extensions = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
 
         // The validation layer, where it is installed and asked for (QUASAR_VK_VALIDATION=1 in the environment).
         std::vector<const char*> layers;
@@ -466,6 +513,8 @@ struct QLVulkanPresenter::Impl
                 if (strcmp(p.layerName, "VK_LAYER_KHRONOS_validation") == 0)
                 {
                     layers.push_back("VK_LAYER_KHRONOS_validation");
+                    // The layer brings the messenger its findings come through.
+                    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
                     LL_INFOS("Vulkan") << "Vulkan validation layer on" << LL_ENDL;
                 }
             }
@@ -473,8 +522,8 @@ struct QLVulkanPresenter::Impl
 
         VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
         info.pApplicationInfo        = &app;
-        info.enabledExtensionCount   = (U32)LL_ARRAY_SIZE(extensions);
-        info.ppEnabledExtensionNames = extensions;
+        info.enabledExtensionCount   = (U32)extensions.size();
+        info.ppEnabledExtensionNames = extensions.data();
         info.enabledLayerCount       = (U32)layers.size();
         info.ppEnabledLayerNames     = layers.empty() ? nullptr : layers.data();
 
@@ -483,6 +532,24 @@ struct QLVulkanPresenter::Impl
         {
             mInstance = VK_NULL_HANDLE;
             return failVK("vkCreateInstance", result);
+        }
+        if (!layers.empty())
+        {
+            vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(mInstance, "vkCreateDebugUtilsMessengerEXT"));
+            vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(mInstance, "vkDestroyDebugUtilsMessengerEXT"));
+            if (vkCreateDebugUtilsMessengerEXT)
+            {
+                VkDebugUtilsMessengerCreateInfoEXT messenger = { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
+                messenger.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+                messenger.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+                messenger.pfnUserCallback = ql_vk_debug_message;
+                vkCreateDebugUtilsMessengerEXT(mInstance, &messenger, nullptr, &mMessenger);
+            }
         }
         return loadInstanceFunctions();
     }
@@ -993,6 +1060,156 @@ struct QLVulkanPresenter::Impl
         }
     }
 
+    // Whether the shared image's memory really is shared, each way, told by pixels read back rather than by colours on
+    // the screen: Vulkan fills it blue and GL reads a pixel; then GL fills it green and Vulkan reads a pixel into memory
+    // the CPU maps. Both reads go to the log. Run once, at start-up, through the same semaphores the frames use; it
+    // leaves the image as a frame does, Vulkan's read signalled for GL to wait on.
+    void selfTest()
+    {
+        const GLenum general = GL_LAYOUT_GENERAL_EXT;
+        VkCommandBuffer cmd = mCommands[0];
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        // Vulkan to GL.
+        vkResetFences(mDevice, 1, &mFences[0]);
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &begin);
+        imageBarrier(cmd, mShared, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+        const VkClearColorValue blue = { { 0.f, 0.f, 1.f, 1.f } };
+        const VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cmd, mShared, VK_IMAGE_LAYOUT_GENERAL, &blue, 1, &range);
+        imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                     mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        vkEndCommandBuffer(cmd);
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &mVKDoneVK;
+        VkResult result = vkQueueSubmit(mQueue, 1, &submit, mFences[0]);
+        if (result != VK_SUCCESS)
+        {
+            LL_WARNS("Vulkan") << "Self-test: Vulkan's fill not submitted (VkResult " << (S32)result << ")" << LL_ENDL;
+            return;
+        }
+        vkWaitForFences(mDevice, 1, &mFences[0], VK_TRUE, UINT64_MAX);
+
+        logGLErrors("before the self-test");
+        gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, 1, &mGLTexture, &general);
+        GLubyte gl_px[4] = { 7, 7, 7, 7 };
+        gl.GetTextureSubImage(mGLTexture, 0, 0, 0, 0, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(gl_px), gl_px);
+        logGLErrors("GL's read of Vulkan's fill");
+        LL_INFOS("Vulkan") << "Self-test, Vulkan to GL: Vulkan filled blue (0 0 255 255), GL read " << (S32)gl_px[0]
+                           << " " << (S32)gl_px[1] << " " << (S32)gl_px[2] << " " << (S32)gl_px[3] << LL_ENDL;
+
+        // Memory the CPU maps, for Vulkan to read a pixel of GL's fill into: made before GL signals, so that a failure
+        // here leaves no signal untaken.
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory buffer_memory = VK_NULL_HANDLE;
+        VkBufferCreateInfo buffer_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        buffer_info.size        = 256;
+        buffer_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &buffer_info, nullptr, &buffer) != VK_SUCCESS)
+        {
+            LL_WARNS("Vulkan") << "Self-test: no readback buffer" << LL_ENDL;
+            return;
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, buffer, &req);
+        VkPhysicalDeviceMemoryProperties mem = {};
+        vkGetPhysicalDeviceMemoryProperties(mPhysical, &mem);
+        U32 type = U32_MAX;
+        const VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (U32 i = 0; i < mem.memoryTypeCount; ++i)
+        {
+            if ((req.memoryTypeBits & (1u << i)) && (mem.memoryTypes[i].propertyFlags & host) == host)
+            {
+                type = i;
+                break;
+            }
+        }
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = type;
+        if (type == U32_MAX || vkAllocateMemory(mDevice, &alloc, nullptr, &buffer_memory) != VK_SUCCESS)
+        {
+            vkDestroyBuffer(mDevice, buffer, nullptr);
+            LL_WARNS("Vulkan") << "Self-test: no readback memory" << LL_ENDL;
+            return;
+        }
+        vkBindBufferMemory(mDevice, buffer, buffer_memory, 0);
+
+        // GL to Vulkan.
+        GLboolean mask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+        gl.GetBooleanv(GL_COLOR_WRITEMASK, mask);
+        const GLboolean scissor = gl.IsEnabled(GL_SCISSOR_TEST);
+        gl.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        if (scissor)
+        {
+            gl.Disable(GL_SCISSOR_TEST);
+        }
+        const GLfloat green[4] = { 0.f, 1.f, 0.f, 1.f };
+        gl.ClearNamedFramebufferfv(mGLFramebuffer, GL_COLOR, 0, green);
+        GLubyte gl_own[4] = { 7, 7, 7, 7 };
+        gl.GetTextureSubImage(mGLTexture, 0, 0, 0, 0, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(gl_own), gl_own);
+        if (scissor)
+        {
+            gl.Enable(GL_SCISSOR_TEST);
+        }
+        gl.ColorMask(mask[0], mask[1], mask[2], mask[3]);
+        gl.SignalSemaphoreEXT(mGLDoneGL, 0, nullptr, 1, &mGLTexture, &general);
+        gl.Flush();
+        logGLErrors("GL's fill");
+        LL_INFOS("Vulkan") << "Self-test: GL filled green and reads its own texture as " << (S32)gl_own[0] << " "
+                           << (S32)gl_own[1] << " " << (S32)gl_own[2] << " " << (S32)gl_own[3] << " (color mask was "
+                           << (S32)mask[0] << (S32)mask[1] << (S32)mask[2] << (S32)mask[3] << ")" << LL_ENDL;
+
+        vkResetFences(mDevice, 1, &mFences[0]);
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &begin);
+        imageBarrier(cmd, mShared, 0, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region = {};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.imageExtent      = { 1, 1, 1 };
+        vkCmdCopyImageToBuffer(cmd, mShared, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+        imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                     mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        vkEndCommandBuffer(cmd);
+        VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores    = &mGLDoneVK;
+        submit.pWaitDstStageMask  = &stage;
+        result = vkQueueSubmit(mQueue, 1, &submit, mFences[0]);
+        if (result == VK_SUCCESS)
+        {
+            mGLMustWait = true;  // this read signalled Vulkan's semaphore, which the first frame's copy waits for
+            vkWaitForFences(mDevice, 1, &mFences[0], VK_TRUE, UINT64_MAX);
+            void* mapped = nullptr;
+            if (vkMapMemory(mDevice, buffer_memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS && mapped)
+            {
+                const U8* px = static_cast<const U8*>(mapped);
+                LL_INFOS("Vulkan") << "Self-test, GL to Vulkan: GL filled green (0 255 0 255), Vulkan read "
+                                   << (S32)px[0] << " " << (S32)px[1] << " " << (S32)px[2] << " " << (S32)px[3]
+                                   << LL_ENDL;
+                vkUnmapMemory(mDevice, buffer_memory);
+            }
+        }
+        else
+        {
+            LL_WARNS("Vulkan") << "Self-test: Vulkan's read not submitted (VkResult " << (S32)result << ")" << LL_ENDL;
+        }
+        vkDestroyBuffer(mDevice, buffer, nullptr);
+        vkFreeMemory(mDevice, buffer_memory, nullptr);
+    }
+
     bool init(HWND window, bool vsync)
     {
         mWindow = window;
@@ -1010,6 +1227,10 @@ struct QLVulkanPresenter::Impl
         if (width > 0 && height > 0 && (!createSwapchain(width, height) || !createSharedImage(width, height)))
         {
             return false;
+        }
+        if (mShared)
+        {
+            selfTest();
         }
 
         mActive = true;
@@ -1081,6 +1302,11 @@ struct QLVulkanPresenter::Impl
                 vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
             }
             mSurface = VK_NULL_HANDLE;
+            if (mMessenger && vkDestroyDebugUtilsMessengerEXT)
+            {
+                vkDestroyDebugUtilsMessengerEXT(mInstance, mMessenger, nullptr);
+            }
+            mMessenger = VK_NULL_HANDLE;
             if (vkDestroyInstance)
             {
                 vkDestroyInstance(mInstance, nullptr);
