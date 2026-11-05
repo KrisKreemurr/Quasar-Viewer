@@ -906,6 +906,7 @@ void LLViewerObjectList::updateApparentAngles(LLAgent &agent)
 // Quasar: how many avatars' motions ran on the job pool last frame, of how many avatars (the status line).
 static U32 sQLPosedLastFrame = 0;
 static U32 sQLAvatarsLastFrame = 0;
+static U32 sQLFullLastFrame = 0;  // of them, those animated in full this frame (the rest are impostors or hidden)
 std::string ql_parallel_pose_info()
 {
     static LLCachedControl<bool> parallel_pose(gSavedSettings, "QuasarParallelAvatarPose", false);
@@ -913,8 +914,8 @@ std::string ql_parallel_pose_info()
     {
         return "off (QuasarParallelAvatarPose)";
     }
-    return llformat("%u of %u avatars posed across %u threads", sQLPosedLastFrame, sQLAvatarsLastFrame,
-                    QLJobPool::instance().workers() + 1);
+    return llformat("%u of %u animated this frame on the cores (%u avatars) | %u threads", sQLPosedLastFrame,
+                    sQLFullLastFrame, sQLAvatarsLastFrame, QLJobPool::instance().workers() + 1);
 }
 
 void LLViewerObjectList::update(LLAgent &agent)
@@ -1051,6 +1052,7 @@ void LLViewerObjectList::update(LLAgent &agent)
         static std::vector<LLPointer<LLVOAvatar>> pose_pending;
         pose_pending.clear();
         LLVOAvatar::sQLSplitPose = parallel_pose() && QLJobPool::instance().workers() > 0;
+        LLVOAvatar::sQLFullUpdates = 0;
 
         for (std::vector<LLViewerObject*>::iterator idle_iter = idle_list.begin();
             idle_iter != idle_end; idle_iter++)
@@ -1096,6 +1098,7 @@ void LLViewerObjectList::update(LLAgent &agent)
             sQLPosedLastFrame = 0;
         }
         sQLAvatarsLastFrame = mNumAvatars;
+        sQLFullLastFrame = LLVOAvatar::sQLFullUpdates;
 
         //update flexible objects
         LLVolumeImplFlexible::updateClass();

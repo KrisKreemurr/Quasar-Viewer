@@ -5439,6 +5439,7 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
             {
                 mMotionController.unpauseAllMotions();
             }
+            ++sQLFullUpdates;
             if (mMotionController.updateMotionsPrepare(false))
             {
                 if (mMotionController.canEvaluateOffMainThread())
@@ -5536,6 +5537,7 @@ bool LLVOAvatar::updateCharacterAfterSkeleton(bool visible, S32 joint_updates)
 
 // static
 bool LLVOAvatar::sQLSplitPose = false;
+U32  LLVOAvatar::sQLFullUpdates = 0;
 
 // Quasar (QuasarParallelAvatarPose): on a job pool thread, at the same time as other avatars': the motions run and
 // blended into the skeleton. Nothing but this avatar's own state is written: its motions', its joints', its visual

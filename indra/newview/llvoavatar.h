@@ -287,6 +287,7 @@ public:
     // stops its idleUpdate once they have been prepared, with qlPosePending() set; qlEvaluatePose() runs them on a job
     // pool thread, and qlFinishPose() finishes the idleUpdate on the main thread.
     static bool     sQLSplitPose;
+    static U32      sQLFullUpdates;  // avatars that took a full update under sQLSplitPose, counted by the caller
     bool            qlPosePending() const { return mQLPosePending; }
     void            qlEvaluatePose();
     void            qlFinishPose();
