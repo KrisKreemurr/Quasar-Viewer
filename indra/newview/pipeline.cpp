@@ -14010,6 +14010,7 @@ namespace
         U32  mKept = 0;
         U32  mLastChangeFrame = 0;
         bool mOn = false;
+        char mWhat[ALRenderResourcePlan::SUN_CASCADES] = {};  // each cascade: F full, M moving only, K kept, - none
     };
     QLSunCacheStats sSunCacheStats;
 
@@ -14141,8 +14142,13 @@ std::string ql_sun_shadow_cache_info()
         return "off";
     }
     const U32 frame = LLFrameTimer::getFrameCount();
-    return llformat("%u full, %u moving only, %u kept | still geometry changed %u frames ago", s.mFull, s.mMoving,
-                    s.mKept, frame - s.mLastChangeFrame);
+    std::string what;
+    for (char c : s.mWhat)
+    {
+        what += c ? c : '-';
+        what += ' ';
+    }
+    return llformat("%s| still change %uf ago", what.c_str(), frame - s.mLastChangeFrame);
 }
 
 namespace
@@ -14752,6 +14758,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     if (cache_on)
                     {
                         ++sSunCacheStats.mKept;
+                        sSunCacheStats.mWhat[j] = 'K';
                     }
                     continue;
                 }
@@ -14788,6 +14795,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 mRT->shadow[j].flush();
                 kept.mFrame = LLFrameTimer::getFrameCount();
                 ++sSunCacheStats.mMoving;
+                sSunCacheStats.mWhat[j] = 'M';
                 continue;
             }
 
@@ -15224,6 +15232,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     if (cache_on)
                     {
                         ++sSunCacheStats.mFull;
+                        sSunCacheStats.mWhat[j] = 'F';
                     }
                 }
 
