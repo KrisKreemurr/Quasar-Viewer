@@ -1002,6 +1002,9 @@ void LLReflectionMapManager::doProbeUpdate()
 // The next six passes render the scene with both radiance and irradiance into the same scratch space cube map and generate a simple mip chain.
 // At the end of these passes, a radiance map is generated for this probe and placed into the radiance cube map array at the index for this probe.
 // In effect this simulates single-bounce lighting.
+// pipeline.cpp: while set, the capture leaves avatars and their attachments out (QuasarProbeSkipAvatars).
+extern bool gQLProbeCaptureSkipsAvatars;
+
 void LLReflectionMapManager::updateProbeFace(LLReflectionMap* probe, U32 face)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DISPLAY;
@@ -1033,7 +1036,23 @@ void LLReflectionMapManager::updateProbeFace(LLReflectionMap* probe, U32 face)
     else
     {
         llassert(mRenderReflectionProbeLevel > 0); // should never update a probe that's not the default probe if reflection coverage is none
+        // Quasar: avatars, what they wear and animesh are left out of the reflection probes' captures
+        // (QuasarProbeSkipAvatars): in a crowd they are most of a capture's draws, and in a probe's blurred reflection
+        // they are smudges. Mirrors (the hero probes) are not these, and keep them.
+        static LLCachedControl<bool> skip_avatars(gSavedSettings, "QuasarProbeSkipAvatars", true);
+        gQLProbeCaptureSkipsAvatars = skip_avatars();
+        if (gQLProbeCaptureSkipsAvatars)
+        {
+            gPipeline.pushRenderTypeMask();
+            gPipeline.clearRenderTypeMask(LLPipeline::RENDER_TYPE_AVATAR, LLPipeline::RENDER_TYPE_CONTROL_AV,
+                                          LLPipeline::END_RENDER_TYPES);
+        }
         probe->update(mRenderTarget.getWidth(), face);
+        if (gQLProbeCaptureSkipsAvatars)
+        {
+            gPipeline.popRenderTypeMask();
+        }
+        gQLProbeCaptureSkipsAvatars = false;
     }
 
     gPipeline.mRT = &gPipeline.mMainRT;

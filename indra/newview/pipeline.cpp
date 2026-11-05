@@ -14231,9 +14231,19 @@ namespace
     }
 }
 
-// Whether a spot light's shadow leaves this avatar, and what it wears, out (lldrawable.cpp's bridge cull).
+// Quasar: set around a reflection probe's capture that leaves avatars out (llreflectionmapmanager.cpp,
+// QuasarProbeSkipAvatars). The render type mask hides the avatars themselves; their attachments are culled as bridges,
+// by the same test as the spot lights' filter below.
+bool gQLProbeCaptureSkipsAvatars = false;
+
+// Whether a spot light's shadow, or a reflection probe's capture, leaves this avatar, and what it wears, out
+// (lldrawable.cpp's bridge cull).
 bool ql_spot_shadow_skips_avatar(const LLVOAvatar* avatar)
 {
+    if (gQLProbeCaptureSkipsAvatars && avatar)
+    {
+        return true;
+    }
     const QLSpotAvatarFilter& f = sSpotAvatars;
     if (!f.mActive || !avatar || (LLViewerCamera::sCurCameraID != LLViewerCamera::CAMERA_SPOT_SHADOW0 &&
                                   LLViewerCamera::sCurCameraID != LLViewerCamera::CAMERA_SPOT_SHADOW1))

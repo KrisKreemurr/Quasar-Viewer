@@ -2927,6 +2927,17 @@
             <key>Value</key>
             <integer>2</integer>
         </map>
+        <key>QuasarProbeSkipAvatars</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: leave avatars, what they wear and animesh out of reflection probe captures (the environment maps shiny surfaces reflect). In a crowd they are most of a capture's cost, and in a probe's blurry reflection hardly visible. Mirrors are not affected and still show avatars. Applies from the next capture.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarProbeStars</key>
         <map>
             <key>Comment</key>
