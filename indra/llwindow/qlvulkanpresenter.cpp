@@ -74,6 +74,7 @@ namespace
     typedef GLboolean (APIENTRY* QL_PFN_IsEnabled)(GLenum);
     typedef void (APIENTRY* QL_PFN_EnableDisable)(GLenum);
     typedef void (APIENTRY* QL_PFN_Void)(void);
+    typedef GLenum (APIENTRY* QL_PFN_GetError)(void);
     typedef const GLubyte* (APIENTRY* QL_PFN_GetStringi)(GLenum, GLuint);
     typedef void (APIENTRY* QL_PFN_CreateObjects)(GLsizei, GLuint*);
     typedef void (APIENTRY* QL_PFN_DeleteObjects)(GLsizei, const GLuint*);
@@ -99,6 +100,7 @@ namespace
         QL_PFN_EnableDisable                Disable = nullptr;
         QL_PFN_Void                         Flush = nullptr;
         QL_PFN_Void                         Finish = nullptr;
+        QL_PFN_GetError                     GetError = nullptr;
         QL_PFN_GetStringi                   GetStringi = nullptr;
         QL_PFN_CreateTextures               CreateTextures = nullptr;
         QL_PFN_DeleteObjects                DeleteTextures = nullptr;
@@ -131,6 +133,7 @@ namespace
             QL_GL_LOAD(Disable, "glDisable");
             QL_GL_LOAD(Flush, "glFlush");
             QL_GL_LOAD(Finish, "glFinish");
+            QL_GL_LOAD(GetError, "glGetError");
             QL_GL_LOAD(GetStringi, "glGetStringi");
             QL_GL_LOAD(CreateTextures, "glCreateTextures");
             QL_GL_LOAD(DeleteTextures, "glDeleteTextures");
@@ -242,6 +245,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkResetCommandBuffer);
     QL_VK_FN(vkCmdPipelineBarrier);
     QL_VK_FN(vkCmdBlitImage);
+    QL_VK_FN(vkCmdClearColorImage);
     QL_VK_FN(vkQueueSubmit);
 #undef QL_VK_FN
 
@@ -286,6 +290,30 @@ struct QLVulkanPresenter::Impl
     VkFence         mFences[FRAMES_IN_FLIGHT] = {};
     VkSemaphore     mAcquired[FRAMES_IN_FLIGHT] = {};
     U64             mFrame = 0;
+
+    // Diagnosis of a black screen: for its first DIAGNOSE_FRAMES presents, Vulkan fills the window with magenta rather
+    // than the frame. Magenta seen means Vulkan reaches the screen and the frame is lost on its way in from GL; nothing
+    // seen means Vulkan's presents do not reach the screen at all. GL's errors around the sharing go to the log too.
+    static constexpr U64 DIAGNOSE_FRAMES = 240;
+    bool mLoggedFirstCopy = false;
+
+    // GL errors since the last call, logged with what was just done; GL's error queue is left empty.
+    void logGLErrors(const char* after)
+    {
+        if (!gl.GetError)
+        {
+            return;
+        }
+        for (S32 i = 0; i < 16; ++i)
+        {
+            const GLenum err = gl.GetError();
+            if (err == GL_NO_ERROR)
+            {
+                break;
+            }
+            LL_WARNS("Vulkan") << "GL error 0x" << std::hex << err << std::dec << " after " << after << LL_ENDL;
+        }
+    }
 
     bool        mActive = false;
     std::string mNote = "not started";
@@ -360,6 +388,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkResetCommandBuffer);
         QL_VK_DEVICE(vkCmdPipelineBarrier);
         QL_VK_DEVICE(vkCmdBlitImage);
+        QL_VK_DEVICE(vkCmdClearColorImage);
         QL_VK_DEVICE(vkQueueSubmit);
 #undef QL_VK_DEVICE
         return true;
@@ -738,8 +767,10 @@ struct QLVulkanPresenter::Impl
         gl.TextureParameteri(mGLTexture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
         gl.TextureStorageMem2DEXT(mGLTexture, 1, GL_RGBA8, (GLsizei)width, (GLsizei)height, mGLMemory, 0);
 
+        logGLErrors("importing the shared image's memory into a texture");
         gl.CreateFramebuffers(1, &mGLFramebuffer);
         gl.NamedFramebufferTexture(mGLFramebuffer, GL_COLOR_ATTACHMENT0, mGLTexture, 0);
+        logGLErrors("making the shared image's framebuffer");
         if (gl.CheckNamedFramebufferStatus(mGLFramebuffer, GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         {
             return fail("the shared image is not a complete GL framebuffer");
@@ -747,6 +778,8 @@ struct QLVulkanPresenter::Impl
 
         mSharedWidth  = width;
         mSharedHeight = height;
+        LL_INFOS("Vulkan") << "Shared image " << width << "x" << height << ", " << req.size << " bytes, GL texture "
+                           << mGLTexture << ", framebuffer " << mGLFramebuffer << LL_ENDL;
         return true;
     }
 
@@ -1092,6 +1125,10 @@ struct QLVulkanPresenter::Impl
     {
         LL_PROFILE_ZONE_NAMED("vulkan present - gl copy");
         const GLenum layout = GL_LAYOUT_TRANSFER_SRC_EXT;
+        if (!mLoggedFirstCopy)
+        {
+            logGLErrors("the viewer's frame, before the first copy");
+        }
         if (mGLMustWait)
         {
             gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
@@ -1123,6 +1160,18 @@ struct QLVulkanPresenter::Impl
 
         gl.SignalSemaphoreEXT(mGLDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
         gl.Flush();
+        if (!mLoggedFirstCopy)
+        {
+            GLint read_fb = -1;
+            GLint read_buffer = -1;
+            gl.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+            gl.GetIntegerv(GL_READ_BUFFER, &read_buffer);
+            logGLErrors("the first copy into the shared image");
+            LL_INFOS("Vulkan") << "First copy " << width << "x" << height << " (read framebuffer " << read_fb
+                               << ", read buffer 0x" << std::hex << read_buffer << std::dec << ", scissor "
+                               << (S32)scissor << ", sRGB " << (S32)srgb << ")" << LL_ENDL;
+            mLoggedFirstCopy = true;
+        }
     }
 
     bool present()
@@ -1206,8 +1255,26 @@ struct QLVulkanPresenter::Impl
         blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         blit.dstOffsets[0]  = { 0, 0, 0 };
         blit.dstOffsets[1]  = { (S32)mSwapWidth, (S32)mSwapHeight, 1 };
-        vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mSwapImages[index],
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+        if (mFrame < DIAGNOSE_FRAMES)
+        {
+            if (mFrame == 0)
+            {
+                LL_INFOS("Vulkan") << "Diagnosis: the first " << DIAGNOSE_FRAMES
+                                   << " frames are magenta, then the viewer's frames" << LL_ENDL;
+            }
+            const VkClearColorValue magenta = { { 1.f, 0.f, 1.f, 1.f } };
+            const VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(cmd, mSwapImages[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1, &range);
+        }
+        else
+        {
+            if (mFrame == DIAGNOSE_FRAMES)
+            {
+                LL_INFOS("Vulkan") << "Diagnosis over: presenting the viewer's frames" << LL_ENDL;
+            }
+            vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mSwapImages[index],
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+        }
 
         imageBarrier(cmd, mSwapImages[index], VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
