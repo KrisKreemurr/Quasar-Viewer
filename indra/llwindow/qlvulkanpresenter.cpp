@@ -577,6 +577,8 @@ struct QLVulkanPresenter::Impl
                 LL_WARNS("Vulkan") << "Streamline not loaded (" << mStreamlineNote << "): Vulkan alone" << LL_ENDL;
 #else
                 mStreamlineNote = "not in this build";
+                LL_WARNS("Vulkan") << "QuasarStreamline is on, but this build has no Streamline SDK (the configure did "
+                                      "not fetch it: see its output for 'NVIDIA Streamline'): Vulkan alone" << LL_ENDL;
 #endif
             }
             mLibrary = LoadLibraryA("vulkan-1.dll");
