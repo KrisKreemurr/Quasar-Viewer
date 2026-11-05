@@ -377,7 +377,7 @@ public:
     // it will be deactivated
     virtual bool onActivate() { return true; }
 
-    bool canUpdateOffMainThread() const override { return mQLRanOnMain; }  // Quasar: see LLMotion (noise2's table)
+    virtual bool canUpdateOffMainThread() const { return mQLRanOnMain; }  // Quasar: see LLMotion (noise2's table)
 
     // called per time step
     // must return true while it is active, and
@@ -503,7 +503,7 @@ public:
     // it will be deactivated
     virtual bool onActivate() { return true; }
 
-    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
+    virtual bool canUpdateOffMainThread() const { return true; }  // Quasar: see LLMotion
 
     // called per time step
     // must return true while it is active, and
@@ -608,7 +608,7 @@ public:
     // it will be deactivated
     virtual bool onActivate() { return true; }
 
-    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
+    virtual bool canUpdateOffMainThread() const { return true; }  // Quasar: see LLMotion
 
     // called per time step
     // must return true while it is active, and
@@ -5546,7 +5546,13 @@ void LLVOAvatar::qlEvaluatePose()
     qlHoldVisualParams(true);
     mMotionController.beginOffMainThread();
     mMotionController.updateMotionsEvaluate(false);
-    mQLJointUpdates = qlPlaceSkeleton(mQLPoseVisible, mQLWasSitGroundConstrained);
+    // What waits for the main thread changes the skeleton too (a motion's onDeactivate resets its joints, parameters
+    // reshape it): an avatar left with any of it is placed there, after it, as the update on one thread would have.
+    mQLSkeletonPlaced = !mMotionController.hasDeferredWork() && !qlVisualParamsAsked();
+    if (mQLSkeletonPlaced)
+    {
+        mQLJointUpdates = qlPlaceSkeleton(mQLPoseVisible, mQLWasSitGroundConstrained);
+    }
 }
 
 // Quasar: back on the main thread, in the order the avatars were updated in: what waited, and the rest of
@@ -5559,6 +5565,10 @@ void LLVOAvatar::qlFinishPose()
     if (isDead())
     {
         return;
+    }
+    if (!mQLSkeletonPlaced)
+    {
+        mQLJointUpdates = qlPlaceSkeleton(mQLPoseVisible, mQLWasSitGroundConstrained);
     }
     const bool visible = updateCharacterAfterSkeleton(mQLPoseVisible, mQLJointUpdates);
     idleUpdateAfterCharacter(visible);

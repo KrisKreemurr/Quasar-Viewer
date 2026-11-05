@@ -294,6 +294,7 @@ public:
     bool            mQLPoseVisible = false;
     bool            mQLWasSitGroundConstrained = false;
     S32             mQLJointUpdates = -1;
+    bool            mQLSkeletonPlaced = false;
     void            updateFootstepSounds();
     void            computeUpdatePeriod();
     void            updateOrientation(LLAgent &agent, F32 speed, F32 delta_time);

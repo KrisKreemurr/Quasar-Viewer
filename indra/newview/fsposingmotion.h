@@ -78,7 +78,7 @@ public:
     // called per time step
     // must return TRUE while it is active, and
     // must return FALSE when the motion is completed.
-    bool canUpdateOffMainThread() const override { return false; }  // Quasar: the poser edits from the UI, on the main thread
+    virtual bool canUpdateOffMainThread() const { return false; }  // Quasar: the poser edits from the UI, on the main thread
     virtual bool onUpdate(F64 time, U8 *joint_mask);
 
     // called when a motion is deactivated

@@ -157,6 +157,8 @@ public:
     // deactivating runs the motion's onDeactivate, and may delete it.
     void beginOffMainThread() { mQLOffMainThread = true; }
     void endOffMainThread();
+    // Whether the off-thread update left anything for endOffMainThread() to do.
+    bool hasDeferredWork() const { return !mQLDeferredDeactivations.empty(); }
 
     // minimal update (e.g. while hidden)
     void updateMotionsMinimal();

@@ -132,6 +132,7 @@ public:
     void qlHoldVisualParams(bool hold) { mQLHoldVisualParams = hold; }
     bool qlVisualParamsHeld() const { return mQLHoldVisualParams; }
     void qlNoteVisualParamsAsked() { mQLVisualParamsAsked = true; }
+    bool qlVisualParamsAsked() const { return mQLVisualParamsAsked; }
     void qlApplyHeldVisualParams()
     {
         mQLHoldVisualParams = false;

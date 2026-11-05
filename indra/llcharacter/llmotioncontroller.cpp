@@ -36,6 +36,8 @@
 #include "llanimationstates.h"
 #include "llstl.h"
 
+#include <algorithm>
+
 // The signatures are merged eight joints at a time, so this is why
 // LL_CHARACTER_MAX_ANIMATED_JOINTS needs to be a multiple of eight.
 const S32 NUM_JOINT_SIGNATURE_STRIDES = LL_CHARACTER_MAX_ANIMATED_JOINTS / 8;
@@ -189,6 +191,7 @@ void LLMotionController::incMotionCounts(S32& num_motions, S32& num_loading_moti
 //-----------------------------------------------------------------------------
 void LLMotionController::deleteAllMotions()
 {
+    mQLDeferredDeactivations.clear();  // Quasar: none of them is left to deactivate
     mLoadingMotions.clear();
     mLoadedMotions.clear();
     mActiveMotions[LLMotion::NORMAL_BLEND].clear();
@@ -436,6 +439,10 @@ void LLMotionController::removeMotionInstance(LLMotion* motionp)
 {
     if (motionp)
     {
+        // Quasar: a motion deleted here is not one endOffMainThread() may still deactivate.
+        mQLDeferredDeactivations.erase(
+            std::remove(mQLDeferredDeactivations.begin(), mQLDeferredDeactivations.end(), motionp),
+            mQLDeferredDeactivations.end());
         llassert(findMotion(motionp->getID()) != motionp);
         if (motionp->isActive())
             motionp->deactivate();
@@ -1146,15 +1153,17 @@ void LLMotionController::deactivateOrDefer(LLMotion* motion)
 void LLMotionController::endOffMainThread()
 {
     mQLOffMainThread = false;
-    for (LLMotion* motion : mQLDeferredDeactivations)
+    // Taken off the list first: deactivating a deprecated motion deletes it (removeMotionInstance), which takes it off.
+    while (!mQLDeferredDeactivations.empty())
     {
-        // As the update would have: a motion still on its active list (nothing else runs between).
+        LLMotion* motion = mQLDeferredDeactivations.front();
+        mQLDeferredDeactivations.erase(mQLDeferredDeactivations.begin());
+        // As the update would have: a motion still on its active list.
         if (isMotionActive(motion))
         {
             deactivateMotionInstance(motion);
         }
     }
-    mQLDeferredDeactivations.clear();
 }
 
 //-----------------------------------------------------------------------------
