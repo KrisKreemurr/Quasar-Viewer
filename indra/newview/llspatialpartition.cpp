@@ -334,18 +334,23 @@ bool LLSpatialGroup::addObject(LLDrawable *drawablep)
     return true;
 }
 
-// pipeline.cpp: bumped as still geometry is built again, for the cached sun shadow (QuasarSunShadowCache).
-extern U32 gQLStillGeometrySerial;
+// pipeline.cpp: still geometry built again, by its box, for the cached sun shadow (QuasarSunShadowCache).
+void ql_note_still_change(const LLVector4a* bounds);
 
 void LLSpatialGroup::rebuildGeom()
 {
     if (!isDead())
     {
-        if (hasState(LLSpatialGroup::GEOM_DIRTY) && !getSpatialPartition()->isBridge())
+        const bool still_change = hasState(LLSpatialGroup::GEOM_DIRTY) && !getSpatialPartition()->isBridge();
+        if (still_change)
         {
-            ++gQLStillGeometrySerial;
+            ql_note_still_change(getObjectBounds());  // where it was
         }
         getSpatialPartition()->rebuildGeom(this);
+        if (still_change)
+        {
+            ql_note_still_change(getObjectBounds());  // and where it is
+        }
 
         if (hasState(LLSpatialGroup::MESH_DIRTY))
         {
@@ -360,7 +365,7 @@ void LLSpatialGroup::rebuildMesh()
     {
         if (hasState(LLSpatialGroup::MESH_DIRTY) && !getSpatialPartition()->isBridge())
         {
-            ++gQLStillGeometrySerial;
+            ql_note_still_change(getObjectBounds());
         }
         getSpatialPartition()->rebuildMesh(this);
     }

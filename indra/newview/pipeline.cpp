@@ -13999,7 +13999,6 @@ namespace
         LLRenderTarget* mStatic = nullptr;  // never freed: the GL context outlives it, and it is only a few maps
         bool            mStaticValid = false;
         U32             mStaticFrame = 0;
-        U32             mStaticSerial = 0;
     };
 
     QLShadowCascadeKeep sCascadeKeep[ALRenderResourcePlan::SUN_CASCADES];
@@ -14144,9 +14143,25 @@ namespace
     };
 }
 
-// Quasar: bumped whenever still geometry is built again (LLSpatialGroup::rebuildGeom and rebuildMesh outside spatial
-// bridges): the cached sun shadow's still maps no longer hold what the world casts.
-U32 gQLStillGeometrySerial = 0;
+// Quasar: still geometry built again (LLSpatialGroup::rebuildGeom and rebuildMesh outside spatial bridges), as boxes,
+// for the cached sun shadow to let go of the kept still maps they fall in. Many at once (a region loading) are taken as
+// reaching everywhere.
+namespace
+{
+    constexpr size_t MAX_STILL_CHANGES = 512;
+    std::vector<std::pair<LLVector4a, LLVector4a>> sStillChanges;
+    bool sStillChangesOverflow = false;
+}
+
+void ql_note_still_change(const LLVector4a* bounds)
+{
+    if (sStillChanges.size() >= MAX_STILL_CHANGES)
+    {
+        sStillChangesOverflow = true;
+        return;
+    }
+    sStillChanges.emplace_back(bounds[0], bounds[1]);
+}
 
 // The cached sun shadow's line for the status display (llviewerwindow.cpp).
 std::string ql_sun_shadow_cache_info()
@@ -14591,16 +14606,39 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
         bool any_full = false;
         if (mRT == &mMainRT && !gCubeSnapshot)
         {
-            static U32 last_still_serial = 0;
             const U32 last_change = sSunCacheStats.mLastChangeFrame;
             sSunCacheStats = QLSunCacheStats();
             sSunCacheStats.mOn = cache_on;
             sSunCacheStats.mLastChangeFrame = last_change;
-            if (gQLStillGeometrySerial != last_still_serial)
+            // Still geometry built again since the last main view lets go only the kept still maps it falls in: its box
+            // before and after the build against each map's light camera, as the cascades' own casters are tested.
+            for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
             {
-                last_still_serial = gQLStillGeometrySerial;
-                sSunCacheStats.mLastChangeFrame = LLFrameTimer::getFrameCount();
+                QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                if (!kept.mStaticValid)
+                {
+                    continue;
+                }
+                bool hit = sStillChangesOverflow;
+                for (size_t k = 0; k < sStillChanges.size() && !hit; ++k)
+                {
+                    LLVector4a center;
+                    LLVector4a half;
+                    center.setAdd(sStillChanges[k].first, sStillChanges[k].second);
+                    center.mul(0.5f);
+                    half.setSub(sStillChanges[k].second, sStillChanges[k].first);
+                    half.mul(0.5f);
+                    // A box that is not finite bounds nothing, and is taken as reaching everywhere.
+                    hit = !center.isFinite3() || !half.isFinite3() || kept.mCamera.AABBInFrustum(center, half) > 0;
+                }
+                if (hit)
+                {
+                    kept.mStaticValid = false;
+                    sSunCacheStats.mLastChangeFrame = LLFrameTimer::getFrameCount();
+                }
             }
+            sStillChanges.clear();
+            sStillChangesOverflow = false;
         }
         U32 farthest_drawn = 0;
         for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
@@ -14626,7 +14664,6 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 moving_only[j] = kept.mValid && kept.mStaticValid && kept.mStatic && kept.mStatic->isComplete()
                     && kept.mEpoch == mShadowStaggerEpoch
                     && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
-                    && kept.mStaticSerial == gQLStillGeometrySerial
                     && frame - kept.mStaticFrame < SUN_CACHE_MAX_AGE
                     && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
@@ -15232,7 +15269,6 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                         ql_copy_shadow_depth(*kept.mStatic, mRT->shadow[j]);
                         kept.mStaticValid  = true;
                         kept.mStaticFrame  = LLFrameTimer::getFrameCount();
-                        kept.mStaticSerial = gQLStillGeometrySerial;
                         kept.mCamera       = shadow_cam;
 
                         mRT->shadow[j].bindTarget();
