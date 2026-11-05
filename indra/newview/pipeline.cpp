@@ -13999,6 +13999,10 @@ namespace
         LLRenderTarget* mStatic = nullptr;  // never freed: the GL context outlives it, and it is only a few maps
         bool            mStaticValid = false;
         U32             mStaticFrame = 0;
+        // Quasar: a stable cascade (QuasarStableShadowCascades) is fitted to a square about the eye, the same whichever
+        // way the camera faces: it holds while the eye stays within mMargin of where it was fitted.
+        bool            mStable = false;
+        F32             mMargin = 0.f;
     };
 
     QLShadowCascadeKeep sCascadeKeep[ALRenderResourcePlan::SUN_CASCADES];
@@ -14640,6 +14644,18 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             sStillChanges.clear();
             sStillChangesOverflow = false;
         }
+        // Whether the camera is still where a kept cascade was fitted for: a stable cascade (QuasarStableShadowCascades)
+        // while the eye is within its margin, whichever way it faces; any other while the eye has moved and turned
+        // only a little.
+        auto camera_holds = [&](const QLShadowCascadeKeep& kept)
+        {
+            const F32 moved2 = (camera.getOrigin() - kept.mEye).lengthSquared();
+            if (kept.mStable)
+            {
+                return moved2 <= kept.mMargin * kept.mMargin;
+            }
+            return moved2 <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS;
+        };
         U32 farthest_drawn = 0;
         for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
         {
@@ -14653,8 +14669,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 keep_cascade[j] = stagger.mInterval > 1 && !due && kept.mValid
                     && kept.mEpoch == mShadowStaggerEpoch
                     && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
-                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
-                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
+                    && camera_holds(kept)
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
             if (cache_on && mRT->shadow[j].isComplete())
@@ -14665,8 +14680,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && kept.mEpoch == mShadowStaggerEpoch
                     && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
                     && frame - kept.mStaticFrame < SUN_CACHE_MAX_AGE
-                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
-                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
+                    && camera_holds(kept)
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
             // Where the kept still map holds, what moves is drawn over it at the rate QuasarSunCacheMovingRate asks
@@ -14904,6 +14918,53 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 mShadowCamera[j] = shadow_cam;
             }
 
+            // Quasar: stable cascades (QuasarStableShadowCascades: 1 the far two, 2 all but the nearest, 3 all). The usual
+            // fit follows what the camera sees, so it changes as the camera turns, and a kept map (the stagger's, the
+            // sun cache's) no longer fits. A stable cascade is fitted instead to a square about the eye, wide enough for
+            // its split seen in any direction and a margin more, on a grid of the map's own texels in the light's view:
+            // turning never moves it, and moving within the margin keeps it, its texels where they were. It costs
+            // resolution (the square holds the split's whole circle) and takes no receivers' walk.
+            static LLCachedControl<S32> stable_cascades(gSavedSettings, "QuasarStableShadowCascades", 1);
+            const S32 stable_level = llclamp((S32)stable_cascades(), 0, 3);
+            const bool stable = stable_level > 0 && j >= 3 - stable_level && j <= RenderShadowSplits &&
+                                mRT == &mMainRT && !gCubeSnapshot && mRT->shadow[j].isComplete();
+            F32 stable_margin = 0.f;
+            LLVector3 center;
+            if (stable)
+            {
+                F32 radius = 0.f;
+                for (U32 i = 0; i < 8; ++i)
+                {
+                    radius = llmax(radius, (frust[i] - eye).length());
+                }
+                stable_margin = radius * 0.1f;
+                const F32 half = radius + stable_margin;
+                const F32 texel = 2.f * half / (F32)llmax(1u, mRT->shadow[j].getWidth());
+
+                // The light's view from the agent's origin, the eye's place in it snapped to the grid, and back.
+                const LLVector4a light_dir(lightDir.mV[0], lightDir.mV[1], lightDir.mV[2]);
+                const LLVector4a light_up(-up.mV[0], -up.mV[1], -up.mV[2]);
+                LLMatrix4a grid = LLMatrix4a::lookDir(LLVector4a(0.f, 0.f, 0.f), light_dir, light_up);
+                LLVector4a at_grid;
+                grid.affineTransform(LLVector4a(eye.mV[0], eye.mV[1], eye.mV[2], 1.f), at_grid);
+                const LLVector4a snapped(floorf(at_grid[0] / texel + 0.5f) * texel, floorf(at_grid[1] / texel + 0.5f) * texel,
+                                         at_grid[2], 1.f);
+                grid.invert();
+                LLVector4a origin_agent;
+                grid.affineTransform(snapped, origin_agent);
+
+                view[j] = LLMatrix4a::lookDir(origin_agent, light_dir, light_up);
+                const F32 zmin = -half;
+                const F32 zmax = half;
+                const F32 near_free = llmin(2.f * (2.f * fabsf(RenderShadowBias) + 0.01f), 0.25f);
+                const F32 near_z = zmax + (zmax - zmin) * near_free / (1.f - near_free);
+                proj[j] = al_ortho(-half, half, -half, half, -near_z, -zmin);
+                mShadowError.mV[j] = 0.f;
+                mShadowFOV.mV[j]   = -1.f;
+                center = eye - lightDir;
+            }
+            else
+            {
             static std::vector<LLVector3> fp;
             fp.clear();
 
@@ -15010,7 +15071,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             // - origin
 
             //get some "interesting" points of reference
-            LLVector3 center = (min+max)*0.5f;
+            center = (min+max)*0.5f;
             LLVector3 size = (max-min)*0.5f;
             LLVector3 near_center = center;
             near_center.mV[1] += size.mV[1]*2.f;
@@ -15225,6 +15286,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 }
             }
 
+            }  // Quasar: the usual fit, where the cascade is not stable
+
             //shadow_cam.setFar(128.f);
             shadow_cam.lookAt(eye, center, up);
 
@@ -15318,6 +15381,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     kept.mFrame   = LLFrameTimer::getFrameCount();
                     kept.mDepthSerial = mRT->shadow[j].getDepthSerial();
                     kept.mEpoch   = mShadowStaggerEpoch;
+                    kept.mStable  = stable;
+                    kept.mMargin  = stable_margin;
                 }
             }
 

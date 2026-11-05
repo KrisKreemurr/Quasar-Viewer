@@ -2729,6 +2729,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarStableShadowCascades</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: stable sun shadow cascades. 0 off; 1 the far two; 2 all but the nearest; 3 all. A stable cascade is fitted to a square around you, the same whichever way you face, locked to its own texel grid, so turning the camera never redraws it and walking only does every so often: the cached shadows (QuasarSunShadowCache) and the stagger keep it far more often, and far shadows stop shimmering as you turn. It costs some sharpness in those cascades. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarSunCacheMovingRate</key>
         <map>
             <key>Comment</key>
