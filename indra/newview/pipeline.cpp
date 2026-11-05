@@ -14241,9 +14241,50 @@ namespace
 }
 
 // Quasar: set around a reflection probe's capture that leaves avatars out (llreflectionmapmanager.cpp,
-// QuasarProbeSkipAvatars). The render type mask hides the avatars themselves; their attachments are culled as bridges,
+// QuasarProbeAvatars 0). The render type mask hides the avatars themselves; their attachments are culled as bridges,
 // by the same test as the spot lights' filter below.
 thread_local bool gQLProbeCaptureSkipsAvatars = false;
+
+namespace
+{
+    // A probe capture's own nearest-avatars filter (QuasarProbeAvatars), as the spot lights' is.
+    thread_local bool                           sProbeAvatarsActive = false;
+    thread_local std::vector<const LLVOAvatar*> sProbeAvatars;
+
+    void ql_nearest_avatars(const LLVector3& origin, U32 count, std::vector<const LLVOAvatar*>& out)
+    {
+        out.clear();
+        static thread_local std::vector<std::pair<F32, const LLVOAvatar*>> nearest;
+        nearest.clear();
+        for (LLCharacter* character : LLCharacter::sInstances)
+        {
+            const LLVOAvatar* avatar = static_cast<const LLVOAvatar*>(character);
+            if (avatar && !avatar->isDead())
+            {
+                nearest.emplace_back((avatar->getPositionAgent() - origin).lengthSquared(), avatar);
+            }
+        }
+        const size_t keep = llmin(nearest.size(), (size_t)count);
+        std::partial_sort(nearest.begin(), nearest.begin() + keep, nearest.end(),
+                          [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (size_t i = 0; i < keep; ++i)
+        {
+            out.push_back(nearest[i].second);
+        }
+    }
+}
+
+void ql_probe_avatars_begin(const LLVector3& origin, U32 count)
+{
+    ql_nearest_avatars(origin, count, sProbeAvatars);
+    sProbeAvatarsActive = true;
+}
+
+void ql_probe_avatars_end()
+{
+    sProbeAvatarsActive = false;
+    sProbeAvatars.clear();
+}
 
 // Whether a spot light's shadow, or a reflection probe's capture, leaves this avatar, and what it wears, out
 // (lldrawable.cpp's bridge cull).
@@ -14252,6 +14293,10 @@ bool ql_spot_shadow_skips_avatar(const LLVOAvatar* avatar)
     if (gQLProbeCaptureSkipsAvatars && avatar)
     {
         return true;
+    }
+    if (sProbeAvatarsActive && avatar)
+    {
+        return std::find(sProbeAvatars.begin(), sProbeAvatars.end(), avatar) == sProbeAvatars.end();
     }
     const QLSpotAvatarFilter& f = sSpotAvatars;
     if (!f.mActive || !avatar || (LLViewerCamera::sCurCameraID != LLViewerCamera::CAMERA_SPOT_SHADOW0 &&

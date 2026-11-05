@@ -2927,16 +2927,16 @@
             <key>Value</key>
             <integer>2</integer>
         </map>
-        <key>QuasarProbeSkipAvatars</key>
+        <key>QuasarProbeAvatars</key>
         <map>
             <key>Comment</key>
-            <string>Quasar: leave avatars, what they wear and animesh out of reflection probe captures (the environment maps shiny surfaces reflect). In a crowd they are most of a capture's cost, and in a probe's blurry reflection hardly visible. Mirrors are not affected and still show avatars. Applies from the next capture.</string>
+            <string>Quasar: how many avatars reflection probe captures draw (the environment maps that shiny floors, metal and glass reflect): 0 none, a number for the nearest that many to each probe, 99 all (as Second Life does). In a crowd avatars are most of a capture's cost, and in a probe's blurry reflection mostly smudges. Mirrors are not affected and always show every avatar. Applies from the next capture.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
-            <string>Boolean</string>
+            <string>S32</string>
             <key>Value</key>
-            <integer>1</integer>
+            <integer>0</integer>
         </map>
         <key>QuasarProbeStars</key>
         <map>

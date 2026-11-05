@@ -1081,6 +1081,51 @@
       name="Stagger"
       value="0"/>
   </combo_box>
+  <!-- Quasar: how many avatars the reflection probes show (QuasarProbeAvatars) -->
+  <text
+    type="string"
+    length="1"
+    follows="left|top"
+    height="16"
+    layout="topleft"
+    left="420"
+    name="ProbeAvatarsText"
+    text_readonly_color="LabelDisabledColor"
+    top_delta="22"
+    width="170">
+    Avatars in Reflections:
+  </text>
+
+  <combo_box
+   control_name="QuasarProbeAvatars"
+   height="18"
+   layout="topleft"
+   left_delta="175"
+   top_delta="0"
+   name="ProbeAvatars"
+   tool_tip="How many avatars shiny surfaces' reflections show (not mirrors, which always show everyone). Fewer is faster in crowds."
+   width="150">
+    <combo_box.item
+      label="None"
+      name="None"
+      value="0"/>
+    <combo_box.item
+      label="Nearest 2"
+      name="Two"
+      value="2"/>
+    <combo_box.item
+      label="Nearest 4"
+      name="Four"
+      value="4"/>
+    <combo_box.item
+      label="Nearest 8"
+      name="Eight"
+      value="8"/>
+    <combo_box.item
+      label="All"
+      name="All"
+      value="99"/>
+  </combo_box>
   <!-- Sharpening Settings -->
   <slider
     control_name="RenderCASSharpness"

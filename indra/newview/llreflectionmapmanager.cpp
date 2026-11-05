@@ -1004,6 +1004,9 @@ void LLReflectionMapManager::doProbeUpdate()
 // In effect this simulates single-bounce lighting.
 // pipeline.cpp: while set, the capture leaves avatars and their attachments out (QuasarProbeSkipAvatars).
 extern thread_local bool gQLProbeCaptureSkipsAvatars;
+// pipeline.cpp: a probe capture draws only the `count` avatars nearest `origin` (QuasarProbeAvatars).
+void ql_probe_avatars_begin(const LLVector3& origin, U32 count);
+void ql_probe_avatars_end();
 
 void LLReflectionMapManager::updateProbeFace(LLReflectionMap* probe, U32 face)
 {
@@ -1036,21 +1039,32 @@ void LLReflectionMapManager::updateProbeFace(LLReflectionMap* probe, U32 face)
     else
     {
         llassert(mRenderReflectionProbeLevel > 0); // should never update a probe that's not the default probe if reflection coverage is none
-        // Quasar: avatars, what they wear and animesh are left out of the reflection probes' captures
-        // (QuasarProbeSkipAvatars): in a crowd they are most of a capture's draws, and in a probe's blurred reflection
-        // they are smudges. Mirrors (the hero probes) are not these, and keep them.
-        static LLCachedControl<bool> skip_avatars(gSavedSettings, "QuasarProbeSkipAvatars", true);
-        gQLProbeCaptureSkipsAvatars = skip_avatars();
-        if (gQLProbeCaptureSkipsAvatars)
+        // Quasar: how many avatars the reflection probes' captures draw (QuasarProbeAvatars): in a crowd avatars are
+        // most of a capture's draws, and in a probe's blurred reflection mostly smudges. 0 none (and no animesh),
+        // N the N nearest the probe, 99 all. Mirrors (the hero probes) are not these, and keep every avatar.
+        static LLCachedControl<S32> probe_avatars(gSavedSettings, "QuasarProbeAvatars", 0);
+        const S32 avatars = probe_avatars();
+        const bool none = avatars <= 0;
+        const bool some = avatars > 0 && avatars < 99;
+        if (none)
         {
+            gQLProbeCaptureSkipsAvatars = true;
             gPipeline.pushRenderTypeMask();
             gPipeline.clearRenderTypeMask(LLPipeline::RENDER_TYPE_AVATAR, LLPipeline::RENDER_TYPE_CONTROL_AV,
                                           LLPipeline::END_RENDER_TYPES);
         }
+        else if (some)
+        {
+            ql_probe_avatars_begin(LLVector3(probe->mOrigin.getF32ptr()), (U32)avatars);
+        }
         probe->update(mRenderTarget.getWidth(), face);
-        if (gQLProbeCaptureSkipsAvatars)
+        if (none)
         {
             gPipeline.popRenderTypeMask();
+        }
+        else if (some)
+        {
+            ql_probe_avatars_end();
         }
         gQLProbeCaptureSkipsAvatars = false;
     }
