@@ -1181,7 +1181,9 @@ void LLRender::setColorMask(bool writeColor, bool writeAlpha)
 
 void LLRender::setColorMask(bool writeColorR, bool writeColorG, bool writeColorB, bool writeAlpha)
 {
-    writeAlpha = writeAlpha || gQLUILayerAlpha;  // Quasar: the interface layer's coverage (QLUILayer)
+    // Quasar: the interface layer's coverage (QLUILayer) is written wherever colour is: a draw that writes no colour (a
+    // mask, depth or stencil alone) writes no coverage either, or it would leave opaque black in the layer.
+    writeAlpha = writeAlpha || (gQLUILayerAlpha && (writeColorR || writeColorG || writeColorB));
     if (mCurrColorMask[0] != writeColorR ||
         mCurrColorMask[1] != writeColorG ||
         mCurrColorMask[2] != writeColorB ||
