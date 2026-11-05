@@ -214,6 +214,7 @@ LLGLSLShader            gExposureHistogramProgram;
 LLGLSLShader            gLuminanceProgram;
 LLGLSLShader            gLensFlareStateProgram;
 LLGLSLShader            gQLFrameWarpProgram;
+LLGLSLShader            gQLDLSSGInputsProgram;  // declared where it is used (qldlssg.cpp), so no header changes
 LLGLSLShader            gFXAAProgram[4];
 LLGLSLShader            gSMAAEdgeDetectProgram[4];
 LLGLSLShader            gSMAABlendWeightsProgram[4];
@@ -1372,6 +1373,7 @@ void LLViewerShaderMgr::loadShadersDeferred()
         gLuminanceProgram.unload();
         gLensFlareStateProgram.unload();
         gQLFrameWarpProgram.unload();
+        gQLDLSSGInputsProgram.unload();
 
         for (auto i = 0; i < 4; ++i)
         {
@@ -2892,6 +2894,17 @@ void LLViewerShaderMgr::loadShadersDeferred()
         gQLFrameWarpProgram.mShaderFiles.push_back(make_pair("alchemy/qlFrameWarpF.glsl", GL_FRAGMENT_SHADER));
         gQLFrameWarpProgram.mShaderLevel = mShaderLevel[SHADER_DEFERRED];
         built(gQLFrameWarpProgram.createShader(), gQLFrameWarpProgram);
+    }
+
+    {
+        // Quasar: the depth and motion vectors NVIDIA DLSS Frame Generation reads (QLDLSSGInputs).
+        gQLDLSSGInputsProgram.mName = "Quasar DLSS-G Inputs";
+        gQLDLSSGInputsProgram.mShaderFiles.clear();
+        gQLDLSSGInputsProgram.clearPermutations();
+        gQLDLSSGInputsProgram.mShaderFiles.push_back(make_pair("deferred/postDeferredNoTCV.glsl", GL_VERTEX_SHADER));
+        gQLDLSSGInputsProgram.mShaderFiles.push_back(make_pair("alchemy/qlDLSSGInputsF.glsl", GL_FRAGMENT_SHADER));
+        gQLDLSSGInputsProgram.mShaderLevel = mShaderLevel[SHADER_DEFERRED];
+        built(gQLDLSSGInputsProgram.createShader(), gQLDLSSGInputsProgram);
     }
 
     {

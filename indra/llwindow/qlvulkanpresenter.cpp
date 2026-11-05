@@ -39,6 +39,8 @@
 #if QL_HAS_STREAMLINE
 #include <sl.h>
 #include <sl_consts.h>
+#include <sl_core_api.h>
+#include <sl_dlss_g.h>
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 #include <sl_security.h>
@@ -363,6 +365,8 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkBindBufferMemory);
     QL_VK_FN(vkMapMemory);
     QL_VK_FN(vkUnmapMemory);
+    QL_VK_FN(vkCreateImageView);
+    QL_VK_FN(vkDestroyImageView);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -419,6 +423,40 @@ struct QLVulkanPresenter::Impl
 
     bool mLoggedFirstCopy = false;
 
+    // DLSS Frame Generation's inputs: images Vulkan allocates and GL imports, as the presentation image is, each
+    // written by GL (turned over to Vulkan's top-down rows) after the world is drawn and read by Streamline in the
+    // present's command buffer. They take turns through the same two semaphores as the presentation image.
+    enum { FG_DEPTH, FG_MOTION, FG_HUDLESS, FG_COUNT };
+    struct FGImage
+    {
+        VkImage           image = VK_NULL_HANDLE;
+        VkDeviceMemory    memory = VK_NULL_HANDLE;
+        VkImageView       view = VK_NULL_HANDLE;
+        VkFormat          format = VK_FORMAT_UNDEFINED;
+        VkImageUsageFlags usage = 0;
+        HANDLE            handle = nullptr;  // NT handle, kept open while GL holds the import
+        GLuint            glMemory = 0;
+        GLuint            glTexture = 0;
+        GLuint            glFramebuffer = 0;
+    };
+    FGImage mFG[FG_COUNT];
+    U32     mFGWidth = 0;
+    U32     mFGHeight = 0;
+    GLuint  mGLReadFramebuffer = 0;  // the viewer's depth and motion textures, attached in turn to be copied from
+
+    bool                              mFGWanted = false;        // QuasarDLSSFrameGen
+    bool                              mFGLoaded = false;        // the DLSS-G plugin and its functions
+    bool                              mFGOn = false;            // as Streamline was last told
+    bool                              mFGInputsThisFrame = false;
+    bool                              mFGFailed = false;        // its inputs could not be made: not tried again
+    QLVulkanPresenter::FrameGenCamera mFGCamera = {};
+    U32                               mFramesSinceSwapchain = 0;
+    U32                               mFGStatus = 0;            // sl::DLSSGStatus, last read
+    U32                               mFGLoggedStatus = 0;
+    U32                               mFGPresented = 0;         // frames Streamline presented for the last of ours
+    U32                               mFGMinSize = 0;
+    std::string                       mFGNote = "off";
+
     // GL errors since the last call, logged with what was just done; GL's error queue is left empty.
     void logGLErrors(const char* after)
     {
@@ -452,6 +490,10 @@ struct QLVulkanPresenter::Impl
     PFun_slReflexSetOptions*   slReflexSetOptions = nullptr;
     PFun_slReflexSleep*        slReflexSleep = nullptr;
     PFun_slPCLSetMarker*       slPCLSetMarker = nullptr;
+    PFun_slSetTagForFrame*     slSetTagForFrame = nullptr;
+    PFun_slSetConstants*       slSetConstants = nullptr;
+    PFun_slDLSSGSetOptions*    slDLSSGSetOptions = nullptr;
+    PFun_slDLSSGGetState*      slDLSSGGetState = nullptr;
     sl::FrameToken*            mFrameToken = nullptr;
 #endif
     bool        mStreamlineRunning = false;
@@ -537,6 +579,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkMapMemory);
         QL_VK_DEVICE(vkUnmapMemory);
         QL_VK_DEVICE(vkQueueSubmit);
+        QL_VK_DEVICE(vkCreateImageView);
+        QL_VK_DEVICE(vkDestroyImageView);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -707,6 +751,8 @@ struct QLVulkanPresenter::Impl
         slShutdown           = reinterpret_cast<PFun_slShutdown*>(GetProcAddress(mStreamline, "slShutdown"));
         slGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(GetProcAddress(mStreamline, "slGetFeatureFunction"));
         slGetNewFrameToken   = reinterpret_cast<PFun_slGetNewFrameToken*>(GetProcAddress(mStreamline, "slGetNewFrameToken"));
+        slSetTagForFrame     = reinterpret_cast<PFun_slSetTagForFrame*>(GetProcAddress(mStreamline, "slSetTagForFrame"));
+        slSetConstants       = reinterpret_cast<PFun_slSetConstants*>(GetProcAddress(mStreamline, "slSetConstants"));
         if (!slInit || !slShutdown || !slGetFeatureFunction || !slGetNewFrameToken ||
             !GetProcAddress(mStreamline, "vkGetInstanceProcAddr"))
         {
@@ -726,7 +772,9 @@ struct QLVulkanPresenter::Impl
         pref.pathToLogsAndData  = sStreamlineConfig.mLogDir.empty() ? nullptr : sStreamlineConfig.mLogDir.c_str();
         pref.logMessageCallback = ql_sl_log;
         // No updates downloaded over the air: the viewer runs the plugins it ships with.
-        pref.flags              = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eDisableDebugText;
+        // Resources are tagged for a frame (slSetTagForFrame), as DLSS Frame Generation wants them.
+        pref.flags              = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eDisableDebugText |
+                                  sl::PreferenceFlags::eUseFrameBasedResourceTagging;
         pref.featuresToLoad     = features;
         pref.numFeaturesToLoad  = (U32)LL_ARRAY_SIZE(features);
         pref.engine             = sl::EngineType::eCustom;
@@ -771,8 +819,22 @@ struct QLVulkanPresenter::Impl
         {
             slPCLSetMarker = reinterpret_cast<PFun_slPCLSetMarker*>(fn);
         }
+        fn = nullptr;
+        if (slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", fn) == sl::Result::eOk)
+        {
+            slDLSSGSetOptions = reinterpret_cast<PFun_slDLSSGSetOptions*>(fn);
+        }
+        fn = nullptr;
+        if (slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", fn) == sl::Result::eOk)
+        {
+            slDLSSGGetState = reinterpret_cast<PFun_slDLSSGGetState*>(fn);
+        }
+        mFGLoaded = slDLSSGSetOptions && slDLSSGGetState && slSetTagForFrame && slSetConstants && slPCLSetMarker &&
+                    slReflexSetOptions;
+        mFGNote   = mFGLoaded ? "off" : "not available (see the Streamline lines above for why)";
         LL_INFOS("Vulkan") << "Streamline features: Reflex " << (slReflexSetOptions && slReflexSleep ? "loaded" : "not loaded")
-                           << ", PC Latency markers " << (slPCLSetMarker ? "loaded" : "not loaded") << LL_ENDL;
+                           << ", PC Latency markers " << (slPCLSetMarker ? "loaded" : "not loaded")
+                           << ", DLSS Frame Generation " << (mFGLoaded ? "loaded" : "not loaded") << LL_ENDL;
     }
 
     void mark(sl::PCLMarker marker)
@@ -783,11 +845,21 @@ struct QLVulkanPresenter::Impl
         }
     }
 
-    void frameBegin(int reflex_mode)
+    void frameBegin(int reflex_mode, bool frame_gen)
     {
         if (!mStreamlineRunning)
         {
             return;
+        }
+        if (frame_gen != mFGWanted)
+        {
+            mFGWanted = frame_gen;
+            if (mFGLoaded)
+            {
+                // Streamline asks for the swapchain to be made again whenever frame generation is switched.
+                mSwapchainDirty = true;
+                LL_INFOS("Vulkan") << "DLSS Frame Generation " << (frame_gen ? "wanted" : "not wanted") << LL_ENDL;
+            }
         }
         mFrameToken = nullptr;
         if (slGetNewFrameToken(mFrameToken, nullptr) != sl::Result::eOk)
@@ -796,6 +868,10 @@ struct QLVulkanPresenter::Impl
             return;
         }
         reflex_mode = llclamp(reflex_mode, 0, 2);
+        if (mFGWanted && mFGLoaded && reflex_mode == 0)
+        {
+            reflex_mode = 1;  // frame generation paces itself through Reflex
+        }
         if (reflex_mode != mReflexMode && slReflexSetOptions)
         {
             sl::ReflexOptions options{};
@@ -1174,6 +1250,327 @@ struct QLVulkanPresenter::Impl
         mSharedWidth = mSharedHeight = 0;
     }
 
+    // ---- DLSS Frame Generation's inputs -------------------------------------------------------------------------
+
+    // One input image: Vulkan's, exported, with a view for Streamline; GL's import of it, and a framebuffer to copy into.
+    bool createFGImage(FGImage& img, VkFormat format, GLenum gl_format, U32 width, U32 height, const char* what)
+    {
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        VkFormatProperties props = {};
+        vkGetPhysicalDeviceFormatProperties(mPhysical, format, &props);
+        const VkFormatFeatureFlags features = props.optimalTilingFeatures;
+        if (!(features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || !(features & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+        {
+            return fgFail(llformat("the %s format cannot be read", what));
+        }
+        // Every use GL may make of it, as for the presentation image, so both lay the memory out alike.
+        img.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+        {
+            img.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        }
+        if (features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)
+        {
+            img.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
+        img.format = format;
+
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = format;
+        info.extent        = { width, height, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = img.usage;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkResult result = vkCreateImage(mDevice, &info, nullptr, &img.image);
+        if (result != VK_SUCCESS)
+        {
+            img.image = VK_NULL_HANDLE;
+            return fgFail(llformat("vkCreateImage (%s) failed (VkResult %d)", what, (S32)result));
+        }
+
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, img.image, &req);
+        VkPhysicalDeviceMemoryProperties mem = {};
+        vkGetPhysicalDeviceMemoryProperties(mPhysical, &mem);
+        U32 type = U32_MAX;
+        for (U32 i = 0; i < mem.memoryTypeCount; ++i)
+        {
+            if ((req.memoryTypeBits & (1u << i)) &&
+                (mem.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            {
+                type = i;
+                break;
+            }
+        }
+        if (type == U32_MAX)
+        {
+            return fgFail(llformat("no device-local memory for the %s", what));
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.image = img.image;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = type;
+        result = vkAllocateMemory(mDevice, &alloc, nullptr, &img.memory);
+        if (result != VK_SUCCESS)
+        {
+            img.memory = VK_NULL_HANDLE;
+            return fgFail(llformat("vkAllocateMemory (%s) failed (VkResult %d)", what, (S32)result));
+        }
+        result = vkBindImageMemory(mDevice, img.image, img.memory, 0);
+        if (result != VK_SUCCESS)
+        {
+            return fgFail(llformat("vkBindImageMemory (%s) failed (VkResult %d)", what, (S32)result));
+        }
+
+        VkImageViewCreateInfo view = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view.image            = img.image;
+        view.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view.format           = format;
+        view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        result = vkCreateImageView(mDevice, &view, nullptr, &img.view);
+        if (result != VK_SUCCESS)
+        {
+            img.view = VK_NULL_HANDLE;
+            return fgFail(llformat("vkCreateImageView (%s) failed (VkResult %d)", what, (S32)result));
+        }
+
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = img.memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        result = vkGetMemoryWin32HandleKHR(mDevice, &get, &handle);
+        if (result != VK_SUCCESS || !handle)
+        {
+            return fgFail(llformat("vkGetMemoryWin32HandleKHR (%s) failed (VkResult %d)", what, (S32)result));
+        }
+        if (!mKMT)
+        {
+            img.handle = handle;
+        }
+
+        gl.CreateMemoryObjectsEXT(1, &img.glMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(img.glMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(img.glMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateTextures(GL_TEXTURE_2D, 1, &img.glTexture);
+        gl.TextureParameteri(img.glTexture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(img.glTexture, 1, gl_format, (GLsizei)width, (GLsizei)height, img.glMemory, 0);
+        gl.Finish();
+        gl.CreateFramebuffers(1, &img.glFramebuffer);
+        gl.NamedFramebufferTexture(img.glFramebuffer, GL_COLOR_ATTACHMENT0, img.glTexture, 0);
+        logGLErrors(what);
+        if (gl.CheckNamedFramebufferStatus(img.glFramebuffer, GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        {
+            return fgFail(llformat("the %s is not a complete GL framebuffer", what));
+        }
+        return true;
+    }
+
+    void destroyFGImage(FGImage& img)
+    {
+        if (img.glFramebuffer)
+        {
+            gl.DeleteFramebuffers(1, &img.glFramebuffer);
+        }
+        if (img.glTexture)
+        {
+            gl.DeleteTextures(1, &img.glTexture);
+        }
+        if (img.glMemory)
+        {
+            gl.DeleteMemoryObjectsEXT(1, &img.glMemory);
+        }
+        if (img.view)
+        {
+            vkDestroyImageView(mDevice, img.view, nullptr);
+        }
+        if (img.image)
+        {
+            vkDestroyImage(mDevice, img.image, nullptr);
+        }
+        if (img.memory)
+        {
+            vkFreeMemory(mDevice, img.memory, nullptr);
+        }
+        if (img.handle)
+        {
+            CloseHandle(img.handle);
+        }
+        img = FGImage();
+    }
+
+    // Called only once both APIs are idle (waitIdle), as the presentation image's are made and let go.
+    void destroyFGImages()
+    {
+        for (FGImage& img : mFG)
+        {
+            destroyFGImage(img);
+        }
+        if (mGLReadFramebuffer)
+        {
+            gl.DeleteFramebuffers(1, &mGLReadFramebuffer);
+            mGLReadFramebuffer = 0;
+        }
+        mFGWidth = mFGHeight = 0;
+    }
+
+    bool createFGImages(U32 width, U32 height)
+    {
+        if (!createFGImage(mFG[FG_DEPTH], VK_FORMAT_R32_SFLOAT, GL_R32F, width, height, "frame generation depth") ||
+            !createFGImage(mFG[FG_MOTION], VK_FORMAT_R16G16_SFLOAT, GL_RG16F, width, height, "frame generation motion") ||
+            !createFGImage(mFG[FG_HUDLESS], VK_FORMAT_R8G8B8A8_UNORM, GL_RGBA8, width, height, "frame generation colour"))
+        {
+            destroyFGImages();
+            return false;
+        }
+        gl.CreateFramebuffers(1, &mGLReadFramebuffer);
+        mFGWidth  = width;
+        mFGHeight = height;
+        LL_INFOS("Vulkan") << "DLSS Frame Generation inputs " << width << "x" << height << " (depth R32F, motion RG16F, "
+                           << "colour RGBA8)" << LL_ENDL;
+        return true;
+    }
+
+    bool fgFail(const std::string& why)
+    {
+        mFGNote = "inputs failed: " + why;
+        LL_WARNS("Vulkan") << "DLSS Frame Generation: " << why << LL_ENDL;
+        return false;
+    }
+
+    // Every GL texture over shared memory, in the layout both APIs leave it in, for GL's semaphore calls.
+    U32 glInteropTextures(GLuint* textures, GLenum* layouts) const
+    {
+        U32 count = 0;
+        if (mGLTexture)
+        {
+            textures[count] = mGLTexture;
+            layouts[count++] = GL_LAYOUT_GENERAL_EXT;
+        }
+        for (const FGImage& img : mFG)
+        {
+            if (img.glTexture)
+            {
+                textures[count] = img.glTexture;
+                layouts[count++] = GL_LAYOUT_GENERAL_EXT;
+            }
+        }
+        return count;
+    }
+
+    // GL waits for Vulkan's last read of the shared images before it writes any of them again.
+    void glWaitForVulkan()
+    {
+        if (!mGLMustWait)
+        {
+            return;
+        }
+        GLuint textures[1 + FG_COUNT];
+        GLenum layouts[1 + FG_COUNT];
+        const U32 count = glInteropTextures(textures, layouts);
+        gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, count, textures, layouts);
+        mGLMustWait = false;
+    }
+
+    // A blit obeys the scissor test and, into an sRGB-capable buffer, the sRGB write: neither is wanted in a copy.
+    struct GLCopyState
+    {
+        GLboolean scissor = GL_FALSE;
+        GLboolean srgb = GL_FALSE;
+    };
+    GLCopyState beginGLCopy()
+    {
+        GLCopyState state;
+        state.scissor = gl.IsEnabled(GL_SCISSOR_TEST);
+        state.srgb    = gl.IsEnabled(GL_FRAMEBUFFER_SRGB);
+        if (state.scissor)
+        {
+            gl.Disable(GL_SCISSOR_TEST);
+        }
+        if (state.srgb)
+        {
+            gl.Disable(GL_FRAMEBUFFER_SRGB);
+        }
+        return state;
+    }
+    void endGLCopy(const GLCopyState& state)
+    {
+        if (state.srgb)
+        {
+            gl.Enable(GL_FRAMEBUFFER_SRGB);
+        }
+        if (state.scissor)
+        {
+            gl.Enable(GL_SCISSOR_TEST);
+        }
+    }
+
+    // The viewer's inputs for this frame, copied into the shared images, rows turned over to Vulkan's order.
+    void frameGenInputs(GLuint depth_texture, GLuint motion_texture, U32 width, U32 height,
+                        const QLVulkanPresenter::FrameGenCamera& camera)
+    {
+        if (!mActive || !mFGWanted || !mFGLoaded || mFGFailed || !depth_texture || !motion_texture)
+        {
+            return;
+        }
+        if (width != mSharedWidth || height != mSharedHeight)
+        {
+            return;  // the window is being resized: the presentation catches up first
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan present - frame generation inputs");
+        if (mFGWidth != width || mFGHeight != height || !mFG[FG_DEPTH].image)
+        {
+            waitIdle();
+            destroyFGImages();
+            if (!createFGImages(width, height))
+            {
+                mFGFailed = true;
+                return;
+            }
+        }
+
+        glWaitForVulkan();
+        const GLCopyState state = beginGLCopy();
+        const GLint w = (GLint)width;
+        const GLint h = (GLint)height;
+        gl.NamedFramebufferReadBuffer(0, GL_BACK);
+        gl.BlitNamedFramebuffer(0, mFG[FG_HUDLESS].glFramebuffer, 0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT,
+                                GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, depth_texture, 0);
+        gl.NamedFramebufferReadBuffer(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0);
+        gl.BlitNamedFramebuffer(mGLReadFramebuffer, mFG[FG_DEPTH].glFramebuffer, 0, 0, w, h, 0, h, w, 0,
+                                GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, motion_texture, 0);
+        gl.BlitNamedFramebuffer(mGLReadFramebuffer, mFG[FG_MOTION].glFramebuffer, 0, 0, w, h, 0, h, w, 0,
+                                GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, 0, 0);
+        endGLCopy(state);
+        if (!mFGInputsLogged)
+        {
+            logGLErrors("copying the frame generation inputs");
+            mFGInputsLogged = true;
+        }
+
+        mFGCamera          = camera;
+        mFGInputsThisFrame = true;
+    }
+    bool mFGInputsLogged = false;
+
     VkPresentModeKHR choosePresentMode()
     {
         U32 count = 0;
@@ -1257,7 +1654,16 @@ struct QLVulkanPresenter::Impl
         info.imageColorSpace  = chosen.colorSpace;
         info.imageExtent      = extent;
         info.imageArrayLayers = 1;
-        info.imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // What frame generation does with the back buffer too (it reads it, and writes the frames it makes into it),
+        // where the surface allows it.
+        info.imageUsage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                (caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT));
+        if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) &&
+            (format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        {
+            info.imageUsage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         info.preTransform     = caps.currentTransform;
         info.compositeAlpha   = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
@@ -1300,7 +1706,8 @@ struct QLVulkanPresenter::Impl
                 return failVK("vkCreateSemaphore (present)", result);
             }
         }
-        mSwapchainDirty = false;
+        mSwapchainDirty       = false;
+        mFramesSinceSwapchain = 0;
         LL_INFOS("Vulkan") << "Vulkan swapchain " << mSwapWidth << "x" << mSwapHeight << ", " << image_count
                            << " images, " << present_mode_name(mPresentMode) << LL_ENDL;
         return true;
@@ -1325,9 +1732,7 @@ struct QLVulkanPresenter::Impl
         if (mGLMustWait && mGLTexture)
         {
             // Vulkan's last read signalled the semaphore: GL takes it, so it is left unsignalled for what comes next.
-            const GLenum layout = GL_LAYOUT_GENERAL_EXT;
-            gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
-            mGLMustWait = false;
+            glWaitForVulkan();
         }
         if (gl.Finish)
         {
@@ -1549,11 +1954,18 @@ struct QLVulkanPresenter::Impl
 
     void shutdown()
     {
+#if QL_HAS_STREAMLINE
+        if (mFGOn)
+        {
+            setFrameGenMode(false);
+        }
+#endif
         if (mDevice)
         {
             waitIdle();
         }
         destroySharedImage();
+        destroyFGImages();
         if (mGLDoneGL)
         {
             gl.DeleteSemaphoresEXT(1, &mGLDoneGL);
@@ -1680,8 +2092,222 @@ struct QLVulkanPresenter::Impl
                 return false;
             }
         }
+        if (mFGWidth != width || mFGHeight != height)
+        {
+            destroyFGImages();  // made again at the new size by the next frame's inputs
+        }
         return true;
     }
+
+#if QL_HAS_STREAMLINE
+    static sl::ViewportHandle viewport() { return sl::ViewportHandle(0u); }
+
+    void setFrameGenMode(bool on)
+    {
+        if (!slDLSSGSetOptions)
+        {
+            return;
+        }
+        sl::DLSSGOptions options{};
+        options.mode                = on ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+        options.numFramesToGenerate = 1;
+        // Kept while off: it goes off for a frame whenever the viewer draws one without inputs (a snapshot).
+        options.flags               = sl::DLSSGFlags::eRetainResourcesWhenOff;
+        options.numBackBuffers      = (uint32_t)mSwapImages.size();
+        options.mvecDepthWidth      = mFGWidth;
+        options.mvecDepthHeight     = mFGHeight;
+        options.colorWidth          = mSwapWidth;
+        options.colorHeight         = mSwapHeight;
+        options.colorBufferFormat   = (uint32_t)mSwapFormat;
+        options.mvecBufferFormat    = (uint32_t)VK_FORMAT_R16G16_SFLOAT;
+        options.depthBufferFormat   = (uint32_t)VK_FORMAT_R32_SFLOAT;
+        options.hudLessBufferFormat = (uint32_t)VK_FORMAT_R8G8B8A8_UNORM;
+        const sl::Result result = slDLSSGSetOptions(viewport(), options);
+        if (result != sl::Result::eOk)
+        {
+            LL_WARNS("Vulkan") << "DLSS Frame Generation " << (on ? "on" : "off") << ": slDLSSGSetOptions failed (sl::Result "
+                               << (S32)result << ")" << LL_ENDL;
+            if (on)
+            {
+                mFGNote = llformat("Streamline would not switch it on (sl::Result %d)", (S32)result);
+                mFGFailed = true;
+                return;
+            }
+        }
+        mFGOn = on;
+        LL_INFOS("Vulkan") << "DLSS Frame Generation " << (on ? "on" : "off") << ", " << mSwapWidth << "x" << mSwapHeight
+                           << LL_ENDL;
+    }
+
+    // Each frame, once its inputs are in: whether frame generation runs for it, and if so the frame's camera.
+    void updateFrameGen()
+    {
+        if (!mFGLoaded)
+        {
+            return;
+        }
+        bool want = mFGWanted && !mFGFailed;
+        if (want && mVSync)
+        {
+            // Streamline runs frame generation under VSync only on D3D12.
+            mFGNote = "waiting: VSync is on, and frame generation needs it off under Vulkan";
+            want = false;
+        }
+        else if (want && mFGStatus != 0)
+        {
+            want = false;  // what slDLSSGGetState said, in mFGNote; tried again once the swapchain is made again
+        }
+        else if (want && mFGMinSize && llmin(mSwapWidth, mSwapHeight) < mFGMinSize)
+        {
+            mFGNote = llformat("waiting: the window is smaller than the %u pixels it needs", mFGMinSize);
+            want = false;
+        }
+        else if (want && (!mFGInputsThisFrame || !mFrameToken))
+        {
+            want = false;  // a frame without the world's inputs (the login screen, a snapshot): shown as drawn
+            if (!mFGOn)
+            {
+                mFGNote = "waiting for the world's inputs";
+            }
+        }
+        else if (want && mFramesSinceSwapchain < 3)
+        {
+            want = false;  // a new swapchain settles first
+        }
+        if (!mFGWanted && !mFGFailed)
+        {
+            mFGNote = "off";
+        }
+        if (want != mFGOn)
+        {
+            setFrameGenMode(want);
+        }
+        if (!mFGOn)
+        {
+            return;
+        }
+
+        const QLVulkanPresenter::FrameGenCamera& cam = mFGCamera;
+        auto matrix = [](sl::float4x4& dst, const float* m)
+        {
+            for (U32 row = 0; row < 4; ++row)
+            {
+                dst.setRow(row, sl::float4(m[row * 4 + 0], m[row * 4 + 1], m[row * 4 + 2], m[row * 4 + 3]));
+            }
+        };
+        sl::Constants c{};
+        matrix(c.cameraViewToClip, cam.viewToClip);
+        matrix(c.clipToCameraView, cam.clipToView);
+        matrix(c.clipToPrevClip, cam.clipToPrevClip);
+        matrix(c.prevClipToClip, cam.prevClipToClip);
+        const float identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        matrix(c.clipToLensClip, identity);
+        c.jitterOffset         = sl::float2(0.f, 0.f);  // the viewer does not jitter
+        c.mvecScale            = sl::float2(1.f, 1.f);  // the motion is in window UV already
+        c.cameraPinholeOffset  = sl::float2(0.f, 0.f);
+        c.cameraPos            = sl::float3(cam.position[0], cam.position[1], cam.position[2]);
+        c.cameraUp             = sl::float3(cam.up[0], cam.up[1], cam.up[2]);
+        c.cameraRight          = sl::float3(cam.right[0], cam.right[1], cam.right[2]);
+        c.cameraFwd            = sl::float3(cam.forward[0], cam.forward[1], cam.forward[2]);
+        c.cameraNear           = cam.nearPlane;
+        c.cameraFar            = cam.farPlane;
+        c.cameraFOV            = cam.fovY;
+        c.cameraAspectRatio    = cam.aspect;
+        c.depthInverted        = cam.depthInverted ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        c.cameraMotionIncluded = sl::Boolean::eTrue;
+        c.motionVectors3D      = sl::Boolean::eFalse;
+        c.reset                = cam.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        c.orthographicProjection = sl::Boolean::eFalse;
+        c.motionVectorsDilated   = sl::Boolean::eFalse;
+        c.motionVectorsJittered  = sl::Boolean::eFalse;
+        const sl::Result result = slSetConstants(c, *mFrameToken, viewport());
+        if (result != sl::Result::eOk && !mFGLoggedConstants)
+        {
+            LL_WARNS("Vulkan") << "DLSS Frame Generation: slSetConstants failed (sl::Result " << (S32)result << ")"
+                               << LL_ENDL;
+            mFGLoggedConstants = true;
+        }
+    }
+    bool mFGLoggedConstants = false;
+
+    // In the present's command buffer, with the inputs Vulkan's: Streamline copies them where it is told of them.
+    void tagFrameGenInputs(VkCommandBuffer cmd)
+    {
+        sl::Resource resources[FG_COUNT];
+        for (U32 i = 0; i < FG_COUNT; ++i)
+        {
+            const FGImage& img = mFG[i];
+            sl::Resource& res = resources[i];
+            res = sl::Resource(sl::ResourceType::eTex2d, (void*)img.image, (void*)img.memory, (void*)img.view,
+                               (uint32_t)VK_IMAGE_LAYOUT_GENERAL);
+            res.width        = mFGWidth;
+            res.height       = mFGHeight;
+            res.nativeFormat = (uint32_t)img.format;
+            res.mipLevels    = 1;
+            res.arrayLayers  = 1;
+            res.flags        = 0;
+            res.usage        = (uint32_t)img.usage;
+        }
+        const sl::Extent extent{ 0, 0, mFGWidth, mFGHeight };
+        const sl::ResourceTag tags[FG_COUNT] = {
+            sl::ResourceTag(&resources[FG_DEPTH], sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &extent),
+            sl::ResourceTag(&resources[FG_MOTION], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow,
+                            &extent),
+            sl::ResourceTag(&resources[FG_HUDLESS], sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow,
+                            &extent),
+        };
+        const sl::Result result = slSetTagForFrame(*mFrameToken, viewport(), tags, FG_COUNT,
+                                                   reinterpret_cast<sl::CommandBuffer*>(cmd));
+        if (result != sl::Result::eOk && !mFGLoggedTags)
+        {
+            LL_WARNS("Vulkan") << "DLSS Frame Generation: slSetTagForFrame failed (sl::Result " << (S32)result << ")"
+                               << LL_ENDL;
+            mFGLoggedTags = true;
+        }
+    }
+    bool mFGLoggedTags = false;
+
+    // Now and then while it runs: what Streamline says of it.
+    void pollFrameGen()
+    {
+        if (!mFGOn || !slDLSSGGetState || (mFrame % 30) != 0)
+        {
+            return;
+        }
+        sl::DLSSGState state{};
+        if (slDLSSGGetState(viewport(), state, nullptr) != sl::Result::eOk)
+        {
+            return;
+        }
+        mFGPresented = state.numFramesActuallyPresented;
+        mFGMinSize   = state.minWidthOrHeight;
+        mFGStatus    = (U32)state.status;
+        if (mFGStatus != 0 && mFGStatus != mFGLoggedStatus)
+        {
+            std::string why;
+            if (state.status & sl::DLSSGStatus::eFailResolutionTooLow)
+            {
+                why += " the window is too small;";
+            }
+            if (state.status & sl::DLSSGStatus::eFailReflexNotDetectedAtRuntime)
+            {
+                why += " Reflex was not seen running;";
+            }
+            if (state.status & sl::DLSSGStatus::eFailHDRFormatNotSupported)
+            {
+                why += " the back buffer's format is not supported;";
+            }
+            if (state.status & sl::DLSSGStatus::eFailCommonConstantsInvalid)
+            {
+                why += " the camera constants were refused;";
+            }
+            mFGNote = "stopped by Streamline:" + why;
+            LL_WARNS("Vulkan") << "DLSS Frame Generation " << mFGNote << " (status 0x" << std::hex << mFGStatus
+                               << std::dec << ")" << LL_ENDL;
+            mFGLoggedStatus = mFGStatus;
+        }
+    }
+#endif
 
     void imageBarrier(VkCommandBuffer cmd, VkImage image, VkAccessFlags src_access, VkAccessFlags dst_access,
                       VkImageLayout old_layout, VkImageLayout new_layout, U32 src_family, U32 dst_family,
@@ -1703,41 +2329,25 @@ struct QLVulkanPresenter::Impl
     void copyBackBuffer(U32 width, U32 height)
     {
         LL_PROFILE_ZONE_NAMED("vulkan present - gl copy");
-        const GLenum layout = GL_LAYOUT_GENERAL_EXT;
         if (!mLoggedFirstCopy)
         {
             logGLErrors("the viewer's frame, before the first copy");
         }
-        if (mGLMustWait)
-        {
-            gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
-            mGLMustWait = false;
-        }
+        glWaitForVulkan();
 
-        // A blit obeys the scissor test and, into an sRGB-capable buffer, the sRGB write: neither is wanted here.
-        const GLboolean scissor = gl.IsEnabled(GL_SCISSOR_TEST);
-        const GLboolean srgb    = gl.IsEnabled(GL_FRAMEBUFFER_SRGB);
-        if (scissor)
-        {
-            gl.Disable(GL_SCISSOR_TEST);
-        }
-        if (srgb)
-        {
-            gl.Disable(GL_FRAMEBUFFER_SRGB);
-        }
+        const GLCopyState state = beginGLCopy();
         gl.NamedFramebufferReadBuffer(0, GL_BACK);
         gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
                                 (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        if (srgb)
-        {
-            gl.Enable(GL_FRAMEBUFFER_SRGB);
-        }
-        if (scissor)
-        {
-            gl.Enable(GL_SCISSOR_TEST);
-        }
+        endGLCopy(state);
+        const GLboolean scissor = state.scissor;
+        const GLboolean srgb    = state.srgb;
 
-        gl.SignalSemaphoreEXT(mGLDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
+        // Every shared image, the frame generation inputs too: Vulkan takes them all with this frame.
+        GLuint textures[1 + FG_COUNT];
+        GLenum layouts[1 + FG_COUNT];
+        const U32 count = glInteropTextures(textures, layouts);
+        gl.SignalSemaphoreEXT(mGLDoneGL, 0, nullptr, count, textures, layouts);
         gl.Flush();
         if (!mLoggedFirstCopy)
         {
@@ -1775,6 +2385,15 @@ struct QLVulkanPresenter::Impl
         if (width != mSwapWidth || height != mSwapHeight || width != mSharedWidth || height != mSharedHeight ||
             mSwapchainDirty || !mSwapchain || !mShared)
         {
+#if QL_HAS_STREAMLINE
+            // Streamline wants frame generation off before the window changes under it.
+            if (mFGOn)
+            {
+                setFrameGenMode(false);
+            }
+            mFGStatus = 0;  // and tried again on the new swapchain
+            mFGInputsThisFrame = false;
+#endif
             if (!resize(width, height))
             {
                 return false;
@@ -1814,6 +2433,9 @@ struct QLVulkanPresenter::Impl
         }
 
         copyBackBuffer(width, height);
+#if QL_HAS_STREAMLINE
+        updateFrameGen();
+#endif
 
         VkCommandBuffer cmd = mCommands[slot];
         vkResetCommandBuffer(cmd, 0);
@@ -1828,6 +2450,22 @@ struct QLVulkanPresenter::Impl
         imageBarrier(cmd, mSwapImages[index], 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        // The frame generation inputs, which GL signalled with the frame, every frame they exist, read or not.
+        for (const FGImage& img : mFG)
+        {
+            if (img.image)
+            {
+                imageBarrier(cmd, img.image, 0, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+                             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+            }
+        }
+#if QL_HAS_STREAMLINE
+        if (mFGOn && mFGInputsThisFrame)
+        {
+            tagFrameGenInputs(cmd);
+        }
+#endif
 
         // GL's rows run bottom up and Vulkan's top down: the copy turns the image over.
         VkImageBlit blit = {};
@@ -1843,10 +2481,19 @@ struct QLVulkanPresenter::Impl
         imageBarrier(cmd, mSwapImages[index], VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        // And the shared image back to GL.
+        // And the shared images back to GL.
         imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL,
                      VK_IMAGE_LAYOUT_GENERAL, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        for (const FGImage& img : mFG)
+        {
+            if (img.image)
+            {
+                imageBarrier(cmd, img.image, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT, 0,
+                             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            }
+        }
         vkEndCommandBuffer(cmd);
 
         VkSemaphore waits[2] = { mGLDoneVK, mAcquired[slot] };
@@ -1896,6 +2543,11 @@ struct QLVulkanPresenter::Impl
         }
 
         ++mFrame;
+        ++mFramesSinceSwapchain;
+        mFGInputsThisFrame = false;
+#if QL_HAS_STREAMLINE
+        pollFrameGen();
+#endif
         return true;
     }
 };
@@ -1967,13 +2619,57 @@ void QLVulkanPresenter::configureStreamline(bool enable, const std::string& log_
 }
 
 // static
-void QLVulkanPresenter::frameBegin(int reflex_mode)
+void QLVulkanPresenter::frameBegin(int reflex_mode, bool frame_gen)
 {
 #if QL_HAS_STREAMLINE
     if (sStreamline)
     {
-        sStreamline->frameBegin(reflex_mode);
+        sStreamline->frameBegin(reflex_mode, frame_gen);
     }
+#endif
+}
+
+// static
+bool QLVulkanPresenter::frameGenWanted()
+{
+    return sStreamline && sStreamline->mActive && sStreamline->mFGLoaded && sStreamline->mFGWanted &&
+           !sStreamline->mFGFailed;
+}
+
+// static
+void QLVulkanPresenter::frameGenInputs(unsigned depth_texture, unsigned motion_texture, unsigned width,
+                                       unsigned height, const FrameGenCamera& camera)
+{
+    if (sStreamline)
+    {
+        sStreamline->frameGenInputs((GLuint)depth_texture, (GLuint)motion_texture, (U32)width, (U32)height, camera);
+    }
+}
+
+// static
+std::string QLVulkanPresenter::frameGenInfo()
+{
+#if !QL_HAS_STREAMLINE
+    return "not in this build (no Streamline SDK)";
+#else
+    if (!sStreamline || !sStreamline->mActive)
+    {
+        return "needs Vulkan presentation and Streamline (QuasarVulkanPresent, QuasarStreamline)";
+    }
+    const Impl& impl = *sStreamline;
+    if (!impl.mFGLoaded)
+    {
+        return impl.mFGNote;
+    }
+    if (!impl.mFGWanted)
+    {
+        return "off (QuasarDLSSFrameGen)";
+    }
+    if (impl.mFGOn)
+    {
+        return llformat("on, %u shown a frame drawn, inputs %ux%u", impl.mFGPresented, impl.mFGWidth, impl.mFGHeight);
+    }
+    return impl.mFGNote;
 #endif
 }
 

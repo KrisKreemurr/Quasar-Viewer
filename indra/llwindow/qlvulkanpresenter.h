@@ -71,7 +71,7 @@ public:
     /// "Vulkan, <mode>, <w>x<h>", or what stopped it.
     std::string describe() const;
 
-    // ---- NVIDIA Streamline (QuasarStreamline): Reflex now, DLSS Frame Generation next ----------------------------
+    // ---- NVIDIA Streamline (QuasarStreamline): Reflex, and DLSS Frame Generation below ----------------------------
 
     /// Before init: load Vulkan through NVIDIA Streamline (sl.interposer.dll beside the viewer, its signature checked)
     /// rather than vulkan-1.dll alone. log_dir is where Streamline writes its log, UTF-8. Ignored in a build without the
@@ -87,11 +87,49 @@ public:
 
     /// Start of each frame, on the main thread: a new frame for Streamline, Reflex's sleep if Reflex is on (mode 0 off,
     /// 1 low latency, 2 low latency with boost), and the simulation's start. Nothing while Streamline is not running.
-    static void frameBegin(int reflex_mode);
+    /// frame_gen is QuasarDLSSFrameGen: whether NVIDIA DLSS Frame Generation is wanted (it needs Reflex, so asking for
+    /// it runs Reflex at low latency at the least).
+    static void frameBegin(int reflex_mode, bool frame_gen);
     static void latencyMark(ELatencyMark mark);
 
     /// For the status line: "Streamline off", or Streamline's state and Reflex's mode.
     static std::string streamlineInfo();
+
+    // ---- NVIDIA DLSS Frame Generation (QuasarDLSSFrameGen) ------------------------------------------------------
+
+    /// The camera of the frame whose inputs are handed over, for Streamline's constants. The matrices are Streamline's:
+    /// row-major, for row vectors, which is exactly how LLMatrix4a lays GL's column-vector matrices out in memory, so
+    /// the viewer copies its matrices' floats in order.
+    struct FrameGenCamera
+    {
+        float viewToClip[16];      // the projection
+        float clipToView[16];      // and its inverse
+        float clipToPrevClip[16];  // this frame's clip space to the last frame's
+        float prevClipToClip[16];  // and back
+        float position[3];         // the camera, in the agent's space
+        float up[3];
+        float right[3];
+        float forward[3];
+        float nearPlane;
+        float farPlane;
+        float fovY;                // radians
+        float aspect;              // width / height
+        bool  depthInverted;       // reverse-Z: nearer is larger
+        bool  reset;               // the last frame does not lead to this one (a teleport, a cut, the first frame)
+    };
+
+    /// Whether DLSS Frame Generation is loaded and the viewer should make its inputs this frame.
+    static bool frameGenWanted();
+
+    /// After the world is drawn and before the interface, on the main thread with the window's GL context current: the
+    /// frame's inputs. The back buffer as it is now is the HUD-less colour; depth_texture (R32F) and motion_texture
+    /// (RG16F, window UV, top down) are GL textures of the window's size, rows bottom up as GL draws them. All three are
+    /// copied (turned over) into images Vulkan shares, and tagged for Streamline in the frame's present.
+    static void frameGenInputs(unsigned depth_texture, unsigned motion_texture, unsigned width, unsigned height,
+                               const FrameGenCamera& camera);
+
+    /// For the status line: what DLSS Frame Generation is doing, or why it is not.
+    static std::string frameGenInfo();
 
 private:
     struct Impl;

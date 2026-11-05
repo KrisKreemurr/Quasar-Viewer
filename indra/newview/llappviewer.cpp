@@ -1439,7 +1439,8 @@ bool LLAppViewer::doFrame()
     // Quasar: a new frame for Streamline, with Reflex's sleep where it is on (QuasarReflex), and the simulation's start.
     {
         static LLCachedControl<S32> reflex_mode(gSavedSettings, "QuasarReflex", 1);
-        QLVulkanPresenter::frameBegin(reflex_mode());
+        static LLCachedControl<bool> frame_gen(gSavedSettings, "QuasarDLSSFrameGen", false);
+        QLVulkanPresenter::frameBegin(reflex_mode(), frame_gen());
     }
 #endif
 

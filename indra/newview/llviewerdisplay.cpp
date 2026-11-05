@@ -88,6 +88,7 @@
 #include "llvograss.h"
 #include "llworld.h"
 #include "pipeline.h"
+#include "qldlssg.h"
 #include "qlframewarp.h"
 
 #include <filesystem>
@@ -1708,6 +1709,9 @@ void render_ui(F32 zoom_factor, int subfield)
     // Quasar: the world as the final blit left it, before anything is drawn over it, for the generated frame.
     QLFrameWarp::instance().captureWorld(!gSnapshot && !gCubeSnapshot && !LLPipeline::sCutoutRender && zoom_factor == 1.f &&
                                          subfield == 0 && LLViewerCamera::getInstance()->getZoomFactor() == 1.f);
+    // And for NVIDIA DLSS Frame Generation (QuasarDLSSFrameGen): the world's colour, depth and motion.
+    QLDLSSGInputs::capture(!gSnapshot && !gCubeSnapshot && !LLPipeline::sCutoutRender && zoom_factor == 1.f &&
+                           subfield == 0 && LLViewerCamera::getInstance()->getZoomFactor() == 1.f);
 
     // A cutout frame is its subject and nothing else. Nothing drawn over the
     // frame belongs to that, and the coverage the subject is lifted out by

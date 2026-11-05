@@ -2688,7 +2688,18 @@
         <key>QuasarStreamline</key>
         <map>
             <key>Comment</key>
-            <string>Quasar (experimental, NVIDIA, Windows): with QuasarVulkanPresent on, load Vulkan through NVIDIA Streamline, for Reflex (lower input delay, QuasarReflex) now and DLSS Frame Generation next. Needs a restart. Falls back to plain Vulkan if Streamline cannot load; the status line says which.</string>
+            <string>Quasar (experimental, NVIDIA, Windows): with QuasarVulkanPresent on, load Vulkan through NVIDIA Streamline, for Reflex (lower input delay, QuasarReflex) and DLSS Frame Generation (QuasarDLSSFrameGen). Needs a restart. Falls back to plain Vulkan if Streamline cannot load; the status line says which.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarDLSSFrameGen</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, NVIDIA RTX 40 series and newer, Windows): NVIDIA DLSS Frame Generation, one frame made between every two the viewer draws, while QuasarVulkanPresent and QuasarStreamline run. Needs VSync off and Windows' hardware-accelerated GPU scheduling on; turns Reflex on. The viewer's own FPS counter still counts the frames it draws: the status line says how many are shown for each. Applies at once. Separate from QuasarFrameWarp.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
