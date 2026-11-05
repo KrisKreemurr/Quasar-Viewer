@@ -534,6 +534,7 @@ set(
   NDOF
   SDL3
   Sentry
+  Streamline
   Tracy
   Velopack
   WebRTC

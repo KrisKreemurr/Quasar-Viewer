@@ -36,6 +36,14 @@
 #endif
 #include <vulkan/vulkan.h>
 
+#if QL_HAS_STREAMLINE
+#include <sl.h>
+#include <sl_consts.h>
+#include <sl_pcl.h>
+#include <sl_reflex.h>
+#include <sl_security.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -215,6 +223,66 @@ namespace
 
 namespace
 {
+    // QuasarStreamline, as the viewer set it before the presenter started (QLVulkanPresenter::configureStreamline).
+    struct QLStreamlineConfig
+    {
+        bool         mEnable = false;
+        std::wstring mLogDir;
+    };
+    QLStreamlineConfig sStreamlineConfig;
+
+    std::wstring ql_widen(const std::string& utf8)
+    {
+        if (utf8.empty())
+        {
+            return std::wstring();
+        }
+        const int count = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), nullptr, 0);
+        std::wstring wide(count > 0 ? count : 0, L'\0');
+        if (count > 0)
+        {
+            MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), wide.data(), count);
+        }
+        return wide;
+    }
+
+    const char* reflex_mode_name(int mode)
+    {
+        switch (mode)
+        {
+        case 1:  return "low latency";
+        case 2:  return "low latency + boost";
+        default: return "off";
+        }
+    }
+
+#if QL_HAS_STREAMLINE
+    // Streamline's own messages, into the log: its warnings and errors always, its information only at debug level.
+    void ql_sl_log(sl::LogType type, const char* msg)
+    {
+        std::string text = msg ? msg : "";
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+        {
+            text.pop_back();
+        }
+        if (type == sl::LogType::eError)
+        {
+            LL_WARNS("Streamline") << "Error: " << text << LL_ENDL;
+        }
+        else if (type == sl::LogType::eWarn)
+        {
+            LL_WARNS("Streamline") << text << LL_ENDL;
+        }
+        else
+        {
+            LL_DEBUGS("Streamline") << text << LL_ENDL;
+        }
+    }
+#endif
+}
+
+namespace
+{
     // The validation layer's findings, into the log.
     VKAPI_ATTR VkBool32 VKAPI_CALL ql_vk_debug_message(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                       VkDebugUtilsMessageTypeFlagsEXT,
@@ -372,6 +440,24 @@ struct QLVulkanPresenter::Impl
     bool        mActive = false;
     std::string mNote = "not started";
 
+#if QL_HAS_STREAMLINE
+    // NVIDIA Streamline, when QuasarStreamline loaded it: Vulkan comes through its interposer, which hooks the few
+    // calls Reflex and frame generation need (instance and device creation, the swapchain, present).
+    HMODULE                    mStreamline = nullptr;
+    std::wstring               mStreamlineDir;
+    PFun_slInit*               slInit = nullptr;
+    PFun_slShutdown*           slShutdown = nullptr;
+    PFun_slGetFeatureFunction* slGetFeatureFunction = nullptr;
+    PFun_slGetNewFrameToken*   slGetNewFrameToken = nullptr;
+    PFun_slReflexSetOptions*   slReflexSetOptions = nullptr;
+    PFun_slReflexSleep*        slReflexSleep = nullptr;
+    PFun_slPCLSetMarker*       slPCLSetMarker = nullptr;
+    sl::FrameToken*            mFrameToken = nullptr;
+#endif
+    bool        mStreamlineRunning = false;
+    int         mReflexMode = -1;  // as last applied; -1 before the first frame
+    std::string mStreamlineNote = "off";
+
     bool fail(const std::string& why)
     {
         mNote = why;
@@ -476,13 +562,31 @@ struct QLVulkanPresenter::Impl
 
     bool createInstance()
     {
-        mLibrary = LoadLibraryA("vulkan-1.dll");
-        if (!mLibrary)
+#if QL_HAS_STREAMLINE
+        if (sStreamlineConfig.mEnable && loadStreamline())
         {
-            return fail("no Vulkan runtime (vulkan-1.dll)");
+            vkGetInstanceProcAddr =
+                reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(mStreamline, "vkGetInstanceProcAddr"));
         }
-        vkGetInstanceProcAddr =
-            reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(mLibrary, "vkGetInstanceProcAddr"));
+        else
+#endif
+        {
+            if (sStreamlineConfig.mEnable)
+            {
+#if QL_HAS_STREAMLINE
+                LL_WARNS("Vulkan") << "Streamline not loaded (" << mStreamlineNote << "): Vulkan alone" << LL_ENDL;
+#else
+                mStreamlineNote = "not in this build";
+#endif
+            }
+            mLibrary = LoadLibraryA("vulkan-1.dll");
+            if (!mLibrary)
+            {
+                return fail("no Vulkan runtime (vulkan-1.dll)");
+            }
+            vkGetInstanceProcAddr =
+                reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(mLibrary, "vkGetInstanceProcAddr"));
+        }
         if (!vkGetInstanceProcAddr)
         {
             return fail("vulkan-1.dll has no vkGetInstanceProcAddr");
@@ -501,7 +605,15 @@ struct QLVulkanPresenter::Impl
         app.applicationVersion = 1;
         app.pEngineName        = "Quasar";
         app.engineVersion      = 1;
-        app.apiVersion         = VK_API_VERSION_1_1;
+        // 1.3 where the loader has it: frame generation's optical flow runs natively from 1.1, best on 1.3.
+        app.apiVersion = VK_API_VERSION_1_1;
+        auto enumerate_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+        U32 loader_version = VK_API_VERSION_1_0;
+        if (enumerate_version && enumerate_version(&loader_version) == VK_SUCCESS && loader_version >= VK_API_VERSION_1_3)
+        {
+            app.apiVersion = VK_API_VERSION_1_3;
+        }
 
         std::vector<const char*> extensions = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
 
@@ -560,6 +672,148 @@ struct QLVulkanPresenter::Impl
         }
         return loadInstanceFunctions();
     }
+
+#if QL_HAS_STREAMLINE
+    // Streamline's interposer, from beside the viewer once NVIDIA's signature on it checks out, started with Reflex,
+    // PC Latency and DLSS Frame Generation asked for (the last stays off until it is turned on). False, with why in
+    // mStreamlineNote, leaves nothing loaded.
+    bool loadStreamline()
+    {
+        wchar_t exe[MAX_PATH] = {};
+        const DWORD length = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        mStreamlineDir.assign(exe, length);
+        const size_t slash = mStreamlineDir.find_last_of(L"\\/");
+        mStreamlineDir = slash == std::wstring::npos ? std::wstring(L".") : mStreamlineDir.substr(0, slash);
+        const std::wstring path = mStreamlineDir + L"\\sl.interposer.dll";
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            mStreamlineNote = "sl.interposer.dll is not beside the viewer";
+            return false;
+        }
+        if (!sl::security::verifyEmbeddedSignature(path.c_str()))
+        {
+            mStreamlineNote = "sl.interposer.dll does not carry NVIDIA's signature";
+            return false;
+        }
+        mStreamline = LoadLibraryW(path.c_str());
+        if (!mStreamline)
+        {
+            mStreamlineNote = llformat("sl.interposer.dll did not load (error %u)", (U32)GetLastError());
+            return false;
+        }
+        slInit               = reinterpret_cast<PFun_slInit*>(GetProcAddress(mStreamline, "slInit"));
+        slShutdown           = reinterpret_cast<PFun_slShutdown*>(GetProcAddress(mStreamline, "slShutdown"));
+        slGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(GetProcAddress(mStreamline, "slGetFeatureFunction"));
+        slGetNewFrameToken   = reinterpret_cast<PFun_slGetNewFrameToken*>(GetProcAddress(mStreamline, "slGetNewFrameToken"));
+        if (!slInit || !slShutdown || !slGetFeatureFunction || !slGetNewFrameToken ||
+            !GetProcAddress(mStreamline, "vkGetInstanceProcAddr"))
+        {
+            mStreamlineNote = "sl.interposer.dll lacks the functions it should have";
+            FreeLibrary(mStreamline);
+            mStreamline = nullptr;
+            return false;
+        }
+
+        const sl::Feature features[] = { sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_G };
+        const wchar_t* plugin_dirs[] = { mStreamlineDir.c_str() };
+        sl::Preferences pref{};
+        pref.showConsole        = false;
+        pref.logLevel           = sl::LogLevel::eDefault;
+        pref.pathsToPlugins     = plugin_dirs;
+        pref.numPathsToPlugins  = 1;
+        pref.pathToLogsAndData  = sStreamlineConfig.mLogDir.empty() ? nullptr : sStreamlineConfig.mLogDir.c_str();
+        pref.logMessageCallback = ql_sl_log;
+        // No updates downloaded over the air: the viewer runs the plugins it ships with.
+        pref.flags              = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eDisableDebugText;
+        pref.featuresToLoad     = features;
+        pref.numFeaturesToLoad  = (U32)LL_ARRAY_SIZE(features);
+        pref.engine             = sl::EngineType::eCustom;
+        pref.engineVersion      = "Quasar Viewer";
+        pref.projectId          = "3f1c6e9a-5b2d-4c7e-9a41-8d0b6f2e7c53";
+        pref.renderAPI          = sl::RenderAPI::eVulkan;
+        const sl::Result result = slInit(pref, sl::kSDKVersion);
+        if (result != sl::Result::eOk)
+        {
+            mStreamlineNote = llformat("slInit failed (sl::Result %d)", (S32)result);
+            FreeLibrary(mStreamline);
+            mStreamline = nullptr;
+            return false;
+        }
+        mStreamlineRunning = true;
+        mStreamlineNote    = "running";
+        LL_INFOS("Vulkan") << "Vulkan through NVIDIA Streamline " << SL_VERSION_MAJOR << "." << SL_VERSION_MINOR << "."
+                           << SL_VERSION_PATCH << LL_ENDL;
+        return true;
+    }
+
+    // Once the device is made: the feature functions the frames call. A feature that did not load leaves its calls
+    // out; the presentation goes on either way.
+    void startStreamlineFeatures()
+    {
+        if (!mStreamlineRunning)
+        {
+            return;
+        }
+        void* fn = nullptr;
+        if (slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", fn) == sl::Result::eOk)
+        {
+            slReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(fn);
+        }
+        fn = nullptr;
+        if (slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", fn) == sl::Result::eOk)
+        {
+            slReflexSleep = reinterpret_cast<PFun_slReflexSleep*>(fn);
+        }
+        fn = nullptr;
+        if (slGetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", fn) == sl::Result::eOk)
+        {
+            slPCLSetMarker = reinterpret_cast<PFun_slPCLSetMarker*>(fn);
+        }
+        LL_INFOS("Vulkan") << "Streamline features: Reflex " << (slReflexSetOptions && slReflexSleep ? "loaded" : "not loaded")
+                           << ", PC Latency markers " << (slPCLSetMarker ? "loaded" : "not loaded") << LL_ENDL;
+    }
+
+    void mark(sl::PCLMarker marker)
+    {
+        if (slPCLSetMarker && mFrameToken)
+        {
+            slPCLSetMarker(marker, *mFrameToken);
+        }
+    }
+
+    void frameBegin(int reflex_mode)
+    {
+        if (!mStreamlineRunning)
+        {
+            return;
+        }
+        mFrameToken = nullptr;
+        if (slGetNewFrameToken(mFrameToken, nullptr) != sl::Result::eOk)
+        {
+            mFrameToken = nullptr;
+            return;
+        }
+        reflex_mode = llclamp(reflex_mode, 0, 2);
+        if (reflex_mode != mReflexMode && slReflexSetOptions)
+        {
+            sl::ReflexOptions options{};
+            options.mode = reflex_mode == 2 ? sl::ReflexMode::eLowLatencyWithBoost
+                                            : (reflex_mode == 1 ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff);
+            const sl::Result result = slReflexSetOptions(options);
+            LL_INFOS("Vulkan") << "Reflex " << reflex_mode_name(reflex_mode)
+                               << (result == sl::Result::eOk ? "" : llformat(" (sl::Result %d)", (S32)result))
+                               << LL_ENDL;
+            mReflexMode = reflex_mode;
+        }
+        // Reflex holds the CPU back here just long enough that the frame it begins reaches the GPU as it frees up.
+        if (mReflexMode > 0 && slReflexSleep)
+        {
+            LL_PROFILE_ZONE_NAMED("reflex sleep");
+            slReflexSleep(*mFrameToken);
+        }
+        mark(sl::PCLMarker::eSimulationStart);
+    }
+#endif
 
     bool createSurface()
     {
@@ -1239,11 +1493,21 @@ struct QLVulkanPresenter::Impl
         return gl_saw_blue && vk_saw_green;
     }
 
+    // After the device: Streamline's feature functions, where it runs. Never fails the start.
+    bool startFeatures()
+    {
+#if QL_HAS_STREAMLINE
+        startStreamlineFeatures();
+#endif
+        return true;
+    }
+
     bool init(HWND window, bool vsync)
     {
         mWindow = window;
         mVSync  = vsync;
         if (!checkGL() || !createInstance() || !createSurface() || !pickDevice() || !createDevice() ||
+            !startFeatures() ||
             !createSharedSemaphore(mGLDoneVK, mGLDoneGL, mGLDoneHandle) ||
             !createSharedSemaphore(mVKDoneVK, mVKDoneGL, mVKDoneHandle))
         {
@@ -1314,6 +1578,15 @@ struct QLVulkanPresenter::Impl
                 vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
                 mSwapchain = VK_NULL_HANDLE;
             }
+#if QL_HAS_STREAMLINE
+            // Streamline let go once the swapchain it hooks is gone, before the device and instance.
+            if (mStreamlineRunning)
+            {
+                slShutdown();
+                mStreamlineRunning = false;
+                mFrameToken        = nullptr;
+            }
+#endif
             for (U32 i = 0; i < FRAMES_IN_FLIGHT; ++i)
             {
                 if (mFences[i])
@@ -1369,6 +1642,18 @@ struct QLVulkanPresenter::Impl
             FreeLibrary(mLibrary);
             mLibrary = nullptr;
         }
+#if QL_HAS_STREAMLINE
+        if (mStreamlineRunning && slShutdown)
+        {
+            slShutdown();  // started, but no device was made to let it go with
+            mStreamlineRunning = false;
+        }
+        if (mStreamline)
+        {
+            FreeLibrary(mStreamline);
+            mStreamline = nullptr;
+        }
+#endif
         mActive = false;
     }
 
@@ -1473,6 +1758,9 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
+#if QL_HAS_STREAMLINE
+        mark(sl::PCLMarker::eRenderSubmitEnd);
+#endif
 
         RECT rect = {};
         GetClientRect(mWindow, &rect);
@@ -1588,7 +1876,13 @@ struct QLVulkanPresenter::Impl
         present_info.pImageIndices      = &index;
         {
             LL_PROFILE_ZONE_NAMED("vulkan present - queue present");
+#if QL_HAS_STREAMLINE
+            mark(sl::PCLMarker::ePresentStart);
+#endif
             result = vkQueuePresentKHR(mQueue, &present_info);
+#if QL_HAS_STREAMLINE
+            mark(sl::PCLMarker::ePresentEnd);
+#endif
         }
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
         {
@@ -1621,11 +1915,19 @@ bool QLVulkanPresenter::init(HWND window, bool vsync)
         mImpl->mNote = note;
         return false;
     }
+    if (mImpl->mStreamlineRunning)
+    {
+        sStreamline = mImpl.get();
+    }
     return true;
 }
 
 void QLVulkanPresenter::shutdown()
 {
+    if (sStreamline == mImpl.get())
+    {
+        sStreamline = nullptr;
+    }
     mImpl->shutdown();
 }
 
@@ -1653,12 +1955,62 @@ void QLVulkanPresenter::setVSync(bool vsync)
     }
 }
 
+QLVulkanPresenter::Impl* QLVulkanPresenter::sStreamline = nullptr;
+
+// static
+void QLVulkanPresenter::configureStreamline(bool enable, const std::string& log_dir)
+{
+    sStreamlineConfig.mEnable = enable;
+    sStreamlineConfig.mLogDir = ql_widen(log_dir);
+}
+
+// static
+void QLVulkanPresenter::frameBegin(int reflex_mode)
+{
+#if QL_HAS_STREAMLINE
+    if (sStreamline)
+    {
+        sStreamline->frameBegin(reflex_mode);
+    }
+#endif
+}
+
+// static
+void QLVulkanPresenter::latencyMark(ELatencyMark mark)
+{
+#if QL_HAS_STREAMLINE
+    if (sStreamline)
+    {
+        sStreamline->mark(mark == SIMULATION_END ? sl::PCLMarker::eSimulationEnd : sl::PCLMarker::eRenderSubmitStart);
+    }
+#endif
+}
+
+// static
+std::string QLVulkanPresenter::streamlineInfo()
+{
+    if (!sStreamline || !sStreamline->mStreamlineRunning)
+    {
+        return "Streamline off";
+    }
+    return std::string("Streamline, Reflex ") + reflex_mode_name(sStreamline->mReflexMode);
+}
+
 std::string QLVulkanPresenter::describe() const
 {
     if (!mImpl->mActive)
     {
         return "OpenGL (Vulkan: " + mImpl->mNote + ")";
     }
-    return llformat("Vulkan, %s, %ux%u", present_mode_name(mImpl->mPresentMode), mImpl->mSwapWidth,
-                    mImpl->mSwapHeight);
+    std::string text = llformat("Vulkan, %s, %ux%u", present_mode_name(mImpl->mPresentMode), mImpl->mSwapWidth,
+                                mImpl->mSwapHeight);
+    if (mImpl->mStreamlineRunning)
+    {
+        text += std::string(" | Streamline, Reflex ") + reflex_mode_name(mImpl->mReflexMode);
+    }
+    else if (sStreamlineConfig.mEnable)
+    {
+        text += " | Streamline: " + mImpl->mStreamlineNote;
+    }
+    return text;
 }

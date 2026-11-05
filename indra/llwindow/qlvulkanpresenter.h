@@ -71,7 +71,30 @@ public:
     /// "Vulkan, <mode>, <w>x<h>", or what stopped it.
     std::string describe() const;
 
+    // ---- NVIDIA Streamline (QuasarStreamline): Reflex now, DLSS Frame Generation next ----------------------------
+
+    /// Before init: load Vulkan through NVIDIA Streamline (sl.interposer.dll beside the viewer, its signature checked)
+    /// rather than vulkan-1.dll alone. log_dir is where Streamline writes its log, UTF-8. Ignored in a build without the
+    /// SDK; a Streamline that cannot be loaded leaves Vulkan loaded as before.
+    static void configureStreamline(bool enable, const std::string& log_dir);
+
+    /// What the frame's latency markers mark (Reflex, PC Latency).
+    enum ELatencyMark
+    {
+        SIMULATION_END,       // input, messages and object updates done for the frame
+        RENDER_SUBMIT_START,  // the frame's drawing begins
+    };
+
+    /// Start of each frame, on the main thread: a new frame for Streamline, Reflex's sleep if Reflex is on (mode 0 off,
+    /// 1 low latency, 2 low latency with boost), and the simulation's start. Nothing while Streamline is not running.
+    static void frameBegin(int reflex_mode);
+    static void latencyMark(ELatencyMark mark);
+
+    /// For the status line: "Streamline off", or Streamline's state and Reflex's mode.
+    static std::string streamlineInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;
+    static Impl* sStreamline;  // the presenter Streamline runs under, for the per-frame calls; null when none does
 };

@@ -2685,6 +2685,28 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarStreamline</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, NVIDIA, Windows): with QuasarVulkanPresent on, load Vulkan through NVIDIA Streamline, for Reflex (lower input delay, QuasarReflex) now and DLSS Frame Generation next. Needs a restart. Falls back to plain Vulkan if Streamline cannot load; the status line says which.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarReflex</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: NVIDIA Reflex while Streamline runs (QuasarStreamline). 0 off, 1 low latency, 2 low latency with boost (keeps the GPU clocked up, more power). Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVertexAttribBinding</key>
         <map>
             <key>Comment</key>

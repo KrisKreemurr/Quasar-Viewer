@@ -77,6 +77,10 @@
 #include "lldxhardware.h"
 #include "llwin32headers.h"  // GetAsyncKeyState, for the Vulkan presentation escape
 #include <shellapi.h>
+#if !LL_SDL_WINDOW
+#include "qlvulkanpresenter.h"  // Streamline's set-up and the frame's latency markers
+#define QL_VULKAN_PRESENTER 1
+#endif
 #endif
 #include "lltexturestats.h"
 #include "lltrace.h"
@@ -1431,6 +1435,14 @@ bool LLAppViewer::doFrame()
 
     resumeMainloopTimeout("Main:doFrameStart");
 
+#if QL_VULKAN_PRESENTER
+    // Quasar: a new frame for Streamline, with Reflex's sleep where it is on (QuasarReflex), and the simulation's start.
+    {
+        static LLCachedControl<S32> reflex_mode(gSavedSettings, "QuasarReflex", 1);
+        QLVulkanPresenter::frameBegin(reflex_mode());
+    }
+#endif
+
     {
     // The "doFrame" zone above already owns this scope, and a Tracy GPU zone
     // is a fixed-name local, so this one has to live in the block it times
@@ -1550,6 +1562,9 @@ bool LLAppViewer::doFrame()
                     LL_PROFILE_ZONE_NAMED_CATEGORY_APP("df idle");
                     idle();
                 }
+#if QL_VULKAN_PRESENTER
+                QLVulkanPresenter::latencyMark(QLVulkanPresenter::SIMULATION_END);
+#endif
 
                 {
                     LL_PROFILE_ZONE_NAMED_CATEGORY_APP("df resumeMainloopTimeout");
@@ -1581,6 +1596,9 @@ bool LLAppViewer::doFrame()
                 // Quasar: the next frame's camera is known; a generated frame between the last and this one may go out.
                 QLFrameWarp::instance().between(false);
 
+#if QL_VULKAN_PRESENTER
+                QLVulkanPresenter::latencyMark(QLVulkanPresenter::RENDER_SUBMIT_START);
+#endif
                 display();
                 // The frame display() showed, if paced, ends here: the main loop's work in its slack, then the wait.
                 display_end_frame();
@@ -3707,6 +3725,11 @@ bool LLAppViewer::initWindow()
 #endif
     if (gSavedSettings.getBOOL("QuasarVulkanPresent") && gViewerWindow->getWindow())
     {
+#if QL_VULKAN_PRESENTER
+        // Quasar: Vulkan through NVIDIA Streamline, for Reflex now and frame generation next (QuasarStreamline).
+        QLVulkanPresenter::configureStreamline(gSavedSettings.getBOOL("QuasarStreamline"),
+                                               gDirUtilp->getExpandedFilename(LL_PATH_LOGS, ""));
+#endif
         gViewerWindow->getWindow()->enableVulkanPresent(gSavedSettings.getBOOL("RenderVSyncEnable"));
         LL_INFOS("AppInit") << "Presenting through " << gViewerWindow->getWindow()->getPresentInfo() << LL_ENDL;
     }

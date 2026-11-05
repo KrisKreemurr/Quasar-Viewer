@@ -146,6 +146,18 @@ if(WINDOWS)
   )
 endif()
 
+# Quasar: NVIDIA Streamline's signed runtime and its licences (Streamline.cmake), loaded beside the viewer when
+# QuasarStreamline is on.
+if(WINDOWS AND QL_STREAMLINE_RUNTIME_FILES)
+  install(FILES ${QL_STREAMLINE_RUNTIME_FILES} DESTINATION "${AL_INSTALL_BINDIR}" COMPONENT viewer)
+  install(
+    FILES "${QL_STREAMLINE_LICENSE}"
+    DESTINATION "${AL_INSTALL_BINDIR}"
+    RENAME streamline-license.txt
+    COMPONENT viewer
+  )
+endif()
+
 # A shared llcommon sits beside the viewer and beside the plugins.
 if(AL_BUILD_SHARED_LLCOMMON)
   install(

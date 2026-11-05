@@ -104,7 +104,7 @@ if(WINDOWS)
     # Quasar: Vulkan presentation (QuasarVulkanPresent). Only the headers: the runtime is loaded when it is asked for,
     # so the viewer starts on a machine without one.
     find_package(VulkanHeaders CONFIG REQUIRED)
-    target_link_libraries(llwindow PRIVATE Vulkan::Headers)
+    target_link_libraries(llwindow PRIVATE Vulkan::Headers ql::streamline)
   endif()
   target_sources(
     llwindow
