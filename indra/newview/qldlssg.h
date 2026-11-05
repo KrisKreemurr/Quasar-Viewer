@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include "stdtypes.h"
+
 #include <string>
 
 /// QuasarDLSSFrameGen. DLSS Frame Generation (Streamline's sl.dlss_g, under the Vulkan presenter) makes a frame between
@@ -43,4 +45,7 @@ public:
 
     /// For the status line.
     static std::string statusLine();
+
+    /// Frames shown for each frame drawn while DLSS Frame Generation runs (2 at 2x); 0 when it does not run.
+    static U32 shownPerDrawn();
 };

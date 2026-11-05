@@ -76,6 +76,7 @@
 #include "llfocusmgr.h"
 #include "llappviewer.h"
 #include "lltrans.h"
+#include "qldlssg.h"
 #include "qlframewarp.h"
 
 // library includes
@@ -313,7 +314,18 @@ void LLStatusBar::refresh()
         // Quasar: while frame generation runs, the frames shown, marked so they are not taken for frames rendered.
         static const std::string rendered_tip = mTextFPS->getToolTip();
         const QLFrameWarp& warp = QLFrameWarp::instance();
-        if (warp.status() == QLFrameWarp::ACTIVE && warp.lastGenerated() > 0)
+        const U32 dlssg_shown = QLDLSSGInputs::shownPerDrawn();
+        if (dlssg_shown > 1)
+        {
+            // NVIDIA DLSS Frame Generation: Streamline shows this many frames for each one drawn. Click for the
+            // statistics, which count the frames drawn.
+            const S32 rendered = ll_round(fps);
+            const S32 shown = rendered * (S32)dlssg_shown;
+            mTextFPS->setText(fmt::format("{:d}*", shown));
+            mTextFPS->setToolTip(fmt::format("{:d} FPS shown: {:d} rendered, {:d} shown for each by DLSS Frame Generation",
+                                             shown, rendered, dlssg_shown));
+        }
+        else if (warp.status() == QLFrameWarp::ACTIVE && warp.lastGenerated() > 0)
         {
             const S32 rendered = ll_round(fps);
             const S32 shown = rendered + (S32)warp.lastGenerated();

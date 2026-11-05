@@ -227,6 +227,12 @@ std::string QLDLSSGInputs::statusLine()
     return QLVulkanPresenter::frameGenInfo();
 }
 
+// static
+U32 QLDLSSGInputs::shownPerDrawn()
+{
+    return (U32)QLVulkanPresenter::frameGenShownPerDrawn();
+}
+
 #else  // no Vulkan presenter on this platform
 
 // static
@@ -238,6 +244,12 @@ void QLDLSSGInputs::capture(bool)
 std::string QLDLSSGInputs::statusLine()
 {
     return "not on this platform";
+}
+
+// static
+U32 QLDLSSGInputs::shownPerDrawn()
+{
+    return 0;
 }
 
 #endif

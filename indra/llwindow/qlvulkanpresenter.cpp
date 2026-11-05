@@ -2647,6 +2647,12 @@ void QLVulkanPresenter::frameGenInputs(unsigned depth_texture, unsigned motion_t
 }
 
 // static
+unsigned QLVulkanPresenter::frameGenShownPerDrawn()
+{
+    return (sStreamline && sStreamline->mActive && sStreamline->mFGOn) ? sStreamline->mFGPresented : 0u;
+}
+
+// static
 std::string QLVulkanPresenter::frameGenInfo()
 {
 #if !QL_HAS_STREAMLINE

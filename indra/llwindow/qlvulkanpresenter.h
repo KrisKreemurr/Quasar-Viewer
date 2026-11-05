@@ -131,6 +131,10 @@ public:
     /// For the status line: what DLSS Frame Generation is doing, or why it is not.
     static std::string frameGenInfo();
 
+    /// Frames shown for each frame drawn while DLSS Frame Generation runs (2 at 2x), as Streamline last said; 0 when it
+    /// does not run.
+    static unsigned frameGenShownPerDrawn();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;
