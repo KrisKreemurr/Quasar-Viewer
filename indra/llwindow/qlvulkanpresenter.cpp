@@ -349,11 +349,6 @@ struct QLVulkanPresenter::Impl
     VkSemaphore     mAcquired[FRAMES_IN_FLIGHT] = {};
     U64             mFrame = 0;
 
-    // Diagnosis of a black screen. For its first DIAGNOSE_FRAMES presents Vulkan fills the window with magenta rather
-    // than the frame: seen, Vulkan reaches the screen. For the next DIAGNOSE_FRAMES GL fills the shared image with green
-    // rather than copying its back buffer into it, and Vulkan presents that: seen, the sharing works and what comes back
-    // empty is GL's back buffer. GL's errors around the sharing go to the log too.
-    static constexpr U64 DIAGNOSE_FRAMES = 240;
     bool mLoggedFirstCopy = false;
 
     // GL errors since the last call, logged with what was just done; GL's error queue is left empty.
@@ -1088,10 +1083,11 @@ struct QLVulkanPresenter::Impl
         }
     }
 
-    // Whether the shared image's memory really is shared, each way, told by pixels read back rather than by colours on
-    // the screen: Vulkan fills it blue and GL reads a pixel; then GL fills it green and Vulkan reads a pixel into memory
-    // the CPU maps. Both reads go to the log. Run once, at start-up, through the same semaphores the frames use; it
-    // leaves the image as a frame does, Vulkan's read signalled for GL to wait on.
+    // Whether the shared image's memory really is shared, each way, told by pixels read back: Vulkan fills it blue and
+    // GL reads a pixel; then GL fills it green and Vulkan reads a pixel into memory the CPU maps. Both reads go to the
+    // log. Run once per shared image made at start-up, through the same semaphores the frames use; it leaves the image
+    // as a frame does, Vulkan's read signalled for GL to wait on. Sharing that fails without an error leaves the window
+    // black, so a failed test keeps Vulkan from presenting at all (init).
     bool selfTest()
     {
         const GLenum general = GL_LAYOUT_GENERAL_EXT;
@@ -1442,22 +1438,9 @@ struct QLVulkanPresenter::Impl
         {
             gl.Disable(GL_FRAMEBUFFER_SRGB);
         }
-        if (mFrame >= DIAGNOSE_FRAMES && mFrame < 2 * DIAGNOSE_FRAMES)
-        {
-            if (mFrame == DIAGNOSE_FRAMES)
-            {
-                LL_INFOS("Vulkan") << "Diagnosis: the next " << DIAGNOSE_FRAMES
-                                   << " frames are green, filled by GL into the shared image" << LL_ENDL;
-            }
-            const GLfloat green[4] = { 0.f, 1.f, 0.f, 1.f };
-            gl.ClearNamedFramebufferfv(mGLFramebuffer, GL_COLOR, 0, green);
-        }
-        else
-        {
-            gl.NamedFramebufferReadBuffer(0, GL_BACK);
-            gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
-                                    (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        }
+        gl.NamedFramebufferReadBuffer(0, GL_BACK);
+        gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
+                                (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         if (srgb)
         {
             gl.Enable(GL_FRAMEBUFFER_SRGB);
@@ -1564,27 +1547,8 @@ struct QLVulkanPresenter::Impl
         blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         blit.dstOffsets[0]  = { 0, 0, 0 };
         blit.dstOffsets[1]  = { (S32)mSwapWidth, (S32)mSwapHeight, 1 };
-        if (mFrame < DIAGNOSE_FRAMES)
-        {
-            if (mFrame == 0)
-            {
-                LL_INFOS("Vulkan") << "Diagnosis: the first " << DIAGNOSE_FRAMES
-                                   << " frames are magenta, then the viewer's frames" << LL_ENDL;
-            }
-            const VkClearColorValue magenta = { { 1.f, 0.f, 1.f, 1.f } };
-            const VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            vkCmdClearColorImage(cmd, mSwapImages[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1, &range);
-        }
-        else
-        {
-            if (mFrame == 2 * DIAGNOSE_FRAMES)
-            {
-                logGLErrors("the green frames");
-                LL_INFOS("Vulkan") << "Diagnosis over: presenting the viewer's frames" << LL_ENDL;
-            }
-            vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_GENERAL, mSwapImages[index],
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
-        }
+        vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_GENERAL, mSwapImages[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                       &blit, VK_FILTER_NEAREST);
 
         imageBarrier(cmd, mSwapImages[index], VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
