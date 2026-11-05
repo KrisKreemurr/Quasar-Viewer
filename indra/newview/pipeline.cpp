@@ -3599,6 +3599,19 @@ U32 ql_cull_view()
 // sun shadow's union cull on frames that draw no still casters (QuasarSunShadowCache).
 static thread_local bool sQLCullMovingOnly = false;
 
+// Quasar: while a job pool thread culls for QuasarParallelShadowCull, what markNotCulled counts the groups it finds into
+// (mNumVisibleNodes is the main thread's, and is added to once the cull is merged).
+static thread_local S32* sQLVisibleNodes = nullptr;
+
+// QuasarParallelShadowCull, defined at the end of the file, after the cull's per-thread filters they copy onto each
+// worker. A shadow map's cull split across cores: updateCull's partitions, and stateSort's walk of the groups drawn by
+// drawable (the bridges' own culls: avatars, attachments, moving linksets). Each returns false where it does not run,
+// and the caller does the work itself.
+static bool ql_parallel_shadow_cull_wanted();
+static void ql_cull_partitions_parallel(const std::vector<LLSpatialPartition*>& parts, LLCamera& camera,
+                                        LLCullResult& result);
+static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& result);
+
 void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
@@ -3638,6 +3651,12 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
     grabReferences(result);
 
     sCull->clear();
+
+    // QuasarParallelShadowCull: a shadow map's partitions are collected here and culled across cores once every
+    // region's have been, each into a result of its own, merged into this one in order.
+    const bool parallel = ql_parallel_shadow_cull_wanted();
+    static std::vector<LLSpatialPartition*> parallel_parts;
+    parallel_parts.clear();
 
     for (LLWorld::region_list_t::const_iterator iter = LLWorld::getInstance()->getRegionList().begin();
             iter != LLWorld::getInstance()->getRegionList().end(); ++iter)
@@ -3696,7 +3715,15 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
             {
                 for (U32 i = 0; i < count; ++i)
                 {
-                    parts[i]->cull(camera);
+                    // Terrain's cull asks the environment for the water's height: it stays on this thread.
+                    if (parallel && parts[i]->mPartitionType != LLViewerRegion::PARTITION_TERRAIN)
+                    {
+                        parallel_parts.push_back(parts[i]);
+                    }
+                    else
+                    {
+                        parts[i]->cull(camera);
+                    }
                 }
             }
         }
@@ -3707,6 +3734,12 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
         {
             vo_part->cull(camera, sUseOcclusion > 0);
         }
+    }
+
+    if (!parallel_parts.empty())
+    {
+        ql_cull_partitions_parallel(parallel_parts, camera, result);
+        parallel_parts.clear();
     }
 
     if (isMainWorldPass())
@@ -3751,7 +3784,14 @@ void LLPipeline::markNotCulled(LLSpatialGroup* group, LLCamera& camera)
         // an occlusion query to find out if it's an occluder
         markOccluder(group);
     }
-    mNumVisibleNodes++;
+    if (sQLVisibleNodes)
+    {
+        ++*sQLVisibleNodes;
+    }
+    else
+    {
+        mNumVisibleNodes++;
+    }
 }
 
 void LLPipeline::markOccluder(LLSpatialGroup* group)
@@ -4378,6 +4418,7 @@ void LLPipeline::stateSort(LLCamera& camera, LLCullResult &result)
     //LLVertexBuffer::unbind();
 
     grabReferences(result);
+    if (!ql_mark_drawable_groups_parallel(camera, result))
     {
     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("stateSort drawable groups");
     for (LLCullResult::sg_iterator iter = sCull->beginDrawableGroups(); iter != sCull->endDrawableGroups(); ++iter)
@@ -16806,4 +16847,458 @@ void LLPipeline::rebuildTerrain()
         LLViewerRegion* region = *iter;
         region->dirtyAllPatches();
     }
+}
+
+// ---- QuasarParallelShadowCull ----------------------------------------------------------------------------------------
+//
+// A shadow map's cull, split across the job pool's cores. Two parts of it run on several threads at once:
+//   - updateCull's partitions (every region's volumes, bridges, avatars, trees...), each partition culled whole on one
+//     thread into a result of its own;
+//   - stateSort's walk of the groups drawn by drawable: each drawable marked seen, and each bridge's own octree culled
+//     (an avatar, every attachment, every moving linkset), the groups split into runs, a run to a thread.
+// Each thread's result is merged into the real one in order once all are done, and anything that must stay on the main
+// thread (rebuilding meshes, terrain's cull, the object cache's) does.
+//
+// Why the threads never write the same thing: a partition holds each drawable, bridge and group once, and a bridge's
+// octree is its own, so a thread's setVisible, rebound and nested culls touch only what it was handed. What they share
+// they only read: the cameras, the render types, the settings' cached values, the regions. Two reads cross threads on
+// purpose: an attachment asks whether its avatar's drawable was seen this frame or the last (LLSpatialBridge::setVisible,
+// "more than a frame" ago), and the avatar's own cull may be stamping it on another core; either answer lets it through.
+// The avatars' lazily kept answers (muted, jelly dolled, impostor, buddy) are asked once on the main thread first, so the
+// threads only ever read them. The cull's per-thread flags (the camera, the pass, the spot and probe avatar filters,
+// the sun's small-caster test) are copied onto each worker for the job.
+//
+// Only while no occlusion query is read or issued (sUseOcclusion 0: the shadow passes), and never for a cutout frame.
+// QuasarParallelShadowCull 2 also culls every parallel job again on the main thread alone, into a scratch result, and
+// compares the two: what the status line counts as mismatches.
+
+namespace
+{
+    struct QLCullThreadState
+    {
+        LLViewerCamera::eCameraID      mCamera = LLViewerCamera::CAMERA_WORLD;
+        S32                            mUseOcclusion = 0;
+        bool                           mShadowRender = false;
+        bool                           mImpostorRender = false;
+        bool                           mMovingOnly = false;
+        bool                           mProbeSkips = false;
+        bool                           mProbeActive = false;
+        QLSunCasterCull                mSunCaster;
+        QLSpotAvatarFilter             mSpot;
+        std::vector<const LLVOAvatar*> mProbeAvatars;
+
+        void capture()
+        {
+            mCamera         = LLViewerCamera::sCurCameraID;
+            mUseOcclusion   = LLPipeline::sUseOcclusion;
+            mShadowRender   = LLPipeline::sShadowRender;
+            mImpostorRender = LLPipeline::sImpostorRender;
+            mMovingOnly     = sQLCullMovingOnly;
+            mProbeSkips     = gQLProbeCaptureSkipsAvatars;
+            mProbeActive    = sProbeAvatarsActive;
+            mSunCaster      = sSunCasterCull;
+            mSpot           = sSpotAvatars;
+            mProbeAvatars   = sProbeAvatars;
+        }
+
+        // On a worker; on the main thread, where they were taken from, it changes nothing.
+        void apply() const
+        {
+            LLViewerCamera::sCurCameraID = mCamera;
+            LLPipeline::sUseOcclusion    = mUseOcclusion;
+            LLPipeline::sShadowRender    = mShadowRender;
+            LLPipeline::sImpostorRender  = mImpostorRender;
+            sQLCullMovingOnly            = mMovingOnly;
+            gQLProbeCaptureSkipsAvatars  = mProbeSkips;
+            sProbeAvatarsActive          = mProbeActive;
+            sSunCasterCull               = mSunCaster;
+            sSpotAvatars                 = mSpot;
+            sProbeAvatars                = mProbeAvatars;
+        }
+    };
+
+    struct QLCullSlot
+    {
+        std::unique_ptr<LLCullResult> mResult;
+        S32                           mNodes = 0;
+    };
+
+    struct QLParallelCullStats
+    {
+        U32 mFrame = 0;
+        // This frame's, so far, and the last whole frame's.
+        U32 mPartJobs = 0, mParts = 0, mMarkJobs = 0, mGroups = 0, mChecks = 0, mMismatches = 0;
+        U32 mLastPartJobs = 0, mLastParts = 0, mLastMarkJobs = 0, mLastGroups = 0, mLastChecks = 0, mLastMismatches = 0;
+        U32 mTotalMismatches = 0;
+        std::string mLastMismatch;
+
+        void roll()
+        {
+            const U32 frame = LLFrameTimer::getFrameCount();
+            if (frame != mFrame)
+            {
+                mLastPartJobs = mPartJobs;
+                mLastParts = mParts;
+                mLastMarkJobs = mMarkJobs;
+                mLastGroups = mGroups;
+                mLastChecks = mChecks;
+                mLastMismatches = mMismatches;
+                mPartJobs = mParts = mMarkJobs = mGroups = mChecks = mMismatches = 0;
+                mFrame = frame;
+            }
+        }
+    };
+    QLParallelCullStats sQLParallelCullStats;
+
+    S32 ql_parallel_shadow_cull_mode()
+    {
+        static LLCachedControl<S32> mode(gSavedSettings, "QuasarParallelShadowCull", 0);
+        return mode();
+    }
+
+    void ql_prepare_slots(std::vector<QLCullSlot>& slots, size_t count)
+    {
+        if (slots.size() < count)
+        {
+            slots.resize(count);
+        }
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (!slots[i].mResult)
+            {
+                slots[i].mResult = std::make_unique<LLCullResult>();
+            }
+            slots[i].mResult->clear();
+            slots[i].mNodes = 0;
+        }
+    }
+
+    // What an avatar keeps from the first time it is asked (in a frame, or until a list changes) is asked here, on the
+    // main thread, before the cull's threads only read it. Each call is one the cull makes (LLPipeline::markVisible,
+    // LLSpatialBridge::setVisible), or one they make in turn; the function-local cached settings they read are made here
+    // too, the first time, rather than on a worker.
+    void ql_warm_avatars()
+    {
+        for (LLCharacter* character : LLCharacter::sInstances)
+        {
+            LLVOAvatar* avatar = static_cast<LLVOAvatar*>(character);
+            if (!avatar || avatar->isDead())
+            {
+                continue;
+            }
+            avatar->isBuddy();
+            avatar->isInMuteList();
+            avatar->isTooSlow();
+            avatar->isTooComplex();
+            avatar->isVisuallyMuted();
+            avatar->isImpostor();
+            avatar->getOverallAppearance();
+            avatar->isFullyLoaded();
+            avatar->isVisible();
+        }
+    }
+
+    // Moves every list of `from` onto the end of `to`, in order.
+    void ql_merge_result(LLCullResult& to, LLCullResult& from)
+    {
+        for (LLCullResult::sg_iterator i = from.beginVisibleGroups(); i != from.endVisibleGroups(); ++i)
+        {
+            to.pushVisibleGroup(*i);
+        }
+        for (LLCullResult::sg_iterator i = from.beginAlphaGroups(); i != from.endAlphaGroups(); ++i)
+        {
+            to.pushAlphaGroup(*i);
+        }
+        for (LLCullResult::sg_iterator i = from.beginRiggedAlphaGroups(); i != from.endRiggedAlphaGroups(); ++i)
+        {
+            to.pushRiggedAlphaGroup(*i);
+        }
+        for (LLCullResult::sg_iterator i = from.beginOcclusionGroups(); i != from.endOcclusionGroups(); ++i)
+        {
+            to.pushOcclusionGroup(*i);
+        }
+        for (LLCullResult::sg_iterator i = from.beginDrawableGroups(); i != from.endDrawableGroups(); ++i)
+        {
+            to.pushDrawableGroup(*i);
+        }
+        for (LLCullResult::drawable_iterator i = from.beginVisibleList(); i != from.endVisibleList(); ++i)
+        {
+            to.pushDrawable(*i);
+        }
+        for (LLCullResult::bridge_iterator i = from.beginVisibleBridge(); i != from.endVisibleBridge(); ++i)
+        {
+            to.pushBridge(*i);
+        }
+    }
+
+    // Where each of a result's lists ended, so that what was merged after can be told apart.
+    struct QLResultMarks
+    {
+        U32 mVisibleGroups = 0, mDrawableGroups = 0, mVisibleList = 0, mBridges = 0;
+
+        static QLResultMarks of(LLCullResult& r)
+        {
+            QLResultMarks m;
+            m.mVisibleGroups  = r.getVisibleGroupsSize();
+            m.mDrawableGroups = r.getDrawableGroupsSize();
+            m.mVisibleList    = r.getVisibleListSize();
+            m.mBridges        = r.getVisibleBridgeSize();
+            return m;
+        }
+    };
+
+    template <class T>
+    bool ql_same_members(T* a_begin, T* a_end, T* b_begin, T* b_end)
+    {
+        static std::vector<T> a, b;
+        a.assign(a_begin, a_end);
+        b.assign(b_begin, b_end);
+        std::sort(a.begin(), a.end());
+        std::sort(b.begin(), b.end());
+        return a == b;
+    }
+
+    // The check mode: what the parallel job added to `result` after `marks`, against what the single-threaded walk put
+    // into `scratch` (from `scratch_marks` on), as sets: the order differs by design.
+    void ql_compare(const char* what, LLCullResult& result, const QLResultMarks& marks, LLCullResult& scratch,
+                    const QLResultMarks& scratch_marks)
+    {
+        QLParallelCullStats& stats = sQLParallelCullStats;
+        ++stats.mChecks;
+        std::string bad;
+        if (!ql_same_members(result.beginVisibleGroups() + marks.mVisibleGroups, result.endVisibleGroups(),
+                             scratch.beginVisibleGroups() + scratch_marks.mVisibleGroups, scratch.endVisibleGroups()))
+        {
+            bad += llformat(" groups %u/%u", result.getVisibleGroupsSize() - marks.mVisibleGroups,
+                            scratch.getVisibleGroupsSize() - scratch_marks.mVisibleGroups);
+        }
+        if (!ql_same_members(result.beginDrawableGroups() + marks.mDrawableGroups, result.endDrawableGroups(),
+                             scratch.beginDrawableGroups() + scratch_marks.mDrawableGroups, scratch.endDrawableGroups()))
+        {
+            bad += llformat(" drawable groups %u/%u", result.getDrawableGroupsSize() - marks.mDrawableGroups,
+                            scratch.getDrawableGroupsSize() - scratch_marks.mDrawableGroups);
+        }
+        if (!ql_same_members(result.beginVisibleList() + marks.mVisibleList, result.endVisibleList(),
+                             scratch.beginVisibleList() + scratch_marks.mVisibleList, scratch.endVisibleList()))
+        {
+            bad += llformat(" drawables %u/%u", result.getVisibleListSize() - marks.mVisibleList,
+                            scratch.getVisibleListSize() - scratch_marks.mVisibleList);
+        }
+        if (!ql_same_members(result.beginVisibleBridge() + marks.mBridges, result.endVisibleBridge(),
+                             scratch.beginVisibleBridge() + scratch_marks.mBridges, scratch.endVisibleBridge()))
+        {
+            bad += llformat(" bridges %u/%u", result.getVisibleBridgeSize() - marks.mBridges,
+                            scratch.getVisibleBridgeSize() - scratch_marks.mBridges);
+        }
+        if (!bad.empty())
+        {
+            ++stats.mMismatches;
+            ++stats.mTotalMismatches;
+            stats.mLastMismatch = llformat("%s, camera %d:", what, (S32)LLViewerCamera::sCurCameraID) + bad;
+            LL_WARNS_ONCE("QuasarParallelCull") << "parallel shadow cull differs from the single-threaded one: "
+                                                << stats.mLastMismatch << LL_ENDL;
+        }
+    }
+
+    // Marks one drawable group seen and each of its drawables (a bridge culling its own octree in turn), as stateSort's
+    // walk does, short of rebuilding its mesh. Never with occlusion on (the parallel walk's condition).
+    void ql_mark_group(LLSpatialGroup* group, LLCamera& camera)
+    {
+        if (group->isDead())
+        {
+            return;
+        }
+        group->checkOcclusion();
+        group->setVisible();
+        for (LLSpatialGroup::element_iter i = group->getDataBegin(); i != group->getDataEnd(); ++i)
+        {
+            LLDrawable* drawablep = (LLDrawable*)(*i)->getDrawable();
+            gPipeline.markVisible(drawablep, camera);
+        }
+    }
+
+    // Marks groups [begin, end) of `groups`, then every drawable group the bridges' culls pushed into `into` (sCull) as
+    // they went, as the single-threaded walk reaches the ones pushed onto the end of the list it walks.
+    void ql_mark_groups(LLSpatialGroup* const* groups, U32 begin, U32 end, LLCullResult& into, LLCamera& camera)
+    {
+        for (U32 i = begin; i < end; ++i)
+        {
+            ql_mark_group(groups[i], camera);
+        }
+        for (U32 i = 0; i < into.getDrawableGroupsSize(); ++i)
+        {
+            ql_mark_group(into.beginDrawableGroups()[i], camera);
+        }
+    }
+}
+
+static bool ql_parallel_shadow_cull_wanted()
+{
+    return ql_parallel_shadow_cull_mode() > 0 && LLPipeline::sShadowRender && LLPipeline::sUseOcclusion == 0 &&
+           !LLPipeline::sImpostorRender && !gPipeline.cullingToCutoutSubject() && QLJobPool::instance().workers() > 0;
+}
+
+static void ql_cull_partitions_parallel(const std::vector<LLSpatialPartition*>& parts, LLCamera& camera,
+                                        LLCullResult& result)
+{
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar parallel partition cull");
+    QLParallelCullStats& stats = sQLParallelCullStats;
+    stats.roll();
+
+    ql_warm_avatars();
+
+    static std::vector<QLCullSlot> slots;
+    ql_prepare_slots(slots, parts.size());
+    QLCullThreadState state;
+    state.capture();
+
+    QLJobPool::instance().parallelFor((U32)parts.size(), 1, [&](U32 begin, U32 end)
+    {
+        state.apply();
+        LLCullResult* const saved = sCull;
+        for (U32 i = begin; i < end; ++i)
+        {
+            QLCullSlot& slot = slots[i];
+            sCull = slot.mResult.get();
+            sQLVisibleNodes = &slot.mNodes;
+            parts[i]->cull(camera);
+        }
+        sQLVisibleNodes = nullptr;
+        sCull = saved;
+    });
+
+    const QLResultMarks marks = QLResultMarks::of(result);
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        ql_merge_result(result, *slots[i].mResult);
+        gPipeline.mNumVisibleNodes += slots[i].mNodes;
+    }
+    ++stats.mPartJobs;
+    stats.mParts += (U32)parts.size();
+
+    if (ql_parallel_shadow_cull_mode() >= 2)
+    {
+        static LLCullResult scratch;
+        scratch.clear();
+        LLCullResult* const saved = sCull;
+        sCull = &scratch;
+        S32 nodes = 0;
+        sQLVisibleNodes = &nodes;  // counted once, by the job above
+        for (LLSpatialPartition* part : parts)
+        {
+            part->cull(camera);
+        }
+        sQLVisibleNodes = nullptr;
+        sCull = saved;
+        ql_compare("partitions", result, marks, scratch, QLResultMarks());
+    }
+}
+
+static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& result)
+{
+    // Too few groups to be worth waking the workers for.
+    constexpr U32 MIN_GROUPS = 32;
+    if (!ql_parallel_shadow_cull_wanted() || sCull != &result || result.getDrawableGroupsSize() < MIN_GROUPS)
+    {
+        return false;
+    }
+
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar parallel drawable groups");
+    QLParallelCullStats& stats = sQLParallelCullStats;
+    stats.roll();
+
+    ql_warm_avatars();
+
+    // The groups as the cull left them: the merge below pushes onto the same list.
+    static std::vector<LLSpatialGroup*> groups;
+    groups.assign(result.beginDrawableGroups(), result.endDrawableGroups());
+    const U32 count = (U32)groups.size();
+
+    // A few runs a thread, so that one heavy run (a crowd's avatars, side by side in one partition) is not the whole job.
+    const U32 runs = llmin(count, (QLJobPool::instance().workers() + 1) * 4);
+    static std::vector<QLCullSlot> slots;
+    ql_prepare_slots(slots, runs);
+    QLCullThreadState state;
+    state.capture();
+
+    QLJobPool::instance().parallelFor(runs, 1, [&](U32 begin, U32 end)
+    {
+        state.apply();
+        LLCullResult* const saved = sCull;
+        for (U32 r = begin; r < end; ++r)
+        {
+            QLCullSlot& slot = slots[r];
+            sCull = slot.mResult.get();
+            sQLVisibleNodes = &slot.mNodes;
+            ql_mark_groups(groups.data(), (U32)((U64)count * r / runs), (U32)((U64)count * (r + 1) / runs),
+                           *slot.mResult, camera);
+        }
+        sQLVisibleNodes = nullptr;
+        sCull = saved;
+    });
+
+    const QLResultMarks marks = QLResultMarks::of(result);
+    for (U32 r = 0; r < runs; ++r)
+    {
+        ql_merge_result(result, *slots[r].mResult);
+        gPipeline.mNumVisibleNodes += slots[r].mNodes;
+    }
+    ++stats.mMarkJobs;
+    stats.mGroups += count;
+
+    if (ql_parallel_shadow_cull_mode() >= 2)
+    {
+        static LLCullResult scratch;
+        scratch.clear();
+        sCull = &scratch;
+        S32 nodes = 0;
+        sQLVisibleNodes = &nodes;
+        ql_mark_groups(groups.data(), 0, count, scratch, camera);
+        sQLVisibleNodes = nullptr;
+        sCull = &result;
+        ql_compare("drawable groups", result, marks, scratch, QLResultMarks());
+    }
+
+    // What stays on the main thread: every group's mesh, the cull's and the bridges' alike, rebuilt as the
+    // single-threaded walk rebuilds each once it has marked it.
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar drawable groups rebuild");
+        for (U32 i = 0; i < result.getDrawableGroupsSize(); ++i)
+        {
+            LLSpatialGroup* group = result.beginDrawableGroups()[i];
+            if (!group->isDead())
+            {
+                group->rebuildMesh();
+            }
+        }
+    }
+    return true;
+}
+
+// The parallel shadow cull's line for the status display (llviewerwindow.cpp).
+std::string ql_parallel_cull_info()
+{
+    const S32 mode = ql_parallel_shadow_cull_mode();
+    if (mode <= 0)
+    {
+        return "off (QuasarParallelShadowCull 0)";
+    }
+    if (QLJobPool::instance().workers() == 0)
+    {
+        return "no worker threads (QuasarJobThreads)";
+    }
+    QLParallelCullStats& s = sQLParallelCullStats;
+    s.roll();
+    std::string line = llformat("%u threads, %u partition jobs (%u parts), %u group jobs (%u groups)",
+                                QLJobPool::instance().workers() + 1, s.mLastPartJobs, s.mLastParts, s.mLastMarkJobs,
+                                s.mLastGroups);
+    if (mode >= 2)
+    {
+        line += llformat(" | check: %u/%u differ, %u total", s.mLastMismatches, s.mLastChecks, s.mTotalMismatches);
+        if (!s.mLastMismatch.empty())
+        {
+            line += " (last:" + s.mLastMismatch + ")";
+        }
+    }
+    return line;
 }

@@ -2883,6 +2883,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarParallelShadowCull</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): split each shadow map's cull across the job pool's cores: the regions' partitions, and the avatars', attachments' and moving linksets' own culls. 0 off, 1 on, 2 on and checked every time against the cull on one core (the status line counts what differs; it costs both).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarPreferPerformanceCores</key>
         <map>
             <key>Comment</key>
