@@ -14669,13 +14669,17 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
-            // Where the kept still map holds, what moves is drawn over it every frame rather than the whole map kept
-            // for the stagger's frames (QuasarSunCacheMovingEveryFrame): avatars' shadows then move at the frame rate
-            // in every cascade, for a few hundred draws instead of none.
-            static LLCachedControl<bool> moving_every_frame(gSavedSettings, "QuasarSunCacheMovingEveryFrame", true);
-            if (moving_only[j] && moving_every_frame())
+            // Where the kept still map holds, what moves is drawn over it at the rate QuasarSunCacheMovingRate asks
+            // (1 every frame, 2 every other, 4 every fourth, the cascades taking turns), the whole map kept on the frames
+            // between, rather than at the stagger's rate: avatars' shadows then move as often as asked in every cascade,
+            // for a few hundred draws a time. 0 leaves it to the stagger.
+            static LLCachedControl<S32> moving_rate(gSavedSettings, "QuasarSunCacheMovingRate", 1);
+            const U32 rate = (U32)llclamp((S32)moving_rate(), 0, 8);
+            if (moving_only[j] && rate > 0)
             {
-                keep_cascade[j] = false;
+                const bool due_moving = rate == 1 || ((LLFrameTimer::getFrameCount() + j) % rate) == 0;
+                keep_cascade[j] = !due_moving;
+                moving_only[j]  = due_moving;
             }
             else if (keep_cascade[j])
             {

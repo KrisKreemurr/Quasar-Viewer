@@ -1040,6 +1040,47 @@
       value="1"/>
   </combo_box>
   <!-- End of mirror settings -->
+  <!-- Quasar: how often avatars' sun shadows move (QuasarSunCacheMovingRate) -->
+  <text
+    type="string"
+    length="1"
+    follows="left|top"
+    height="16"
+    layout="topleft"
+    left="420"
+    name="AvatarShadowRateText"
+    text_readonly_color="LabelDisabledColor"
+    top_delta="22"
+    width="170">
+    Avatar Shadow Speed:
+  </text>
+
+  <combo_box
+   control_name="QuasarSunCacheMovingRate"
+   height="18"
+   layout="topleft"
+   left_delta="175"
+   top_delta="0"
+   name="AvatarShadowRate"
+   tool_tip="How often avatars' and moving objects' sun shadows are redrawn over the cached shadows of the build. Faster is smoother, slower is cheaper."
+   width="150">
+    <combo_box.item
+      label="Full speed"
+      name="Full"
+      value="1"/>
+    <combo_box.item
+      label="Half speed"
+      name="Half"
+      value="2"/>
+    <combo_box.item
+      label="Quarter speed"
+      name="Quarter"
+      value="4"/>
+    <combo_box.item
+      label="With the stagger"
+      name="Stagger"
+      value="0"/>
+  </combo_box>
   <!-- Sharpening Settings -->
   <slider
     control_name="RenderCASSharpness"
