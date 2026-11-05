@@ -63,6 +63,9 @@
 #ifndef GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
 #define GL_HANDLE_TYPE_OPAQUE_WIN32_EXT 0x9587
 #endif
+#ifndef GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT
+#define GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT 0x9588
+#endif
 #ifndef GL_LAYOUT_TRANSFER_SRC_EXT
 #define GL_LAYOUT_TRANSFER_SRC_EXT 0x9592
 #endif
@@ -91,6 +94,7 @@ namespace
                                                        GLenum, GLenum, GLsizei, void*);
     typedef void (APIENTRY* QL_PFN_ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     typedef void (APIENTRY* QL_PFN_GetBooleanv)(GLenum, GLboolean*);
+    typedef GLboolean (APIENTRY* QL_PFN_IsObject)(GLuint);
     typedef void (APIENTRY* QL_PFN_BlitNamedFramebuffer)(GLuint, GLuint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
                                                          GLint, GLbitfield, GLenum);
     typedef void (APIENTRY* QL_PFN_MemoryObjectParameteriv)(GLuint, GLenum, const GLint*);
@@ -122,6 +126,7 @@ namespace
         QL_PFN_GetTextureSubImage           GetTextureSubImage = nullptr;
         QL_PFN_ColorMask                    ColorMask = nullptr;
         QL_PFN_GetBooleanv                  GetBooleanv = nullptr;
+        QL_PFN_IsObject                     IsMemoryObjectEXT = nullptr;
         QL_PFN_BlitNamedFramebuffer         BlitNamedFramebuffer = nullptr;
         QL_PFN_CreateObjects                CreateMemoryObjectsEXT = nullptr;
         QL_PFN_DeleteObjects                DeleteMemoryObjectsEXT = nullptr;
@@ -159,6 +164,7 @@ namespace
             QL_GL_LOAD(GetTextureSubImage, "glGetTextureSubImage");
             QL_GL_LOAD(ColorMask, "glColorMask");
             QL_GL_LOAD(GetBooleanv, "glGetBooleanv");
+            QL_GL_LOAD(IsMemoryObjectEXT, "glIsMemoryObjectEXT");
             QL_GL_LOAD(BlitNamedFramebuffer, "glBlitNamedFramebuffer");
             QL_GL_LOAD(CreateMemoryObjectsEXT, "glCreateMemoryObjectsEXT");
             QL_GL_LOAD(DeleteMemoryObjectsEXT, "glDeleteMemoryObjectsEXT");
@@ -322,6 +328,10 @@ struct QLVulkanPresenter::Impl
     U32            mSharedWidth = 0;
     U32            mSharedHeight = 0;
     GLuint         mGLMemory = 0;
+    // The shared memory's handle: an NT handle, kept open while GL holds the import (a driver that imports on its own
+    // thread can come to it after the call returns), or, where those do not share, a global (KMT) handle, never closed.
+    bool           mKMT = false;
+    HANDLE         mSharedHandle = nullptr;
     GLuint         mGLTexture = 0;
     GLuint         mGLFramebuffer = 0;
 
@@ -330,6 +340,8 @@ struct QLVulkanPresenter::Impl
     VkSemaphore mVKDoneVK = VK_NULL_HANDLE;
     GLuint      mGLDoneGL = 0;
     GLuint      mVKDoneGL = 0;
+    HANDLE      mGLDoneHandle = nullptr;
+    HANDLE      mVKDoneHandle = nullptr;
     bool        mGLMustWait = false;  // a read Vulkan signalled the end of that GL has not yet waited for
 
     VkCommandBuffer mCommands[FRAMES_IN_FLIGHT] = {};
@@ -724,7 +736,7 @@ struct QLVulkanPresenter::Impl
     }
 
     // A semaphore Vulkan makes and GL takes a share of.
-    bool createSharedSemaphore(VkSemaphore& vk, GLuint& gl_sem)
+    bool createSharedSemaphore(VkSemaphore& vk, GLuint& gl_sem, HANDLE& kept)
     {
         VkExportSemaphoreCreateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO };
         exported.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
@@ -749,16 +761,19 @@ struct QLVulkanPresenter::Impl
 
         gl.GenSemaphoresEXT(1, &gl_sem);
         gl.ImportSemaphoreWin32HandleEXT(gl_sem, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
-        // Importing takes no ownership of the handle: the import holds its own reference.
-        CloseHandle(handle);
+        // Importing takes no ownership of the handle. It is kept open until shutdown all the same: a driver that
+        // imports on its own thread can come to it after the call returns.
+        kept = handle;
         return gl_sem != 0;
     }
 
     // The image GL copies the frame into and Vulkan copies it out of, at the back buffer's size.
     bool createSharedImage(U32 width, U32 height)
     {
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
         VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
-        external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        external.handleTypes = handle_type;
 
         VkImageCreateInfo image = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         image.pNext         = &external;
@@ -811,7 +826,7 @@ struct QLVulkanPresenter::Impl
         dedicated.image = mShared;
         VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
         exported.pNext       = &dedicated;
-        exported.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        exported.handleTypes = handle_type;
         VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         alloc.pNext           = &exported;
         alloc.allocationSize  = req.size;
@@ -830,24 +845,30 @@ struct QLVulkanPresenter::Impl
 
         VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
         get.memory     = mSharedMemory;
-        get.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        get.handleType = handle_type;
         HANDLE handle  = nullptr;
         result = vkGetMemoryWin32HandleKHR(mDevice, &get, &handle);
         if (result != VK_SUCCESS || !handle)
         {
             return failVK("vkGetMemoryWin32HandleKHR", result);
         }
+        if (!mKMT)
+        {
+            mSharedHandle = handle;  // closed with the image
+        }
 
         // GL's side: a memory object over Vulkan's allocation, a texture stored in it, and a framebuffer to copy into.
         gl.CreateMemoryObjectsEXT(1, &mGLMemory);
         const GLint dedicated_flag = GL_TRUE;
         gl.MemoryObjectParameterivEXT(mGLMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
-        gl.ImportMemoryWin32HandleEXT(mGLMemory, req.size, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
-        CloseHandle(handle);
+        gl.ImportMemoryWin32HandleEXT(mGLMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
 
         gl.CreateTextures(GL_TEXTURE_2D, 1, &mGLTexture);
         gl.TextureParameteri(mGLTexture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
         gl.TextureStorageMem2DEXT(mGLTexture, 1, GL_RGBA8, (GLsizei)width, (GLsizei)height, mGLMemory, 0);
+        // The import and the texture's storage done with before anything is drawn into it.
+        gl.Finish();
 
         logGLErrors("importing the shared image's memory into a texture");
         gl.CreateFramebuffers(1, &mGLFramebuffer);
@@ -860,8 +881,10 @@ struct QLVulkanPresenter::Impl
 
         mSharedWidth  = width;
         mSharedHeight = height;
-        LL_INFOS("Vulkan") << "Shared image " << width << "x" << height << ", " << req.size << " bytes, GL texture "
-                           << mGLTexture << ", framebuffer " << mGLFramebuffer << LL_ENDL;
+        LL_INFOS("Vulkan") << "Shared image " << width << "x" << height << ", " << req.size << " bytes, "
+                           << (mKMT ? "KMT" : "NT") << " handle, GL memory object " << mGLMemory
+                           << (gl.IsMemoryObjectEXT(mGLMemory) ? " (valid)" : " (not a memory object)")
+                           << ", texture " << mGLTexture << ", framebuffer " << mGLFramebuffer << LL_ENDL;
         return true;
     }
 
@@ -891,6 +914,11 @@ struct QLVulkanPresenter::Impl
         {
             vkFreeMemory(mDevice, mSharedMemory, nullptr);
             mSharedMemory = VK_NULL_HANDLE;
+        }
+        if (mSharedHandle)
+        {
+            CloseHandle(mSharedHandle);
+            mSharedHandle = nullptr;
         }
         mSharedWidth = mSharedHeight = 0;
     }
@@ -1064,7 +1092,7 @@ struct QLVulkanPresenter::Impl
     // the screen: Vulkan fills it blue and GL reads a pixel; then GL fills it green and Vulkan reads a pixel into memory
     // the CPU maps. Both reads go to the log. Run once, at start-up, through the same semaphores the frames use; it
     // leaves the image as a frame does, Vulkan's read signalled for GL to wait on.
-    void selfTest()
+    bool selfTest()
     {
         const GLenum general = GL_LAYOUT_GENERAL_EXT;
         VkCommandBuffer cmd = mCommands[0];
@@ -1094,7 +1122,7 @@ struct QLVulkanPresenter::Impl
         if (result != VK_SUCCESS)
         {
             LL_WARNS("Vulkan") << "Self-test: Vulkan's fill not submitted (VkResult " << (S32)result << ")" << LL_ENDL;
-            return;
+            return false;
         }
         vkWaitForFences(mDevice, 1, &mFences[0], VK_TRUE, UINT64_MAX);
 
@@ -1117,7 +1145,7 @@ struct QLVulkanPresenter::Impl
         if (vkCreateBuffer(mDevice, &buffer_info, nullptr, &buffer) != VK_SUCCESS)
         {
             LL_WARNS("Vulkan") << "Self-test: no readback buffer" << LL_ENDL;
-            return;
+            return false;
         }
         VkMemoryRequirements req = {};
         vkGetBufferMemoryRequirements(mDevice, buffer, &req);
@@ -1140,7 +1168,7 @@ struct QLVulkanPresenter::Impl
         {
             vkDestroyBuffer(mDevice, buffer, nullptr);
             LL_WARNS("Vulkan") << "Self-test: no readback memory" << LL_ENDL;
-            return;
+            return false;
         }
         vkBindBufferMemory(mDevice, buffer, buffer_memory, 0);
 
@@ -1188,6 +1216,7 @@ struct QLVulkanPresenter::Impl
         submit.pWaitSemaphores    = &mGLDoneVK;
         submit.pWaitDstStageMask  = &stage;
         result = vkQueueSubmit(mQueue, 1, &submit, mFences[0]);
+        bool vk_saw_green = false;
         if (result == VK_SUCCESS)
         {
             mGLMustWait = true;  // this read signalled Vulkan's semaphore, which the first frame's copy waits for
@@ -1199,6 +1228,7 @@ struct QLVulkanPresenter::Impl
                 LL_INFOS("Vulkan") << "Self-test, GL to Vulkan: GL filled green (0 255 0 255), Vulkan read "
                                    << (S32)px[0] << " " << (S32)px[1] << " " << (S32)px[2] << " " << (S32)px[3]
                                    << LL_ENDL;
+                vk_saw_green = px[0] == 0 && px[1] == 255 && px[2] == 0;
                 vkUnmapMemory(mDevice, buffer_memory);
             }
         }
@@ -1208,6 +1238,9 @@ struct QLVulkanPresenter::Impl
         }
         vkDestroyBuffer(mDevice, buffer, nullptr);
         vkFreeMemory(mDevice, buffer_memory, nullptr);
+        const bool gl_saw_blue = gl_px[0] == 0 && gl_px[1] == 0 && gl_px[2] == 255;
+        LL_INFOS("Vulkan") << "Self-test " << (gl_saw_blue && vk_saw_green ? "passed" : "failed") << LL_ENDL;
+        return gl_saw_blue && vk_saw_green;
     }
 
     bool init(HWND window, bool vsync)
@@ -1215,7 +1248,8 @@ struct QLVulkanPresenter::Impl
         mWindow = window;
         mVSync  = vsync;
         if (!checkGL() || !createInstance() || !createSurface() || !pickDevice() || !createDevice() ||
-            !createSharedSemaphore(mGLDoneVK, mGLDoneGL) || !createSharedSemaphore(mVKDoneVK, mVKDoneGL))
+            !createSharedSemaphore(mGLDoneVK, mGLDoneGL, mGLDoneHandle) ||
+            !createSharedSemaphore(mVKDoneVK, mVKDoneGL, mVKDoneHandle))
         {
             return false;
         }
@@ -1228,9 +1262,22 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
-        if (mShared)
+        if (mShared && !selfTest())
         {
-            selfTest();
+            // An NT handle the driver took no share of: the same image again, through a global (KMT) handle.
+            LL_WARNS("Vulkan") << "The presentation image is not shared through an NT handle; trying a KMT handle"
+                               << LL_ENDL;
+            waitIdle();
+            destroySharedImage();
+            mKMT = true;
+            if (!createSharedImage(width, height))
+            {
+                return false;
+            }
+            if (!selfTest())
+            {
+                return fail("GL and Vulkan do not share the presentation image's memory with this driver");
+            }
         }
 
         mActive = true;
@@ -1254,6 +1301,14 @@ struct QLVulkanPresenter::Impl
         {
             gl.DeleteSemaphoresEXT(1, &mVKDoneGL);
             mVKDoneGL = 0;
+        }
+        for (HANDLE* handle : { &mGLDoneHandle, &mVKDoneHandle })
+        {
+            if (*handle)
+            {
+                CloseHandle(*handle);
+                *handle = nullptr;
+            }
         }
         if (mDevice)
         {
