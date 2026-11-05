@@ -25,7 +25,9 @@
 
 #include "qlvulkanpost.h"
 
+#include "llframetimer.h"
 #include "llglstates.h"
+#include "llstartup.h"
 #include "llrender.h"
 #include "llrendertarget.h"
 #include "llviewercontrol.h"
@@ -152,6 +154,43 @@ std::string QLUILayer::statusLine()
         return "off (QuasarUILayer)";
     }
     return QLVulkanPresenter::uiLayerInfo();
+#else
+    return "not on this platform";
+#endif
+}
+
+// static
+void QLVulkanPost::tick()
+{
+#if QL_VULKAN_PRESENTER
+    static bool done = false;
+    static U32 started_frame = 0;
+    if (done || LLStartUp::getStartupState() < STATE_STARTED)
+    {
+        return;
+    }
+    const U32 frame = LLFrameTimer::getFrameCount();
+    if (started_frame == 0)
+    {
+        started_frame = frame;
+        return;
+    }
+    static LLCachedControl<bool> geometry_test(gSavedSettings, "QuasarVulkanGeometryTest", true);
+    if (frame - started_frame < 300 || !geometry_test())
+    {
+        return;
+    }
+    done = true;
+    gGL.flush();
+    QLVulkanPresenter::geometryTest();
+#endif
+}
+
+// static
+std::string QLVulkanPost::geometryLine()
+{
+#if QL_VULKAN_PRESENTER
+    return QLVulkanPresenter::geometryInfo();
 #else
     return "not on this platform";
 #endif

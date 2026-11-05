@@ -162,6 +162,14 @@ public:
 
     static std::string uiLayerInfo();
 
+    // ---- Shared geometry (step C) --------------------------------------------------------------------------------
+
+    /// Once, with the window's GL context current: whether a buffer Vulkan allocates can be imported by GL and written
+    /// and read both ways. Waits on the CPU for each step, so it is run once, after login, never per frame.
+    static bool geometryTest();
+
+    static std::string geometryInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;

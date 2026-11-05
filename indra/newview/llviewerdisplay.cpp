@@ -1714,6 +1714,12 @@ void render_ui(F32 zoom_factor, int subfield)
     QLDLSSGInputs::capture(!gSnapshot && !gCubeSnapshot && !LLPipeline::sCutoutRender && zoom_factor == 1.f &&
                            subfield == 0 && LLViewerCamera::getInstance()->getZoomFactor() == 1.f);
 
+    // Quasar: the shared-geometry self-test, once, after login.
+    if (!gSnapshot)
+    {
+        QLVulkanPost::tick();
+    }
+
     // A cutout frame is its subject and nothing else. Nothing drawn over the
     // frame belongs to that, and the coverage the subject is lifted out by
     // knows nothing of what would be drawn here.

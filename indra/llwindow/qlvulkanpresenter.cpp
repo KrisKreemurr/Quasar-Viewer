@@ -387,6 +387,8 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdBindDescriptorSets);
     QL_VK_FN(vkCmdPushConstants);
     QL_VK_FN(vkCmdDispatch);
+    QL_VK_FN(vkCmdCopyBuffer);
+    QL_VK_FN(vkCmdFillBuffer);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -619,6 +621,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdBindDescriptorSets);
         QL_VK_DEVICE(vkCmdPushConstants);
         QL_VK_DEVICE(vkCmdDispatch);
+        QL_VK_DEVICE(vkCmdCopyBuffer);
+        QL_VK_DEVICE(vkCmdFillBuffer);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -1890,6 +1894,313 @@ struct QLVulkanPresenter::Impl
             }
         }
         mPassReady = false;
+    }
+
+    // ---- shared geometry (step C of the Vulkan plan) ---------------------------------------------------------
+
+    // Buffers both APIs see, the way to Vulkan drawing the viewer's own meshes (shadows first). For now one test: a
+    // buffer Vulkan allocates and GL imports as an ordinary buffer object; GL writes a pattern and Vulkan reads it back,
+    // then Vulkan writes one and GL reads it back, through two semaphores of its own. Run once, after login, by the
+    // viewer (geometryTest); it waits for each step on the CPU, which once is nothing.
+    typedef void (APIENTRY* QL_PFN_NamedBufferStorageMem)(GLuint, GLsizeiptr, GLuint, GLuint64);
+    typedef void (APIENTRY* QL_PFN_NamedBufferSubData)(GLuint, GLintptr, GLsizeiptr, const void*);
+    typedef void (APIENTRY* QL_PFN_GetNamedBufferSubData)(GLuint, GLintptr, GLsizeiptr, void*);
+    bool        mGeoTested = false;
+    bool        mGeoPassed = false;
+    std::string mGeoNote = "not tested yet";
+
+    void bufferBarrier(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src_access, VkAccessFlags dst_access,
+                       U32 src_family, U32 dst_family, VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage)
+    {
+        VkBufferMemoryBarrier barrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+        barrier.srcAccessMask       = src_access;
+        barrier.dstAccessMask       = dst_access;
+        barrier.srcQueueFamilyIndex = src_family;
+        barrier.dstQueueFamilyIndex = dst_family;
+        barrier.buffer              = buffer;
+        barrier.offset              = 0;
+        barrier.size                = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+    }
+
+    // Memory of the first type with all of `flags` that `bits` allows, or U32_MAX.
+    U32 memoryType(U32 bits, VkMemoryPropertyFlags flags)
+    {
+        VkPhysicalDeviceMemoryProperties mem = {};
+        vkGetPhysicalDeviceMemoryProperties(mPhysical, &mem);
+        for (U32 i = 0; i < mem.memoryTypeCount; ++i)
+        {
+            if ((bits & (1u << i)) && (mem.memoryTypes[i].propertyFlags & flags) == flags)
+            {
+                return i;
+            }
+        }
+        return U32_MAX;
+    }
+
+    bool geometryTest()
+    {
+        if (mGeoTested)
+        {
+            return mGeoPassed;
+        }
+        mGeoTested = true;
+        if (!mActive)
+        {
+            mGeoNote = "not tested: Vulkan does not present";
+            return false;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan geometry self-test");
+
+        auto storage_mem = reinterpret_cast<QL_PFN_NamedBufferStorageMem>(LLWindowWin32::getProcAddress("glNamedBufferStorageMemEXT"));
+        auto create_buffers = reinterpret_cast<QL_PFN_CreateObjects>(LLWindowWin32::getProcAddress("glCreateBuffers"));
+        auto delete_buffers = reinterpret_cast<QL_PFN_DeleteObjects>(LLWindowWin32::getProcAddress("glDeleteBuffers"));
+        auto buffer_sub_data = reinterpret_cast<QL_PFN_NamedBufferSubData>(LLWindowWin32::getProcAddress("glNamedBufferSubData"));
+        auto get_buffer_sub_data = reinterpret_cast<QL_PFN_GetNamedBufferSubData>(LLWindowWin32::getProcAddress("glGetNamedBufferSubData"));
+        if (!storage_mem || !create_buffers || !delete_buffers || !buffer_sub_data || !get_buffer_sub_data)
+        {
+            mGeoNote = "failed: the GL driver lacks glNamedBufferStorageMemEXT or the DSA buffer calls";
+            LL_WARNS("Vulkan") << "Geometry self-test " << mGeoNote << LL_ENDL;
+            return false;
+        }
+
+        constexpr U32 TEST_BYTES = 1 << 20;  // 1 MB
+        constexpr U32 PATTERN_WORDS = 1024;  // 4 KB each way
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        // Everything made, then let go on every way out.
+        VkBuffer       shared = VK_NULL_HANDLE;
+        VkDeviceMemory shared_memory = VK_NULL_HANDLE;
+        HANDLE         shared_handle = nullptr;
+        VkBuffer       host = VK_NULL_HANDLE;
+        VkDeviceMemory host_memory = VK_NULL_HANDLE;
+        VkSemaphore    gl_done_vk = VK_NULL_HANDLE, vk_done_vk = VK_NULL_HANDLE;
+        GLuint         gl_done_gl = 0, vk_done_gl = 0;
+        HANDLE         gl_done_handle = nullptr, vk_done_handle = nullptr;
+        GLuint         gl_memory = 0, gl_buffer = 0;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence        fence = VK_NULL_HANDLE;
+        auto cleanup = [&]()
+        {
+            if (mDevice)
+            {
+                vkDeviceWaitIdle(mDevice);
+            }
+            if (gl.Finish)
+            {
+                gl.Finish();
+            }
+            if (gl_buffer) delete_buffers(1, &gl_buffer);
+            if (gl_memory) gl.DeleteMemoryObjectsEXT(1, &gl_memory);
+            if (gl_done_gl) gl.DeleteSemaphoresEXT(1, &gl_done_gl);
+            if (vk_done_gl) gl.DeleteSemaphoresEXT(1, &vk_done_gl);
+            if (gl_done_vk) vkDestroySemaphore(mDevice, gl_done_vk, nullptr);
+            if (vk_done_vk) vkDestroySemaphore(mDevice, vk_done_vk, nullptr);
+            if (gl_done_handle) CloseHandle(gl_done_handle);
+            if (vk_done_handle) CloseHandle(vk_done_handle);
+            if (fence) vkDestroyFence(mDevice, fence, nullptr);
+            if (host) vkDestroyBuffer(mDevice, host, nullptr);
+            if (host_memory) vkFreeMemory(mDevice, host_memory, nullptr);
+            if (shared) vkDestroyBuffer(mDevice, shared, nullptr);
+            if (shared_memory) vkFreeMemory(mDevice, shared_memory, nullptr);
+            if (shared_handle) CloseHandle(shared_handle);
+        };
+        auto fail = [&](const std::string& why)
+        {
+            mGeoNote = "failed: " + why;
+            LL_WARNS("Vulkan") << "Geometry self-test " << mGeoNote << LL_ENDL;
+            cleanup();
+            return false;
+        };
+
+        // The shared buffer, declared for every use the viewer's geometry could be put to.
+        VkExternalMemoryBufferCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        info.pNext       = &external;
+        info.size        = TEST_BYTES;
+        info.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &info, nullptr, &shared) != VK_SUCCESS)
+        {
+            shared = VK_NULL_HANDLE;
+            return fail("vkCreateBuffer (shared)");
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, shared, &req);
+        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (device_type == U32_MAX)
+        {
+            return fail("no device-local memory for a shared buffer");
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.buffer = shared;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = device_type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &shared_memory) != VK_SUCCESS)
+        {
+            shared_memory = VK_NULL_HANDLE;
+            return fail("vkAllocateMemory (shared)");
+        }
+        vkBindBufferMemory(mDevice, shared, shared_memory, 0);
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = shared_memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return fail("vkGetMemoryWin32HandleKHR (shared buffer)");
+        }
+        if (!mKMT)
+        {
+            shared_handle = handle;  // kept open while GL holds the import, as the images' are
+        }
+
+        // GL's side: a memory object over it, and an ordinary buffer object stored in it.
+        gl.CreateMemoryObjectsEXT(1, &gl_memory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(gl_memory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(gl_memory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        create_buffers(1, &gl_buffer);
+        storage_mem(gl_buffer, (GLsizeiptr)TEST_BYTES, gl_memory, 0);
+        gl.Finish();
+        logGLErrors("importing the shared buffer");
+
+        // A buffer the CPU maps, for Vulkan's reads; the semaphores; a command buffer and a fence.
+        VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        host_info.size        = PATTERN_WORDS * 4;
+        host_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        host_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &host_info, nullptr, &host) != VK_SUCCESS)
+        {
+            host = VK_NULL_HANDLE;
+            return fail("vkCreateBuffer (readback)");
+        }
+        vkGetBufferMemoryRequirements(mDevice, host, &req);
+        const U32 host_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo host_alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        host_alloc.allocationSize  = req.size;
+        host_alloc.memoryTypeIndex = host_type;
+        if (host_type == U32_MAX || vkAllocateMemory(mDevice, &host_alloc, nullptr, &host_memory) != VK_SUCCESS)
+        {
+            host_memory = VK_NULL_HANDLE;
+            return fail("no readback memory");
+        }
+        vkBindBufferMemory(mDevice, host, host_memory, 0);
+        if (!createSharedSemaphore(gl_done_vk, gl_done_gl, gl_done_handle) ||
+            !createSharedSemaphore(vk_done_vk, vk_done_gl, vk_done_handle))
+        {
+            return fail("its semaphores could not be shared");
+        }
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkAllocateCommandBuffers(mDevice, &cmd_info, &cmd) != VK_SUCCESS ||
+            vkCreateFence(mDevice, &fence_info, nullptr, &fence) != VK_SUCCESS)
+        {
+            return fail("no command buffer");
+        }
+
+        // Runs one batch of Vulkan work between GL's signal and GL's wait.
+        auto run = [&](auto&& record) -> bool
+        {
+            gl.SignalSemaphoreEXT(gl_done_gl, 1, &gl_buffer, 0, nullptr, nullptr);
+            gl.Flush();
+            vkResetFences(mDevice, 1, &fence);
+            vkResetCommandBuffer(cmd, 0);
+            VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &begin);
+            bufferBarrier(cmd, shared, 0, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                          VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT);
+            record();
+            bufferBarrier(cmd, shared, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, 0, mQueueFamily,
+                          VK_QUEUE_FAMILY_EXTERNAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            vkEndCommandBuffer(cmd);
+            const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            submit.waitSemaphoreCount   = 1;
+            submit.pWaitSemaphores      = &gl_done_vk;
+            submit.pWaitDstStageMask    = &stage;
+            submit.commandBufferCount   = 1;
+            submit.pCommandBuffers      = &cmd;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores    = &vk_done_vk;
+            if (vkQueueSubmit(mQueue, 1, &submit, fence) != VK_SUCCESS)
+            {
+                return false;  // GL's signal untaken: cleanup waits for the device and lets the semaphores go
+            }
+            vkWaitForFences(mDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+            gl.WaitSemaphoreEXT(vk_done_gl, 1, &gl_buffer, 0, nullptr, nullptr);
+            return true;
+        };
+
+        // GL to Vulkan: GL writes a pattern, Vulkan copies it to memory the CPU reads.
+        std::vector<U32> pattern(PATTERN_WORDS);
+        for (U32 i = 0; i < PATTERN_WORDS; ++i)
+        {
+            pattern[i] = 0x51A50000u + i;
+        }
+        buffer_sub_data(gl_buffer, 0, PATTERN_WORDS * 4, pattern.data());
+        if (!run([&]()
+                 {
+                     VkBufferCopy copy = { 0, 0, PATTERN_WORDS * 4 };
+                     vkCmdCopyBuffer(cmd, shared, host, 1, &copy);
+                 }))
+        {
+            return fail("Vulkan's read could not be submitted");
+        }
+        U32 gl_to_vk_bad = PATTERN_WORDS;
+        void* mapped = nullptr;
+        if (vkMapMemory(mDevice, host_memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS && mapped)
+        {
+            gl_to_vk_bad = 0;
+            const U32* words = static_cast<const U32*>(mapped);
+            for (U32 i = 0; i < PATTERN_WORDS; ++i)
+            {
+                gl_to_vk_bad += words[i] != pattern[i] ? 1 : 0;
+            }
+            vkUnmapMemory(mDevice, host_memory);
+        }
+
+        // Vulkan to GL: Vulkan fills the next 4 KB, GL reads it.
+        constexpr U32 FILL = 0xC0FFEE42u;
+        if (!run([&]() { vkCmdFillBuffer(cmd, shared, PATTERN_WORDS * 4, PATTERN_WORDS * 4, FILL); }))
+        {
+            return fail("Vulkan's write could not be submitted");
+        }
+        std::vector<U32> read_back(PATTERN_WORDS, 0);
+        get_buffer_sub_data(gl_buffer, PATTERN_WORDS * 4, PATTERN_WORDS * 4, read_back.data());
+        logGLErrors("the geometry self-test");
+        U32 vk_to_gl_bad = 0;
+        for (U32 word : read_back)
+        {
+            vk_to_gl_bad += word != FILL ? 1 : 0;
+        }
+
+        mGeoPassed = gl_to_vk_bad == 0 && vk_to_gl_bad == 0;
+        mGeoNote = mGeoPassed ? "shared buffers work (self-test passed)"
+                              : llformat("failed: %u of %u words wrong from GL to Vulkan, %u from Vulkan to GL",
+                                         gl_to_vk_bad, PATTERN_WORDS, vk_to_gl_bad);
+        LL_INFOS("Vulkan") << "Geometry self-test, 1 MB buffer through " << (mKMT ? "a KMT" : "an NT")
+                           << " handle: GL to Vulkan " << (PATTERN_WORDS - gl_to_vk_bad) << "/" << PATTERN_WORDS
+                           << " words right, Vulkan to GL " << (PATTERN_WORDS - vk_to_gl_bad) << "/" << PATTERN_WORDS
+                           << " right: " << (mGeoPassed ? "passed" : "FAILED") << LL_ENDL;
+        cleanup();
+        return mGeoPassed;
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
@@ -3380,6 +3691,22 @@ bool QLVulkanPresenter::sharpen(unsigned src_texture, unsigned dst_texture, unsi
 {
     return sActive && sActive->sharpen((GLuint)src_texture, (GLuint)dst_texture, (U32)width, (U32)height,
                                        reinterpret_cast<const U32*>(cas_const0), reinterpret_cast<const U32*>(cas_const1));
+}
+
+// static
+bool QLVulkanPresenter::geometryTest()
+{
+    return sActive && sActive->geometryTest();
+}
+
+// static
+std::string QLVulkanPresenter::geometryInfo()
+{
+    if (!sActive)
+    {
+        return "needs Vulkan presentation (QuasarVulkanPresent)";
+    }
+    return sActive->mGeoNote;
 }
 
 // static

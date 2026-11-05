@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanGeometryTest</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (with QuasarVulkanPresent): about five seconds after login, test once whether OpenGL and Vulkan can share a geometry buffer, writing and reading it both ways, and show the result on the status line and in the log. The first step toward Vulkan drawing the viewer's own meshes (shadows first). Turn off if it ever causes trouble.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarUILayer</key>
         <map>
             <key>Comment</key>

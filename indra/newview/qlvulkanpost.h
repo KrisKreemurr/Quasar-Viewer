@@ -41,6 +41,11 @@ public:
     static bool sharpen(LLRenderTarget* src, LLRenderTarget* dst, const U32 cas_const0[4], const U32 cas_const1[4]);
 
     static std::string statusLine();
+
+    /// Once a frame, with the window's GL context current: the shared-geometry self-test, run once, about five seconds
+    /// after login (QuasarVulkanGeometryTest).
+    static void tick();
+    static std::string geometryLine();
 };
 
 /// QuasarUILayer: the viewer's 2D interface (windows, chat, menus, toolbars, the debug text) drawn into a layer of its
