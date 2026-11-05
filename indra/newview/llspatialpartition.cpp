@@ -334,10 +334,17 @@ bool LLSpatialGroup::addObject(LLDrawable *drawablep)
     return true;
 }
 
+// pipeline.cpp: bumped as still geometry is built again, for the cached sun shadow (QuasarSunShadowCache).
+extern U32 gQLStillGeometrySerial;
+
 void LLSpatialGroup::rebuildGeom()
 {
     if (!isDead())
     {
+        if (hasState(LLSpatialGroup::GEOM_DIRTY) && !getSpatialPartition()->isBridge())
+        {
+            ++gQLStillGeometrySerial;
+        }
         getSpatialPartition()->rebuildGeom(this);
 
         if (hasState(LLSpatialGroup::MESH_DIRTY))
@@ -351,6 +358,10 @@ void LLSpatialGroup::rebuildMesh()
 {
     if (!isDead())
     {
+        if (hasState(LLSpatialGroup::MESH_DIRTY) && !getSpatialPartition()->isBridge())
+        {
+            ++gQLStillGeometrySerial;
+        }
         getSpatialPartition()->rebuildMesh(this);
     }
 }

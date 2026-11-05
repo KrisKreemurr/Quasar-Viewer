@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarSunShadowCache</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: cached sun shadows. When a sun shadow cascade is drawn whole, what does not move (the build, terrain) is kept; while the camera and sun stay put, later frames copy that in and draw only avatars, attachments and moving objects over it. Drawn whole again when the camera moves or turns more than a little, when still geometry is rebuilt, and every few seconds. Needs RenderShadowCullMode 1. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarSpotShadowMaxAvatars</key>
         <map>
             <key>Comment</key>

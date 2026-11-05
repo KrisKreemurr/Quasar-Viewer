@@ -3585,6 +3585,10 @@ U32 ql_cull_view()
     }
 }
 
+// Quasar: while set, updateCull walks only the partitions of what moves (the bridges', avatars', animesh's): the cached
+// sun shadow's union cull on frames that draw no still casters (QuasarSunShadowCache).
+static bool sQLCullMovingOnly = false;
+
 void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
@@ -3649,6 +3653,11 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
         for (U32 i = 0; i < LLViewerRegion::NUM_PARTITIONS; i++)
         {
             LLSpatialPartition* part = region->getSpatialPartition(i);
+            if (sQLCullMovingOnly && i != LLViewerRegion::PARTITION_BRIDGE && i != LLViewerRegion::PARTITION_AVATAR &&
+                i != LLViewerRegion::PARTITION_CONTROL_AV)
+            {
+                continue;
+            }
             if (part && hasRenderType(part->mDrawableType))
             {
                 parts[count++] = part;
@@ -3683,7 +3692,7 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
         }
 
         //scan the VO Cache tree
-        LLVOCachePartition* vo_part = region->getVOCachePartition();
+        LLVOCachePartition* vo_part = sQLCullMovingOnly ? nullptr : region->getVOCachePartition();
         if(vo_part)
         {
             vo_part->cull(camera, sUseOcclusion > 0);
@@ -13863,13 +13872,27 @@ LLRenderTarget* LLPipeline::getSpotShadowTarget(U32 i)
 // cull uses, so the geometry matches mode 0 exactly), then pass the small individual-
 // drawable and bridge lists through unfiltered. stateSort then builds the cascade's render
 // map from `dst`. Lets RenderShadowCullMode 1 share one octree walk across all cascades.
-static void bucketShadowCull(LLCullResult& src, LLCamera& cam, LLCullResult& dst)
+// Quasar: whether a group is of what moves (a spatial bridge's), for the cached sun shadow (QuasarSunShadowCache).
+static bool ql_group_moves(const LLSpatialGroup* group)
+{
+    const LLSpatialPartition* part = group->getSpatialPartition();
+    return part && part->isBridge();
+}
+
+// casters: 0 all, 1 the still ones only, 2 the moving ones only (EQLCasterSet).
+static void bucketShadowCull(LLCullResult& src, LLCamera& cam, LLCullResult& dst, U8 casters = 0)
 {
     dst.clear();
+    const bool want_still  = casters != 2;
+    const bool want_moving = casters != 1;
 
     for (LLCullResult::sg_iterator i = src.beginVisibleGroups(), end = src.endVisibleGroups(); i != end; ++i)
     {
         LLSpatialGroup* group = *i;
+        if (!(ql_group_moves(group) ? want_moving : want_still))
+        {
+            continue;
+        }
         if (!group->isDead() &&
             cam.AABBInFrustum(group->getObjectBounds()[0], group->getObjectBounds()[1]) > 0)
         {
@@ -13880,6 +13903,10 @@ static void bucketShadowCull(LLCullResult& src, LLCamera& cam, LLCullResult& dst
     for (LLCullResult::sg_iterator i = src.beginDrawableGroups(), end = src.endDrawableGroups(); i != end; ++i)
     {
         LLSpatialGroup* group = *i;
+        if (!(ql_group_moves(group) ? want_moving : want_still))
+        {
+            continue;
+        }
         if (!group->isDead() &&
             cam.AABBInFrustum(group->getObjectBounds()[0], group->getObjectBounds()[1]) > 0)
         {
@@ -13891,7 +13918,17 @@ static void bucketShadowCull(LLCullResult& src, LLCamera& cam, LLCullResult& dst
     // correct.
     for (LLCullResult::drawable_iterator i = src.beginVisibleList(), end = src.endVisibleList(); i != end; ++i)
     {
-        dst.pushDrawable(*i);
+        LLDrawable* drawable = *i;
+        const bool moves = drawable && (drawable->isActive() || drawable->isAvatar());
+        if (moves ? want_moving : want_still)
+        {
+            dst.pushDrawable(drawable);
+        }
+    }
+
+    if (!want_moving)
+    {
+        return;  // bridges are all of what moves
     }
 
     // Quasar: spatial bridges (avatars, attachments, animesh, moving linksets) are not few in a crowd, and each one a
@@ -13940,9 +13977,41 @@ namespace
         U32        mFrame = 0;
         U64        mDepthSerial = 0;  // which build of the map's depth it was drawn into
         U32        mEpoch = 0;
+
+        // Quasar: the cached sun shadow (QuasarSunShadowCache). What the cascade's still casters alone drew, kept, and
+        // the light's camera it was drawn from, for the frames that copy it and draw only what moves over it.
+        LLCamera        mCamera;
+        LLRenderTarget* mStatic = nullptr;  // never freed: the GL context outlives it, and it is only a few maps
+        bool            mStaticValid = false;
+        U32             mStaticFrame = 0;
+        U32             mStaticSerial = 0;
     };
 
     QLShadowCascadeKeep sCascadeKeep[ALRenderResourcePlan::SUN_CASCADES];
+
+    // Which of a cull's casters a cascade's pass draws (bucketShadowCull's casters): the still ones (the region's own
+    // partitions), the moving ones (spatial bridges: avatars, attachments, animesh, linksets that move), or all.
+    enum EQLCasterSet : U8
+    {
+        QL_CASTERS_ALL,
+        QL_CASTERS_STILL,
+        QL_CASTERS_MOVING,
+    };
+
+    // The longest a kept still map is used before it is drawn again regardless, for what changes without a rebuild
+    // (alpha-masked textures arriving, a missed change): about four seconds at sixty frames a second.
+    constexpr U32 SUN_CACHE_MAX_AGE = 240;
+
+    // This frame's counts, for the status line.
+    struct QLSunCacheStats
+    {
+        U32  mFull = 0;
+        U32  mMoving = 0;
+        U32  mKept = 0;
+        U32  mLastChangeFrame = 0;
+        bool mOn = false;
+    };
+    QLSunCacheStats sSunCacheStats;
 
     // Draw every `interval` frames, offset by `phase`, so cascades kept at the same interval take turns.
     struct QLStagger { U32 mInterval; U32 mPhase; };
@@ -14057,6 +14126,69 @@ namespace
         }
         ~QLSpotAvatarScope() { sSpotAvatars.mActive = false; }
     };
+}
+
+// Quasar: bumped whenever still geometry is built again (LLSpatialGroup::rebuildGeom and rebuildMesh outside spatial
+// bridges): the cached sun shadow's still maps no longer hold what the world casts.
+U32 gQLStillGeometrySerial = 0;
+
+// The cached sun shadow's line for the status display (llviewerwindow.cpp).
+std::string ql_sun_shadow_cache_info()
+{
+    const QLSunCacheStats& s = sSunCacheStats;
+    if (!s.mOn)
+    {
+        return "off";
+    }
+    const U32 frame = LLFrameTimer::getFrameCount();
+    return llformat("%u full, %u moving only, %u kept | still geometry changed %u frames ago", s.mFull, s.mMoving,
+                    s.mKept, frame - s.mLastChangeFrame);
+}
+
+namespace
+{
+    // The cached sun shadow's depth copies: a kept still map into the cascade, and the cascade into its kept map.
+    void ql_copy_shadow_depth(LLRenderTarget& dst, LLRenderTarget& src)
+    {
+        if (!gCopyDepthProgram.isComplete())
+        {
+            return;
+        }
+        LL_PROFILE_GPU_ZONE("sun cache depth copy");
+        dst.bindTarget();
+        {
+            LLGLSColorMask no_color(false, false);
+            LLGLDepthTest depth(GL_TRUE, GL_TRUE, GL_ALWAYS);
+            LLGLDisable no_blend(GL_BLEND);
+            LLGLDisable no_cull(GL_CULL_FACE);
+            dst.clear(GL_DEPTH_BUFFER_BIT);
+            gCopyDepthProgram.bind();
+            gCopyDepthProgram.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &src, ALSamplers::PointClamp);
+            gPipeline.mScreenTriangleVB->setBuffer();
+            gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            gCopyDepthProgram.unbindTexture(LLShaderMgr::DEFERRED_DEPTH);
+            gCopyDepthProgram.unbind();
+        }
+        dst.flush();
+    }
+
+    bool ql_ensure_still_map(QLShadowCascadeKeep& kept, const LLRenderTarget& shadow)
+    {
+        if (!kept.mStatic)
+        {
+            kept.mStatic = new LLRenderTarget();
+        }
+        LLRenderTarget& still = *kept.mStatic;
+        if (still.isComplete() && still.getWidth() == shadow.getWidth() && still.getHeight() == shadow.getHeight() &&
+            still.getDepthFormat() == shadow.getDepthFormat())
+        {
+            return true;
+        }
+        still.release();
+        kept.mStaticValid = false;
+        return still.allocate(shadow.getWidth(), shadow.getHeight(), 0, true, false, ALTextureSlot::TT_TEXTURE,
+                              LLRenderTarget::MIPS_NONE, shadow.getDepthFormat());
+    }
 }
 
 // Whether a spot light's shadow leaves this avatar, and what it wears, out (lldrawable.cpp's bridge cull).
@@ -14427,6 +14559,28 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
         static LLCachedControl<S32> shadow_stagger(gSavedSettings, "QuasarRenderShadowStagger", 2);
         const S32 stagger_level = llclamp((S32)shadow_stagger, 0, 2);
         bool keep_cascade[ALRenderResourcePlan::SUN_CASCADES] = {};
+        // Quasar: the cached sun shadow (QuasarSunShadowCache). A cascade the stagger does not keep, whose last full
+        // drawing's still casters are kept and still hold (the camera and sun within the stagger's bounds of where they
+        // were, no still geometry built again since, not too old), copies them in and draws only what moves over them,
+        // through the light's camera it was fitted with: the avatars' shadows follow every frame they are drawn, and the
+        // building's are not drawn again. Only with the single union cull (RenderShadowCullMode 1).
+        static LLCachedControl<bool> sun_cache(gSavedSettings, "QuasarSunShadowCache", true);
+        const bool cache_on = sun_cache() && sShadowCullMode() == 1 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot;
+        bool moving_only[ALRenderResourcePlan::SUN_CASCADES] = {};
+        bool any_full = false;
+        if (mRT == &mMainRT && !gCubeSnapshot)
+        {
+            static U32 last_still_serial = 0;
+            const U32 last_change = sSunCacheStats.mLastChangeFrame;
+            sSunCacheStats = QLSunCacheStats();
+            sSunCacheStats.mOn = cache_on;
+            sSunCacheStats.mLastChangeFrame = last_change;
+            if (gQLStillGeometrySerial != last_still_serial)
+            {
+                last_still_serial = gQLStillGeometrySerial;
+                sSunCacheStats.mLastChangeFrame = LLFrameTimer::getFrameCount();
+            }
+        }
         U32 farthest_drawn = 0;
         for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
         {
@@ -14444,14 +14598,30 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
+            if (!keep_cascade[j] && cache_on && mRT->shadow[j].isComplete())
+            {
+                const QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                const U32 frame = LLFrameTimer::getFrameCount();
+                moving_only[j] = kept.mValid && kept.mStaticValid && kept.mStatic && kept.mStatic->isComplete()
+                    && kept.mEpoch == mShadowStaggerEpoch
+                    && kept.mDepthSerial == mRT->shadow[j].getDepthSerial()
+                    && kept.mStaticSerial == gQLStillGeometrySerial
+                    && frame - kept.mStaticFrame < SUN_CACHE_MAX_AGE
+                    && (camera.getOrigin() - kept.mEye).lengthSquared() <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE
+                    && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS
+                    && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
+            }
             if (!keep_cascade[j])
             {
                 farthest_drawn = j;
+                any_full = any_full || !moving_only[j];
             }
         }
         // The union reaches to the far end of the farthest cascade drawn, past which it held only kept cascades' casters.
         static LLCachedControl<bool> union_to_drawn(gSavedSettings, "QuasarShadowUnionToDrawn", true);
         const F32 union_far = union_to_drawn() ? dist[llmin(farthest_drawn + 1, 4u)] : dist[4];
+        // Where no cascade is drawn whole this frame, the union cull walks only what moves (the bridges' partitions).
+        const bool cull_moving_only = cache_on && !any_full;
 
         if (sShadowCullMode() == 1 && !gCubeSnapshot)
         {
@@ -14528,7 +14698,9 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 sUseOcclusion = 0;
                 // One octree walk for the whole sun shadow. No stateSort here -- each
                 // cascade re-buckets these visible groups and sorts its own render map.
+                sQLCullMovingOnly = cull_moving_only;
                 updateCull(ucam, sUnionShadowResult);
+                sQLCullMovingOnly = false;
                 sUseOcclusion = saved_occlusion;
                 LLPipeline::sShadowRender = saved_shadow_render;
 
@@ -14577,8 +14749,46 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], kept.mProj);
                     mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], keep_trans);
                     ++mShadowCascadesKept;
+                    if (cache_on)
+                    {
+                        ++sSunCacheStats.mKept;
+                    }
                     continue;
                 }
+            }
+
+            // Quasar: the cached sun shadow's frames: the kept still map copied in, what moves drawn over it, through
+            // the light's camera the still map was fitted with. No receivers' walk, no fit, no still casters.
+            if (j < (S32)ALRenderResourcePlan::SUN_CASCADES && moving_only[j] && have_union_cull)
+            {
+                QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                const LLMatrix4a keep_trans = LLRender::sReverseZ ? clip_to_texture(1.f, 0.f) : clip_to_texture(0.5f, 0.5f);
+                view[j] = kept.mView;
+                proj[j] = kept.mProj;
+                mShadowModelview[j] = kept.mView;
+                mShadowProjection[j] = kept.mProj;
+                mShadowError.mV[j] = kept.mError;
+                mShadowFOV.mV[j] = kept.mFOV;
+                mSunShadowMatrix[j].setMul(inv_view, kept.mView);
+                mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], kept.mProj);
+                mSunShadowMatrix[j].setMul(mSunShadowMatrix[j], keep_trans);
+
+                LLCamera shadow_cam = kept.mCamera;
+                LLViewerCamera::setCurrent(shadow_cam);
+
+                LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("sun cache moving casters");
+                ql_copy_shadow_depth(mRT->shadow[j], *kept.mStatic);
+                mRT->shadow[j].bindTarget();
+                mRT->shadow[j].getViewport(gGLViewport);
+                {
+                    static LLCullResult moving[4];
+                    bucketShadowCull(sUnionShadowResult, shadow_cam, moving[j], QL_CASTERS_MOVING);
+                    renderShadow(view[j], proj[j], shadow_cam, moving[j], true, false, 0);
+                }
+                mRT->shadow[j].flush();
+                kept.mFrame = LLFrameTimer::getFrameCount();
+                ++sSunCacheStats.mMoving;
+                continue;
             }
 
             LLVector3 eye = camera.getOrigin();
@@ -14975,16 +15185,47 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 mRT->shadow[j].getViewport(gGLViewport);
                 mRT->shadow[j].clear();
 
+                // Quasar: with the cache on, the still casters first, kept, then what moves over them.
+                const bool keep_still = cache_on && have_union_cull && j < (S32)ALRenderResourcePlan::SUN_CASCADES &&
+                                        ql_ensure_still_map(sCascadeKeep[j], mRT->shadow[j]);
                 {
                     static LLCullResult result[4];
                     if (have_union_cull)
                     {   // re-bucket the shared union cull down to this cascade's frustum
-                        bucketShadowCull(sUnionShadowResult, shadow_cam, result[j]);
+                        bucketShadowCull(sUnionShadowResult, shadow_cam, result[j],
+                                         keep_still ? QL_CASTERS_STILL : QL_CASTERS_ALL);
                     }
                     renderShadow(view[j], proj[j], shadow_cam, result[j], true, !have_union_cull, sun_occlusion);
                 }
 
                 mRT->shadow[j].flush();
+
+                if (j < (S32)ALRenderResourcePlan::SUN_CASCADES)
+                {
+                    QLShadowCascadeKeep& kept = sCascadeKeep[j];
+                    kept.mStaticValid = false;
+                    if (keep_still)
+                    {
+                        ql_copy_shadow_depth(*kept.mStatic, mRT->shadow[j]);
+                        kept.mStaticValid  = true;
+                        kept.mStaticFrame  = LLFrameTimer::getFrameCount();
+                        kept.mStaticSerial = gQLStillGeometrySerial;
+                        kept.mCamera       = shadow_cam;
+
+                        mRT->shadow[j].bindTarget();
+                        mRT->shadow[j].getViewport(gGLViewport);
+                        {
+                            static LLCullResult moving[4];
+                            bucketShadowCull(sUnionShadowResult, shadow_cam, moving[j], QL_CASTERS_MOVING);
+                            renderShadow(view[j], proj[j], shadow_cam, moving[j], true, false, 0);
+                        }
+                        mRT->shadow[j].flush();
+                    }
+                    if (cache_on)
+                    {
+                        ++sSunCacheStats.mFull;
+                    }
+                }
 
                 // Quasar: remember what this map was drawn with, for the frames that keep it.
                 if (mRT == &mMainRT && !gCubeSnapshot && j < (S32)ALRenderResourcePlan::SUN_CASCADES)

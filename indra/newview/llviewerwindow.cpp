@@ -195,6 +195,7 @@
 #include "llworldmapview.h"
 #include "pipeline.h"
 #include "qldlssg.h"
+std::string ql_sun_shadow_cache_info();  // pipeline.cpp (QuasarSunShadowCache)
 #include "qldrawstats.h"
 #include "qlframewarp.h"
 #include "llappviewer.h"
@@ -679,6 +680,8 @@ public:
             addText(xpos, ypos, "Quasar present: " + (gViewerWindow && gViewerWindow->getWindow() ? gViewerWindow->getWindow()->getPresentInfo() : std::string("OpenGL")));
             ypos += y_inc;
             addText(xpos, ypos, "Quasar DLSS-G: " + QLDLSSGInputs::statusLine());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar sun cache: " + ql_sun_shadow_cache_info());
             ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
