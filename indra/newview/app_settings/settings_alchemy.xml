@@ -2677,13 +2677,13 @@
         <key>QuasarVulkanPresent</key>
         <map>
             <key>Comment</key>
-            <string>Quasar (experimental, Windows): put the finished frames on screen through Vulkan instead of OpenGL. Everything is still drawn by OpenGL; this is the first step toward Vulkan rendering and NVIDIA frame generation, and should look and run the same. Needs a restart. If Vulkan cannot start or stops, the viewer goes back to OpenGL on its own; the status line says which is in use.</string>
+            <string>Quasar (Windows, on by default): put the finished frames on screen through Vulkan instead of OpenGL. Hold Shift while the viewer starts to turn it off. Everything is still drawn by OpenGL; this is the first step toward Vulkan rendering and NVIDIA frame generation, and should look and run the same. Needs a restart. If Vulkan cannot start or stops, the viewer goes back to OpenGL on its own; the status line says which is in use.</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>
             <string>Boolean</string>
             <key>Value</key>
-            <integer>0</integer>
+            <integer>1</integer>
         </map>
         <key>QuasarStreamline</key>
         <map>
@@ -2694,7 +2694,7 @@
             <key>Type</key>
             <string>Boolean</string>
             <key>Value</key>
-            <integer>0</integer>
+            <integer>1</integer>
         </map>
         <key>QuasarVulkanGeometryTest</key>
         <map>
