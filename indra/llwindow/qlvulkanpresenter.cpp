@@ -66,6 +66,9 @@
 #ifndef GL_LAYOUT_TRANSFER_SRC_EXT
 #define GL_LAYOUT_TRANSFER_SRC_EXT 0x9592
 #endif
+#ifndef GL_LAYOUT_GENERAL_EXT
+#define GL_LAYOUT_GENERAL_EXT 0x958D
+#endif
 
 namespace
 {
@@ -699,8 +702,16 @@ struct QLVulkanPresenter::Impl
         image.arrayLayers   = 1;
         image.samples       = VK_SAMPLE_COUNT_1_BIT;
         image.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        // Declared for every use GL may make of a texture, so the driver lays the memory out as GL's texture expects:
+        // an image declared for less can be laid out (compressed) in a way GL's view of the same memory does not read.
+        VkFormatProperties shared_props = {};
+        vkGetPhysicalDeviceFormatProperties(mPhysical, VK_FORMAT_R8G8B8A8_UNORM, &shared_props);
         image.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (shared_props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)
+        {
+            image.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
         image.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
         image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         VkResult result = vkCreateImage(mDevice, &image, nullptr, &mShared);
@@ -968,7 +979,7 @@ struct QLVulkanPresenter::Impl
         if (mGLMustWait && mGLTexture)
         {
             // Vulkan's last read signalled the semaphore: GL takes it, so it is left unsignalled for what comes next.
-            const GLenum layout = GL_LAYOUT_TRANSFER_SRC_EXT;
+            const GLenum layout = GL_LAYOUT_GENERAL_EXT;
             gl.WaitSemaphoreEXT(mVKDoneGL, 0, nullptr, 1, &mGLTexture, &layout);
             mGLMustWait = false;
         }
@@ -1128,7 +1139,7 @@ struct QLVulkanPresenter::Impl
     void copyBackBuffer(U32 width, U32 height)
     {
         LL_PROFILE_ZONE_NAMED("vulkan present - gl copy");
-        const GLenum layout = GL_LAYOUT_TRANSFER_SRC_EXT;
+        const GLenum layout = GL_LAYOUT_GENERAL_EXT;
         if (!mLoggedFirstCopy)
         {
             logGLErrors("the viewer's frame, before the first copy");
@@ -1257,8 +1268,8 @@ struct QLVulkanPresenter::Impl
         vkBeginCommandBuffer(cmd, &begin);
 
         // The shared image, from GL, as it left it; the swapchain's, whatever it held, to be written over.
-        imageBarrier(cmd, mShared, 0, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily,
+        imageBarrier(cmd, mShared, 0, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily,
                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         imageBarrier(cmd, mSwapImages[index], 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
@@ -1290,7 +1301,7 @@ struct QLVulkanPresenter::Impl
                 logGLErrors("the green frames");
                 LL_INFOS("Vulkan") << "Diagnosis over: presenting the viewer's frames" << LL_ENDL;
             }
-            vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mSwapImages[index],
+            vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_GENERAL, mSwapImages[index],
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
         }
 
@@ -1298,8 +1309,8 @@ struct QLVulkanPresenter::Impl
                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         // And the shared image back to GL.
-        imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+        imageBarrier(cmd, mShared, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_IMAGE_LAYOUT_GENERAL, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         vkEndCommandBuffer(cmd);
 
