@@ -1,0 +1,38 @@
+// Quasar Viewer: AMD FidelityFX CAS (sharpen only) as a Vulkan compute pass, the first post pass run in Vulkan
+// (QuasarVulkanPost). The filter itself is the viewer's own, newview's app_settings/shaders/class1/deferred/CASF.glsl,
+// whose body scripts/code_tools/build_vulkan_shaders.py pastes in at the marker line below; only the GL declarations at
+// its top are replaced, by the bindings and push constants below. Its output is GL's pass's exactly: alpha 0.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D diffuseRect;          // the frame, as GL left it (rows bottom up)
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform Params
+{
+    uvec4 c0;    // CasSetup's const0
+    uvec4 c1;    // and const1
+    uvec2 size;  // the image's size
+} params;
+
+#define cas_param_0 params.c0
+#define cas_param_1 params.c1
+
+#define A_GPU
+#define A_GLSL
+#define CAS_BETTER_DIAGONALS
+#define CAS_SLOW
+#define CAS_LIBRARY
+
+@CAS_BODY@
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(p), params.size)))
+    {
+        return;
+    }
+    imageStore(outImage, p, vec4(casSharpenedTexel(p), 0.0));
+}

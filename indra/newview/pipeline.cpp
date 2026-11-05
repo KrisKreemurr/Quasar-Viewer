@@ -122,6 +122,7 @@
 #include "llviewershadermgr.h"
 #include "qldrawstats.h"
 #include "qlframewarp.h"
+#include "qlvulkanpost.h"
 #include "qljobpool.h"
 #include "llviewerstats.h"
 #include "llviewerjoystick.h"
@@ -10365,6 +10366,19 @@ bool LLPipeline::applyCAS(LLRenderTarget* src, LLRenderTarget* dst)
             (AF1)src->getWidth(), (AF1)src->getHeight(),  // Input size.
             (AF1)dst->getWidth(), (AF1)dst->getHeight()); // Output size.
 
+        // Quasar: the same filter run in Vulkan (QuasarVulkanPost), where it can be; GL's pass otherwise.
+        if (QLVulkanPost::wanted())
+        {
+            gCASProgram.unbind();
+            dst->flush();
+            if (QLVulkanPost::sharpen(src, dst, const0, const1))
+            {
+                return true;
+            }
+            dst->bindTarget();
+            gCASProgram.bind();
+        }
+
         gCASProgram.uniform4uiv(LLShaderMgr::CAS_PARAM_0, 1, const0);
         gCASProgram.uniform4uiv(LLShaderMgr::CAS_PARAM_1, 1, const1);
 
@@ -11219,6 +11233,7 @@ void LLPipeline::renderFinalize()
     const bool    visualize     = RenderBufferVisualization > -1 && !cutout;
     const bool    side_by_side  = hasReferenceStill() && ref_wipe_mode == 2 && !suppress_effects;
     const bool    blit_sharpens = cas_sharpness > 0.f && !cutout && chain && gBlitWithEffectsSharpenProgram.isComplete() &&
+                                  !QLVulkanPost::wanted() &&  // Quasar: CAS runs as its own pass, in Vulkan
                                   !glow && !rlv_sphere && !visualize && !sScopeCapture && !mReferenceStillWanted &&
                                   distort <= 0.f && !side_by_side && (S32)sourceBuffer->getWidth() == world_view.getWidth() &&
                                   (S32)sourceBuffer->getHeight() == world_view.getHeight();

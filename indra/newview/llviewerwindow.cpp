@@ -195,6 +195,7 @@
 #include "llworldmapview.h"
 #include "pipeline.h"
 #include "qldlssg.h"
+#include "qlvulkanpost.h"
 std::string ql_sun_shadow_cache_info();  // pipeline.cpp (QuasarSunShadowCache)
 #include "qldrawstats.h"
 #include "qlframewarp.h"
@@ -682,6 +683,8 @@ public:
             addText(xpos, ypos, "Quasar DLSS-G: " + QLDLSSGInputs::statusLine());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar sun cache: " + ql_sun_shadow_cache_info());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan post: " + QLVulkanPost::statusLine());
             ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,

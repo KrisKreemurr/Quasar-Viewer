@@ -46,6 +46,8 @@
 #include <sl_security.h>
 #endif
 
+#include "qlvulkanshaders.h"
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -367,6 +369,24 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkUnmapMemory);
     QL_VK_FN(vkCreateImageView);
     QL_VK_FN(vkDestroyImageView);
+    QL_VK_FN(vkCreateShaderModule);
+    QL_VK_FN(vkDestroyShaderModule);
+    QL_VK_FN(vkCreateDescriptorSetLayout);
+    QL_VK_FN(vkDestroyDescriptorSetLayout);
+    QL_VK_FN(vkCreatePipelineLayout);
+    QL_VK_FN(vkDestroyPipelineLayout);
+    QL_VK_FN(vkCreateComputePipelines);
+    QL_VK_FN(vkDestroyPipeline);
+    QL_VK_FN(vkCreateDescriptorPool);
+    QL_VK_FN(vkDestroyDescriptorPool);
+    QL_VK_FN(vkAllocateDescriptorSets);
+    QL_VK_FN(vkUpdateDescriptorSets);
+    QL_VK_FN(vkCreateSampler);
+    QL_VK_FN(vkDestroySampler);
+    QL_VK_FN(vkCmdBindPipeline);
+    QL_VK_FN(vkCmdBindDescriptorSets);
+    QL_VK_FN(vkCmdPushConstants);
+    QL_VK_FN(vkCmdDispatch);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -581,6 +601,24 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkQueueSubmit);
         QL_VK_DEVICE(vkCreateImageView);
         QL_VK_DEVICE(vkDestroyImageView);
+        QL_VK_DEVICE(vkCreateShaderModule);
+        QL_VK_DEVICE(vkDestroyShaderModule);
+        QL_VK_DEVICE(vkCreateDescriptorSetLayout);
+        QL_VK_DEVICE(vkDestroyDescriptorSetLayout);
+        QL_VK_DEVICE(vkCreatePipelineLayout);
+        QL_VK_DEVICE(vkDestroyPipelineLayout);
+        QL_VK_DEVICE(vkCreateComputePipelines);
+        QL_VK_DEVICE(vkDestroyPipeline);
+        QL_VK_DEVICE(vkCreateDescriptorPool);
+        QL_VK_DEVICE(vkDestroyDescriptorPool);
+        QL_VK_DEVICE(vkAllocateDescriptorSets);
+        QL_VK_DEVICE(vkUpdateDescriptorSets);
+        QL_VK_DEVICE(vkCreateSampler);
+        QL_VK_DEVICE(vkDestroySampler);
+        QL_VK_DEVICE(vkCmdBindPipeline);
+        QL_VK_DEVICE(vkCmdBindDescriptorSets);
+        QL_VK_DEVICE(vkCmdPushConstants);
+        QL_VK_DEVICE(vkCmdDispatch);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -1448,9 +1486,410 @@ struct QLVulkanPresenter::Impl
 
     bool fgFail(const std::string& why)
     {
+        if (mMakingPassImages)
+        {
+            mPassNote = "failed: " + why;
+            LL_WARNS("Vulkan") << "Vulkan post passes: " << why << LL_ENDL;
+            return false;
+        }
         mFGNote = "inputs failed: " + why;
         LL_WARNS("Vulkan") << "DLSS Frame Generation: " << why << LL_ENDL;
         return false;
+    }
+    bool mMakingPassImages = false;  // createFGImage's failures are the post passes' (fgFail)
+
+    // ---- post passes in Vulkan (QuasarVulkanPost) -----------------------------------------------------------
+
+    // GL hands a frame over mid-chain: it copies the frame into mPassIn and signals mPassGLDone; Vulkan waits for that,
+    // runs the pass into mPassOut and signals mPassVKDone; GL waits for that and copies mPassOut back. Each call balances
+    // both semaphores, so nothing is pending between calls.
+    FGImage               mPassIn;
+    FGImage               mPassOut;
+    U32                   mPassWidth = 0;
+    U32                   mPassHeight = 0;
+    VkSemaphore           mPassGLDoneVK = VK_NULL_HANDLE;
+    VkSemaphore           mPassVKDoneVK = VK_NULL_HANDLE;
+    GLuint                mPassGLDoneGL = 0;
+    GLuint                mPassVKDoneGL = 0;
+    HANDLE                mPassGLDoneHandle = nullptr;
+    HANDLE                mPassVKDoneHandle = nullptr;
+    VkShaderModule        mCASModule = VK_NULL_HANDLE;
+    VkDescriptorSetLayout mPassSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mPassLayout = VK_NULL_HANDLE;
+    VkPipeline            mCASPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool      mPassPool = VK_NULL_HANDLE;
+    VkDescriptorSet       mPassSet = VK_NULL_HANDLE;
+    VkSampler             mPassSampler = VK_NULL_HANDLE;
+    VkCommandBuffer       mPassCommands[FRAMES_IN_FLIGHT] = {};
+    VkFence               mPassFences[FRAMES_IN_FLIGHT] = {};
+    GLuint                mGLPassReadFB = 0;
+    GLuint                mGLPassDrawFB = 0;
+    U64                   mPassCount = 0;
+    bool                  mPassReady = false;   // the pipeline is made
+    bool                  mPassFailed = false;  // something failed: GL runs its own passes for the rest of the session
+    std::string           mPassNote = "not used yet";
+
+    bool passFail(const std::string& why)
+    {
+        mPassNote = "failed: " + why;
+        mPassFailed = true;
+        LL_WARNS("Vulkan") << "Vulkan post passes: " << why << LL_ENDL;
+        return false;
+    }
+
+    // The semaphores, the compute pipeline and what it binds, made once.
+    bool createPassPipeline()
+    {
+        if (!createSharedSemaphore(mPassGLDoneVK, mPassGLDoneGL, mPassGLDoneHandle) ||
+            !createSharedSemaphore(mPassVKDoneVK, mPassVKDoneGL, mPassVKDoneHandle))
+        {
+            return passFail("its semaphores could not be shared with GL");
+        }
+
+        VkShaderModuleCreateInfo module = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        module.codeSize = sizeof(ql_spv_qlcas_comp);
+        module.pCode    = ql_spv_qlcas_comp;
+        VkResult result = vkCreateShaderModule(mDevice, &module, nullptr, &mCASModule);
+        if (result != VK_SUCCESS)
+        {
+            mCASModule = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreateShaderModule (CAS) failed (VkResult %d)", (S32)result));
+        }
+
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        set_info.bindingCount = 2;
+        set_info.pBindings    = bindings;
+        result = vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mPassSetLayout);
+        if (result != VK_SUCCESS)
+        {
+            mPassSetLayout = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreateDescriptorSetLayout failed (VkResult %d)", (S32)result));
+        }
+
+        VkPushConstantRange push = {};
+        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push.size       = 40;  // two uvec4 and a uvec2
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layout_info.setLayoutCount         = 1;
+        layout_info.pSetLayouts            = &mPassSetLayout;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges    = &push;
+        result = vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &mPassLayout);
+        if (result != VK_SUCCESS)
+        {
+            mPassLayout = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreatePipelineLayout failed (VkResult %d)", (S32)result));
+        }
+
+        VkComputePipelineCreateInfo pipe = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        pipe.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipe.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipe.stage.module = mCASModule;
+        pipe.stage.pName  = "main";
+        pipe.layout       = mPassLayout;
+        result = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &pipe, nullptr, &mCASPipeline);
+        if (result != VK_SUCCESS)
+        {
+            mCASPipeline = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreateComputePipelines (CAS) failed (VkResult %d)", (S32)result));
+        }
+
+        VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
+                                          { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 } };
+        VkDescriptorPoolCreateInfo pool = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool.maxSets       = 1;
+        pool.poolSizeCount = 2;
+        pool.pPoolSizes    = sizes;
+        result = vkCreateDescriptorPool(mDevice, &pool, nullptr, &mPassPool);
+        if (result != VK_SUCCESS)
+        {
+            mPassPool = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreateDescriptorPool failed (VkResult %d)", (S32)result));
+        }
+        VkDescriptorSetAllocateInfo alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        alloc.descriptorPool     = mPassPool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts        = &mPassSetLayout;
+        result = vkAllocateDescriptorSets(mDevice, &alloc, &mPassSet);
+        if (result != VK_SUCCESS)
+        {
+            mPassSet = VK_NULL_HANDLE;
+            return passFail(llformat("vkAllocateDescriptorSets failed (VkResult %d)", (S32)result));
+        }
+
+        VkSamplerCreateInfo sampler = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sampler.magFilter    = VK_FILTER_NEAREST;
+        sampler.minFilter    = VK_FILTER_NEAREST;
+        sampler.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        result = vkCreateSampler(mDevice, &sampler, nullptr, &mPassSampler);
+        if (result != VK_SUCCESS)
+        {
+            mPassSampler = VK_NULL_HANDLE;
+            return passFail(llformat("vkCreateSampler failed (VkResult %d)", (S32)result));
+        }
+
+        VkCommandBufferAllocateInfo cmd = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd.commandPool        = mCommandPool;
+        cmd.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd.commandBufferCount = FRAMES_IN_FLIGHT;
+        result = vkAllocateCommandBuffers(mDevice, &cmd, mPassCommands);
+        if (result != VK_SUCCESS)
+        {
+            return passFail(llformat("vkAllocateCommandBuffers (passes) failed (VkResult %d)", (S32)result));
+        }
+        for (VkFence& fence : mPassFences)
+        {
+            VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            result = vkCreateFence(mDevice, &fence_info, nullptr, &fence);
+            if (result != VK_SUCCESS)
+            {
+                fence = VK_NULL_HANDLE;
+                return passFail(llformat("vkCreateFence (passes) failed (VkResult %d)", (S32)result));
+            }
+        }
+        gl.CreateFramebuffers(1, &mGLPassReadFB);
+        gl.CreateFramebuffers(1, &mGLPassDrawFB);
+        mPassReady = true;
+        LL_INFOS("Vulkan") << "Vulkan post passes ready (CAS compute pipeline)" << LL_ENDL;
+        return true;
+    }
+
+    // The two hand-over images at the frame's size (RGBA16F, which holds the post chain's 10-bit colour as it is),
+    // made again only when the size changes, with both APIs idle.
+    bool ensurePassImages(U32 width, U32 height)
+    {
+        if (mPassIn.image && mPassWidth == width && mPassHeight == height)
+        {
+            return true;
+        }
+        waitIdle();
+        destroyFGImage(mPassIn);
+        destroyFGImage(mPassOut);
+        mMakingPassImages = true;
+        const bool made = createFGImage(mPassIn, VK_FORMAT_R16G16B16A16_SFLOAT, GL_RGBA16F, width, height, "post pass input") &&
+                          createFGImage(mPassOut, VK_FORMAT_R16G16B16A16_SFLOAT, GL_RGBA16F, width, height, "post pass output");
+        mMakingPassImages = false;
+        if (!made || !(mPassOut.usage & VK_IMAGE_USAGE_STORAGE_BIT))
+        {
+            destroyFGImage(mPassIn);
+            destroyFGImage(mPassOut);
+            return passFail(made ? "RGBA16F images cannot be written by a compute shader here" : mPassNote);
+        }
+        VkDescriptorImageInfo in_info = { mPassSampler, mPassIn.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo out_info = { VK_NULL_HANDLE, mPassOut.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet writes[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }, { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET } };
+        writes[0].dstSet          = mPassSet;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo      = &in_info;
+        writes[1].dstSet          = mPassSet;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo      = &out_info;
+        vkUpdateDescriptorSets(mDevice, 2, writes, 0, nullptr);
+        mPassWidth  = width;
+        mPassHeight = height;
+        LL_INFOS("Vulkan") << "Vulkan post pass images " << width << "x" << height << " (RGBA16F)" << LL_ENDL;
+        return true;
+    }
+
+    bool sharpen(GLuint src, GLuint dst, U32 width, U32 height, const U32 c0[4], const U32 c1[4])
+    {
+        if (!mActive || mPassFailed || !src || !dst || width == 0 || height == 0)
+        {
+            return false;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan post - cas");
+        if (!mPassReady && !createPassPipeline())
+        {
+            return false;
+        }
+        if (!ensurePassImages(width, height))
+        {
+            return false;
+        }
+
+        const GLint w = (GLint)width;
+        const GLint h = (GLint)height;
+        GLuint textures[2] = { mPassIn.glTexture, mPassOut.glTexture };
+        const GLenum layouts[2] = { GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT };
+
+        // GL: the frame into Vulkan's input, then the signal.
+        GLCopyState state = beginGLCopy();
+        gl.NamedFramebufferTexture(mGLPassReadFB, GL_COLOR_ATTACHMENT0, src, 0);
+        gl.NamedFramebufferReadBuffer(mGLPassReadFB, GL_COLOR_ATTACHMENT0);
+        gl.BlitNamedFramebuffer(mGLPassReadFB, mPassIn.glFramebuffer, 0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT,
+                                GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLPassReadFB, GL_COLOR_ATTACHMENT0, 0, 0);
+        endGLCopy(state);
+        gl.SignalSemaphoreEXT(mPassGLDoneGL, 0, nullptr, 2, textures, layouts);
+        gl.Flush();
+
+        // Vulkan: the filter.
+        const U32 slot = (U32)(mPassCount % FRAMES_IN_FLIGHT);
+        VkResult result = vkWaitForFences(mDevice, 1, &mPassFences[slot], VK_TRUE, UINT64_MAX);
+        VkCommandBuffer cmd = mPassCommands[slot];
+        if (result == VK_SUCCESS)
+        {
+            vkResetCommandBuffer(cmd, 0);
+            VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &begin);
+            imageBarrier(cmd, mPassIn.image, 0, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            imageBarrier(cmd, mPassOut.image, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            struct { U32 c0[4]; U32 c1[4]; U32 size[2]; } push;
+            memcpy(push.c0, c0, sizeof(push.c0));
+            memcpy(push.c1, c1, sizeof(push.c1));
+            push.size[0] = width;
+            push.size[1] = height;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCASPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPassLayout, 0, 1, &mPassSet, 0, nullptr);
+            vkCmdPushConstants(cmd, mPassLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+            imageBarrier(cmd, mPassIn.image, VK_ACCESS_SHADER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                         mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            imageBarrier(cmd, mPassOut.image, VK_ACCESS_SHADER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                         mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            vkEndCommandBuffer(cmd);
+
+            const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            submit.waitSemaphoreCount   = 1;
+            submit.pWaitSemaphores      = &mPassGLDoneVK;
+            submit.pWaitDstStageMask    = &stage;
+            submit.commandBufferCount   = 1;
+            submit.pCommandBuffers      = &cmd;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores    = &mPassVKDoneVK;
+            vkResetFences(mDevice, 1, &mPassFences[slot]);
+            result = vkQueueSubmit(mQueue, 1, &submit, mPassFences[slot]);
+        }
+        if (result != VK_SUCCESS)
+        {
+            // GL's signal is left with no one to take it: the passes' semaphores cannot be trusted again. GL's own pass
+            // runs from src, which nothing here has touched.
+            return passFail(llformat("the CAS pass could not be submitted (VkResult %d)", (S32)result));
+        }
+
+        // GL: wait for Vulkan on the GPU, then the result into dst.
+        gl.WaitSemaphoreEXT(mPassVKDoneGL, 0, nullptr, 2, textures, layouts);
+        state = beginGLCopy();
+        gl.NamedFramebufferTexture(mGLPassDrawFB, GL_COLOR_ATTACHMENT0, dst, 0);
+        gl.NamedFramebufferReadBuffer(mPassOut.glFramebuffer, GL_COLOR_ATTACHMENT0);
+        gl.BlitNamedFramebuffer(mPassOut.glFramebuffer, mGLPassDrawFB, 0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT,
+                                GL_NEAREST);
+        gl.NamedFramebufferTexture(mGLPassDrawFB, GL_COLOR_ATTACHMENT0, 0, 0);
+        endGLCopy(state);
+        if (mPassCount == 0)
+        {
+            logGLErrors("the first Vulkan CAS pass");
+            LL_INFOS("Vulkan") << "First Vulkan CAS pass " << width << "x" << height << LL_ENDL;
+        }
+        ++mPassCount;
+        mPassNote = "CAS in Vulkan";
+        return true;
+    }
+
+    void destroyPassObjects()
+    {
+        destroyFGImage(mPassIn);
+        destroyFGImage(mPassOut);
+        mPassWidth = mPassHeight = 0;
+        for (VkFence& fence : mPassFences)
+        {
+            if (fence)
+            {
+                vkDestroyFence(mDevice, fence, nullptr);
+                fence = VK_NULL_HANDLE;
+            }
+        }
+        if (mPassSampler)
+        {
+            vkDestroySampler(mDevice, mPassSampler, nullptr);
+            mPassSampler = VK_NULL_HANDLE;
+        }
+        if (mPassPool)
+        {
+            vkDestroyDescriptorPool(mDevice, mPassPool, nullptr);  // frees mPassSet
+            mPassPool = VK_NULL_HANDLE;
+            mPassSet  = VK_NULL_HANDLE;
+        }
+        if (mCASPipeline)
+        {
+            vkDestroyPipeline(mDevice, mCASPipeline, nullptr);
+            mCASPipeline = VK_NULL_HANDLE;
+        }
+        if (mPassLayout)
+        {
+            vkDestroyPipelineLayout(mDevice, mPassLayout, nullptr);
+            mPassLayout = VK_NULL_HANDLE;
+        }
+        if (mPassSetLayout)
+        {
+            vkDestroyDescriptorSetLayout(mDevice, mPassSetLayout, nullptr);
+            mPassSetLayout = VK_NULL_HANDLE;
+        }
+        if (mCASModule)
+        {
+            vkDestroyShaderModule(mDevice, mCASModule, nullptr);
+            mCASModule = VK_NULL_HANDLE;
+        }
+        for (GLuint* fb : { &mGLPassReadFB, &mGLPassDrawFB })
+        {
+            if (*fb)
+            {
+                gl.DeleteFramebuffers(1, fb);
+                *fb = 0;
+            }
+        }
+        if (mPassGLDoneGL)
+        {
+            gl.DeleteSemaphoresEXT(1, &mPassGLDoneGL);
+            mPassGLDoneGL = 0;
+        }
+        if (mPassVKDoneGL)
+        {
+            gl.DeleteSemaphoresEXT(1, &mPassVKDoneGL);
+            mPassVKDoneGL = 0;
+        }
+        for (VkSemaphore* sem : { &mPassGLDoneVK, &mPassVKDoneVK })
+        {
+            if (*sem)
+            {
+                vkDestroySemaphore(mDevice, *sem, nullptr);
+                *sem = VK_NULL_HANDLE;
+            }
+        }
+        for (HANDLE* handle : { &mPassGLDoneHandle, &mPassVKDoneHandle })
+        {
+            if (*handle)
+            {
+                CloseHandle(*handle);
+                *handle = nullptr;
+            }
+        }
+        mPassReady = false;
     }
 
     // Every GL texture over shared memory, in the layout both APIs leave it in, for GL's semaphore calls.
@@ -1966,6 +2405,10 @@ struct QLVulkanPresenter::Impl
         }
         destroySharedImage();
         destroyFGImages();
+        if (mDevice)
+        {
+            destroyPassObjects();
+        }
         if (mGLDoneGL)
         {
             gl.DeleteSemaphoresEXT(1, &mGLDoneGL);
@@ -2573,6 +3016,7 @@ bool QLVulkanPresenter::init(HWND window, bool vsync)
     {
         sStreamline = mImpl.get();
     }
+    sActive = mImpl.get();
     return true;
 }
 
@@ -2581,6 +3025,10 @@ void QLVulkanPresenter::shutdown()
     if (sStreamline == mImpl.get())
     {
         sStreamline = nullptr;
+    }
+    if (sActive == mImpl.get())
+    {
+        sActive = nullptr;
     }
     mImpl->shutdown();
 }
@@ -2610,6 +3058,31 @@ void QLVulkanPresenter::setVSync(bool vsync)
 }
 
 QLVulkanPresenter::Impl* QLVulkanPresenter::sStreamline = nullptr;
+QLVulkanPresenter::Impl* QLVulkanPresenter::sActive = nullptr;
+
+// static
+bool QLVulkanPresenter::postPassesAvailable()
+{
+    return sActive && sActive->mActive && !sActive->mPassFailed;
+}
+
+// static
+bool QLVulkanPresenter::sharpen(unsigned src_texture, unsigned dst_texture, unsigned width, unsigned height,
+                                const unsigned cas_const0[4], const unsigned cas_const1[4])
+{
+    return sActive && sActive->sharpen((GLuint)src_texture, (GLuint)dst_texture, (U32)width, (U32)height,
+                                       reinterpret_cast<const U32*>(cas_const0), reinterpret_cast<const U32*>(cas_const1));
+}
+
+// static
+std::string QLVulkanPresenter::postInfo()
+{
+    if (!sActive || !sActive->mActive)
+    {
+        return "needs Vulkan presentation (QuasarVulkanPresent)";
+    }
+    return sActive->mPassNote + llformat(", %llu passes", (unsigned long long)sActive->mPassCount);
+}
 
 // static
 void QLVulkanPresenter::configureStreamline(bool enable, const std::string& log_dir)

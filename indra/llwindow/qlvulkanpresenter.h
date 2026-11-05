@@ -135,8 +135,24 @@ public:
     /// does not run.
     static unsigned frameGenShownPerDrawn();
 
+    // ---- Post passes in Vulkan (QuasarVulkanPost) ---------------------------------------------------------------
+
+    /// Whether Vulkan presents and can run post passes for the viewer.
+    static bool postPassesAvailable();
+
+    /// AMD CAS sharpening, run in Vulkan: GL's src_texture sharpened into dst_texture, both width x height, any colour
+    /// format GL can blit. cas_const0 and cas_const1 are CasSetup's. GL copies src into an image Vulkan shares, Vulkan
+    /// runs the filter, and GL copies the result into dst, each side waiting for the other on the GPU, not the CPU.
+    /// False where it could not run, dst untouched: the caller runs GL's pass instead.
+    static bool sharpen(unsigned src_texture, unsigned dst_texture, unsigned width, unsigned height,
+                        const unsigned cas_const0[4], const unsigned cas_const1[4]);
+
+    /// For the status line.
+    static std::string postInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;
     static Impl* sStreamline;  // the presenter Streamline runs under, for the per-frame calls; null when none does
+    static Impl* sActive;      // the presenter that presents, for the post passes; null when none does
 };

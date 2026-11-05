@@ -257,6 +257,7 @@ if(AL_BUILD_VIEWER)
     qlcpuschedule.cpp
     qldlssg.cpp
     qlframewarp.cpp
+    qlvulkanpost.cpp
     qlhizcull.cpp
     qljobpool.cpp
     alfloaterscriptstudio.cpp
@@ -1142,6 +1143,7 @@ if(AL_BUILD_VIEWER)
     qldrawstats.h
     qldlssg.h
     qlframewarp.h
+    qlvulkanpost.h
     qlhizcull.h
     qljobpool.h
     altextureboost.h

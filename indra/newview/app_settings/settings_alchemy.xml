@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanPost</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanPresent): run the post passes Vulkan can run in Vulkan instead of OpenGL. For now only CAS sharpening (RenderCASSharpness above 0), as its own pass. It is the groundwork for moving rendering into Vulkan and changes no frame rate. The picture should look the same either way. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarSunShadowCache</key>
         <map>
             <key>Comment</key>
