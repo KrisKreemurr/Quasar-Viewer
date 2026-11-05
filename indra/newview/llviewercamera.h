@@ -57,7 +57,7 @@ public:
         NUM_CAMERAS
     } eCameraID;
 
-    static eCameraID sCurCameraID;
+    static thread_local eCameraID sCurCameraID;  // Quasar: per thread, so another core can cull for another camera
 
     // The camera the draw path is rendering with, held by value: a pass sets
     // its own and puts the one it found back after. setPerspective sets the

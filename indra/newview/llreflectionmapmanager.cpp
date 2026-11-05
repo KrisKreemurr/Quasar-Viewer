@@ -1003,7 +1003,7 @@ void LLReflectionMapManager::doProbeUpdate()
 // At the end of these passes, a radiance map is generated for this probe and placed into the radiance cube map array at the index for this probe.
 // In effect this simulates single-bounce lighting.
 // pipeline.cpp: while set, the capture leaves avatars and their attachments out (QuasarProbeSkipAvatars).
-extern bool gQLProbeCaptureSkipsAvatars;
+extern thread_local bool gQLProbeCaptureSkipsAvatars;
 
 void LLReflectionMapManager::updateProbeFace(LLReflectionMap* probe, U32 face)
 {

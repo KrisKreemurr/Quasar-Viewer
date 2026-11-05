@@ -1016,16 +1016,18 @@ public:
 
     static bool             sShowHUDAttachments;
     static bool             sForceOldBakedUpload; // If true will not use capabilities to upload baked textures.
-    static S32              sUseOcclusion;  // 0 = no occlusion, 1 = read only, 2 = read/write
+    // Quasar: the cull's pass flags are per thread (sUseOcclusion, sShadowRender, sImpostorRender), so another core can
+    // cull for another view with its own; the main thread's are the viewer's as before. QLCullThreadState copies them.
+    static thread_local S32 sUseOcclusion;  // 0 = no occlusion, 1 = read only, 2 = read/write
     static bool             sAutoMaskAlphaDeferred;
     static bool             sAutoMaskAlphaNonDeferred;
     static bool             sBakeSunlight;
     static bool             sNoAlpha;
     static bool             sUseFarClip;
-    static bool             sShadowRender;
+    static thread_local bool sShadowRender;
     static bool             sDynamicLOD;
     static bool             sPickAvatar;
-    static bool             sImpostorRender;
+    static thread_local bool sImpostorRender;
     // Set for the frames of a snapshot cutout (ALRenderIsolation::Scope).
     static bool             sCutoutRender;
     static bool             sUnderWaterRender;

@@ -63,7 +63,7 @@
 LLTrace::CountStatHandle<> LLViewerCamera::sVelocityStat("camera_velocity");
 LLTrace::CountStatHandle<> LLViewerCamera::sAngularVelocityStat("camera_angular_velocity");
 
-LLViewerCamera::eCameraID LLViewerCamera::sCurCameraID = LLViewerCamera::CAMERA_WORLD;
+thread_local LLViewerCamera::eCameraID LLViewerCamera::sCurCameraID = LLViewerCamera::CAMERA_WORLD;
 
 namespace
 {

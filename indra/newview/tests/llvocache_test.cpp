@@ -64,7 +64,7 @@ LLViewerObjectList::~LLViewerObjectList() = default;
 LLDebugBeacon::~LLDebugBeacon() = default;
 LLViewerObjectList gObjectList{};
 void LLViewerObjectList::getUUIDFromLocal(LLUUID&, const U32, const U32, const U32) {}
-LLViewerCamera::eCameraID LLViewerCamera::sCurCameraID{};
+thread_local LLViewerCamera::eCameraID LLViewerCamera::sCurCameraID{};
 void LLViewerObject::unpackUUID(LLDataPackerBinaryBuffer *dp, LLUUID &value, std::string name) {}
 
 bool LLViewerRegion::addVisibleGroup(LLViewerOctreeGroup*) { return false; }

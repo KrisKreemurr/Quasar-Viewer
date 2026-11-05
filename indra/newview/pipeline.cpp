@@ -302,16 +302,16 @@ bool    LLPipeline::sRenderBeacons = false;
 bool    LLPipeline::sRenderHighlight = true;
 LLRender::eTexIndex LLPipeline::sRenderHighlightTextureChannel = LLRender::DIFFUSE_MAP;
 bool    LLPipeline::sForceOldBakedUpload = false;
-S32     LLPipeline::sUseOcclusion = 0;
+thread_local S32  LLPipeline::sUseOcclusion = 0;
 bool    LLPipeline::sAutoMaskAlphaDeferred = true;
 bool    LLPipeline::sAutoMaskAlphaNonDeferred = false;
 bool    LLPipeline::sRenderTransparentWater = true;
 bool    LLPipeline::sBakeSunlight = false;
 bool    LLPipeline::sNoAlpha = false;
 bool    LLPipeline::sUseFarClip = true;
-bool    LLPipeline::sShadowRender = false;
+thread_local bool LLPipeline::sShadowRender = false;
 bool    LLPipeline::sRenderGlow = false;
-bool    LLPipeline::sImpostorRender = false;
+thread_local bool LLPipeline::sImpostorRender = false;
 bool    LLPipeline::sCutoutRender = false;
 bool    LLPipeline::sUnderWaterRender = false;
 bool    LLPipeline::sTextureBindTest = false;
@@ -348,7 +348,7 @@ bool LLPipeline::suppressesLensAndPrintEffects()
 // EventHost API LLPipeline listener.
 static LLPipelineListener sPipelineListener;
 
-static LLCullResult* sCull = NULL;
+static thread_local LLCullResult* sCull = NULL;  // Quasar: per thread, the view each thread culls into
 
 // The colour attachments after the first that the main G-buffer has, in its formats: an avatar's impostor holds the
 // G-buffer's channels (generateImpostor).
@@ -3427,8 +3427,17 @@ bool LLPipeline::getVisibleExtents(LLCamera& camera, LLVector3& min, LLVector3& 
         slots.resize(parts.size());
         const LLVector4a lo_start(X, X, X);
         const LLVector4a hi_start(-X, -X, -X);
+        // The cull's pass flags are per thread: each worker takes the main thread's for the walk.
+        const LLViewerCamera::eCameraID camera_id = LLViewerCamera::sCurCameraID;
+        const S32  use_occlusion  = sUseOcclusion;
+        const bool shadow_render  = sShadowRender;
+        const bool impostor_render = sImpostorRender;
         QLJobPool::instance().parallelFor((U32)parts.size(), 1, [&](U32 begin, U32 end)
         {
+            LLViewerCamera::sCurCameraID = camera_id;
+            sUseOcclusion   = use_occlusion;
+            sShadowRender   = shadow_render;
+            sImpostorRender = impostor_render;
             for (U32 i = begin; i < end; ++i)
             {
                 Extents& slot = slots[i];
@@ -3588,7 +3597,7 @@ U32 ql_cull_view()
 
 // Quasar: while set, updateCull walks only the partitions of what moves (the bridges', avatars', animesh's): the cached
 // sun shadow's union cull on frames that draw no still casters (QuasarSunShadowCache).
-static bool sQLCullMovingOnly = false;
+static thread_local bool sQLCullMovingOnly = false;
 
 void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
 {
@@ -14067,7 +14076,7 @@ namespace
         F32        mStretch  = 1.f;  // how much longer than the caster a low sun draws its shadow, at most 4
         F32        mMinPx    = 0.f;  // the setting: the smallest shadow, in pixels across, worth drawing
     };
-    QLSunCasterCull sSunCasterCull;
+    thread_local QLSunCasterCull sSunCasterCull;
 
     // Arms the test for the scope of one generateSunShadow, and disarms it on every way out.
     struct QLSunCasterCullScope
@@ -14105,7 +14114,7 @@ namespace
         bool                           mActive = false;
         std::vector<const LLVOAvatar*> mAllowed;
     };
-    QLSpotAvatarFilter sSpotAvatars;
+    thread_local QLSpotAvatarFilter sSpotAvatars;
 
     // Arms the filter for one spot light's cull, and disarms it on every way out.
     struct QLSpotAvatarScope
@@ -14234,7 +14243,7 @@ namespace
 // Quasar: set around a reflection probe's capture that leaves avatars out (llreflectionmapmanager.cpp,
 // QuasarProbeSkipAvatars). The render type mask hides the avatars themselves; their attachments are culled as bridges,
 // by the same test as the spot lights' filter below.
-bool gQLProbeCaptureSkipsAvatars = false;
+thread_local bool gQLProbeCaptureSkipsAvatars = false;
 
 // Whether a spot light's shadow, or a reflection probe's capture, leaves this avatar, and what it wears, out
 // (lldrawable.cpp's bridge cull).
