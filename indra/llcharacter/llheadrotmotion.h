@@ -98,6 +98,7 @@ public:
     // called per time step
     // must return true while it is active, and
     // must return false when the motion is completed.
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
     virtual bool onUpdate(F64 time, U8* joint_mask);
 
     // called when a motion is deactivated
@@ -185,6 +186,7 @@ public:
     // called per time step
     // must return true while it is active, and
     // must return false when the motion is completed.
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
     virtual bool onUpdate(F64 time, U8* joint_mask);
 
     // called when a motion is deactivated

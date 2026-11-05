@@ -67,6 +67,7 @@ public:
     virtual LLMotionInitStatus onInitialize(LLCharacter *character);
     virtual bool onActivate();
     virtual void onDeactivate();
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
     virtual bool onUpdate(F64 time, U8* joint_mask);
 
 public:
@@ -106,6 +107,7 @@ public:
     virtual LLMotionInitStatus onInitialize(LLCharacter *character);
     virtual bool onActivate();
     virtual void onDeactivate();
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
     virtual bool onUpdate(F64 time, U8* joint_mask);
     virtual LLJoint::JointPriority getPriority(){return LLJoint::HIGH_PRIORITY;}
     virtual bool getLoop() { return true; }
@@ -156,6 +158,7 @@ public:
     virtual LLMotionInitStatus onInitialize(LLCharacter *character);
     virtual bool onActivate();
     virtual void onDeactivate() {};
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
     virtual bool onUpdate(F64 time, U8* joint_mask);
     virtual LLJoint::JointPriority getPriority(){return LLJoint::HIGHER_PRIORITY;}
     virtual bool getLoop() { return true; }

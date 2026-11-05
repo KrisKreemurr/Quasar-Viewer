@@ -34,6 +34,8 @@
 
 #include "llviewercontrol.h"
 #include "llface.h"
+#include "qljobpool.h"
+#include "llcriticaldamp.h"
 #include "llvoavatar.h"
 #include "llviewerobject.h"
 #include "llviewerwindow.h"
@@ -901,6 +903,20 @@ void LLViewerObjectList::updateApparentAngles(LLAgent &agent)
     LLVOAvatar::cullAvatarsByPixelArea();
 }
 
+// Quasar: how many avatars' motions ran on the job pool last frame, of how many avatars (the status line).
+static U32 sQLPosedLastFrame = 0;
+static U32 sQLAvatarsLastFrame = 0;
+std::string ql_parallel_pose_info()
+{
+    static LLCachedControl<bool> parallel_pose(gSavedSettings, "QuasarParallelAvatarPose", false);
+    if (!parallel_pose())
+    {
+        return "off (QuasarParallelAvatarPose)";
+    }
+    return llformat("%u of %u avatars posed across %u threads", sQLPosedLastFrame, sQLAvatarsLastFrame,
+                    QLJobPool::instance().workers() + 1);
+}
+
 void LLViewerObjectList::update(LLAgent &agent)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_NETWORK;
@@ -1027,6 +1043,15 @@ void LLViewerObjectList::update(LLAgent &agent)
             }
         }
 
+        // Quasar (QuasarParallelAvatarPose): each avatar's motions run and blend on the job pool's threads, all the
+        // avatars' at once, between the half of its idleUpdate before them and the half after. Both halves stay on
+        // this thread and in the list's order; an avatar whose motions cannot all run off it is updated whole, here,
+        // as before (LLVOAvatar::updateCharacter, LLMotionController::canEvaluateOffMainThread).
+        static LLCachedControl<bool> parallel_pose(gSavedSettings, "QuasarParallelAvatarPose", false);
+        static std::vector<LLPointer<LLVOAvatar>> pose_pending;
+        pose_pending.clear();
+        LLVOAvatar::sQLSplitPose = parallel_pose() && QLJobPool::instance().workers() > 0;
+
         for (std::vector<LLViewerObject*>::iterator idle_iter = idle_list.begin();
             idle_iter != idle_end; idle_iter++)
         {
@@ -1034,8 +1059,43 @@ void LLViewerObjectList::update(LLAgent &agent)
             if (objectp->isAvatar())
             {
                 objectp->idleUpdate(agent, frame_time);
+                LLVOAvatar* avatarp = (LLVOAvatar*)objectp;
+                if (avatarp->qlPosePending())
+                {
+                    pose_pending.push_back(avatarp);
+                }
             }
         }
+        LLVOAvatar::sQLSplitPose = false;
+
+        if (!pose_pending.empty())
+        {
+            {
+                LL_PROFILE_ZONE_NAMED_CATEGORY_AVATAR("quasar parallel avatar pose");
+                // Nothing adds to the interpolants' cache while the threads read it.
+                LLSmoothInterpolation::sQLCacheFrozen = true;
+                QLJobPool::instance().parallelFor((U32)pose_pending.size(), 1, [&](U32 begin, U32 end)
+                {
+                    for (U32 i = begin; i < end; ++i)
+                    {
+                        pose_pending[i]->qlEvaluatePose();
+                    }
+                });
+                LLSmoothInterpolation::sQLCacheFrozen = false;
+            }
+            LL_PROFILE_ZONE_NAMED_CATEGORY_AVATAR("quasar avatar pose finish");
+            for (LLPointer<LLVOAvatar>& avatarp : pose_pending)
+            {
+                avatarp->qlFinishPose();
+            }
+            sQLPosedLastFrame = (U32)pose_pending.size();
+            pose_pending.clear();
+        }
+        else
+        {
+            sQLPosedLastFrame = 0;
+        }
+        sQLAvatarsLastFrame = mNumAvatars;
 
         //update flexible objects
         LLVolumeImplFlexible::updateClass();

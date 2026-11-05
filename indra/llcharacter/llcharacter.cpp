@@ -461,6 +461,11 @@ void LLCharacter::addVisualParam(LLVisualParam *param)
 bool LLCharacter::updateVisualParams()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_AVATAR;
+    if (mQLHoldVisualParams)
+    {
+        mQLVisualParamsAsked = true;
+        return false;
+    }
     S32 applied = 0;
     for (LLVisualParam* param : mVisualParams)
     {

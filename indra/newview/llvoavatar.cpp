@@ -377,6 +377,8 @@ public:
     // it will be deactivated
     virtual bool onActivate() { return true; }
 
+    bool canUpdateOffMainThread() const override { return mQLRanOnMain; }  // Quasar: see LLMotion (noise2's table)
+
     // called per time step
     // must return true while it is active, and
     // must return false when the motion is completed.
@@ -501,6 +503,8 @@ public:
     // it will be deactivated
     virtual bool onActivate() { return true; }
 
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
+
     // called per time step
     // must return true while it is active, and
     // must return false when the motion is completed.
@@ -603,6 +607,8 @@ public:
     // must return true to indicate success, or else
     // it will be deactivated
     virtual bool onActivate() { return true; }
+
+    bool canUpdateOffMainThread() const override { return true; }  // Quasar: see LLMotion
 
     // called per time step
     // must return true while it is active, and
@@ -3016,7 +3022,16 @@ void LLVOAvatar::idleUpdate(LLAgent &agent, const F64 &time)
     // store off last frame's root position to be consistent with camera position
     mLastRootPos = mRoot->getWorldPosition();
     bool detailed_update = updateCharacter(agent);
+    if (mQLPosePending)
+    {
+        return;  // Quasar: finished by qlFinishPose, once the motions have run (QuasarParallelAvatarPose)
+    }
+    idleUpdateAfterCharacter(detailed_update);
+}
 
+// Quasar: what idleUpdate does once the character has been updated.
+void LLVOAvatar::idleUpdateAfterCharacter(bool detailed_update)
+{
     // Neither voice nor a name tag is a thing an animated object has. Its id
     // is made up client side and never joins a voice channel, and it has no
     // first or last name for a tag to show, so it has no voice visualizer to
@@ -5414,9 +5429,49 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     {
         // Might be better to do HIDDEN_UPDATE if cloud
         ++census.mFull;
-        updateMotions(LLCharacter::NORMAL_UPDATE);
+        if (sQLSplitPose && !isSelf() && !isUIAvatar())
+        {
+            // Quasar (QuasarParallelAvatarPose): LLCharacter::updateMotions(NORMAL_UPDATE) in its two halves. The first
+            // here; the second, running and blending the motions, on a job pool thread with the other avatars' when
+            // every motion playing can (LLMotionController::canEvaluateOffMainThread), and the rest of this update and
+            // of idleUpdate once the main thread has the avatar back (qlFinishPose).
+            if (mMotionController.isPaused() && mPauseRequest->getNumRefs() == 1)
+            {
+                mMotionController.unpauseAllMotions();
+            }
+            if (mMotionController.updateMotionsPrepare(false))
+            {
+                if (mMotionController.canEvaluateOffMainThread())
+                {
+                    mQLPosePending = true;
+                    mQLPoseVisible = visible;
+                    mQLWasSitGroundConstrained = was_sit_ground_constrained;
+                    return visible;
+                }
+                mMotionController.updateMotionsEvaluate(false);
+            }
+        }
+        else
+        {
+            updateMotions(LLCharacter::NORMAL_UPDATE);
+        }
     }
 
+    return updateCharacterAfterMotions(visible, was_sit_ground_constrained);
+}
+
+// Quasar: what updateCharacter does once the motions have been blended into the skeleton.
+bool LLVOAvatar::updateCharacterAfterMotions(bool visible, bool was_sit_ground_constrained)
+{
+    const S32 updates = qlPlaceSkeleton(visible, was_sit_ground_constrained);
+    return updateCharacterAfterSkeleton(visible, updates);
+}
+
+// Quasar: the part of that which writes only this avatar's skeleton, and may run on a job pool thread
+// (qlEvaluatePose): the hover offset on the ground, and the joints' world matrices. The joints it returns the count of
+// are added to the census on the main thread; -1 when no sweep was made.
+S32 LLVOAvatar::qlPlaceSkeleton(bool visible, bool was_sit_ground_constrained)
+{
     // Special handling for sitting on ground.
     if (!getParent() && (isSitting() || was_sit_ground_constrained))
     {
@@ -5432,12 +5487,6 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
         }
     }
 
-    // update head position
-    updateHeadOffset();
-
-    // Generate footstep sounds when feet hit the ground
-    updateFootstepSounds();
-
     // Update child joints as needed. A culled avatar has no reader for its
     // world matrices: nothing skins it, nothing draws it, and everything that
     // does ask -- the skinning palette, the bounding box, a rigged face --
@@ -5448,13 +5497,33 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     //
     // Animated objects report themselves visible whatever the cull says, so
     // this never applies to them.
+    //
+    // Quasar: swept before the head offset and the footsteps are worked out rather than after; both read world
+    // positions, which the sweep leaves the same as asking for them would have made them.
     if (visible || isSelf())
     {
         LL_PROFILE_ZONE_NAMED_CATEGORY_AVATAR("updateWorldMatrixChildren");
         const S32 updates = mRoot->updateWorldMatrixChildren();
         LL_PROFILE_ZONE_NUM(updates);
-        census.mJointUpdates += updates;
+        return updates;
     }
+    return -1;
+}
+
+// Quasar: the rest, on the main thread.
+bool LLVOAvatar::updateCharacterAfterSkeleton(bool visible, S32 joint_updates)
+{
+    if (joint_updates >= 0)
+    {
+        ALSkeletonUpdateCensus& census = skeletonUpdateCensus(this);
+        census.mJointUpdates += joint_updates;
+    }
+
+    // update head position
+    updateHeadOffset();
+
+    // Generate footstep sounds when feet hit the ground
+    updateFootstepSounds();
 
     if (visible)
     {
@@ -5463,6 +5532,36 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     }
 
     return visible;
+}
+
+// static
+bool LLVOAvatar::sQLSplitPose = false;
+
+// Quasar (QuasarParallelAvatarPose): on a job pool thread, at the same time as other avatars': the motions run and
+// blended into the skeleton. Nothing but this avatar's own state is written: its motions', its joints', its visual
+// parameters' weights. Applying the parameters waits (LLCharacter::qlHoldVisualParams), and so does deactivating a
+// motion (LLMotionController::beginOffMainThread).
+void LLVOAvatar::qlEvaluatePose()
+{
+    qlHoldVisualParams(true);
+    mMotionController.beginOffMainThread();
+    mMotionController.updateMotionsEvaluate(false);
+    mQLJointUpdates = qlPlaceSkeleton(mQLPoseVisible, mQLWasSitGroundConstrained);
+}
+
+// Quasar: back on the main thread, in the order the avatars were updated in: what waited, and the rest of
+// updateCharacter and idleUpdate.
+void LLVOAvatar::qlFinishPose()
+{
+    mQLPosePending = false;
+    mMotionController.endOffMainThread();
+    qlApplyHeldVisualParams();
+    if (isDead())
+    {
+        return;
+    }
+    const bool visible = updateCharacterAfterSkeleton(mQLPoseVisible, mQLJointUpdates);
+    idleUpdateAfterCharacter(visible);
 }
 
 //-----------------------------------------------------------------------------
@@ -7860,6 +7959,13 @@ void LLVOAvatar::initAttachmentPoints(bool ignore_hud_joints)
 //-----------------------------------------------------------------------------
 bool LLVOAvatar::updateVisualParams()
 {
+    // Quasar: held while a job pool thread updates this avatar's motions (LLCharacter::qlHoldVisualParams).
+    if (qlVisualParamsHeld())
+    {
+        qlNoteVisualParamsAsked();
+        return false;
+    }
+
     // The parameters are added once when the avatar is loaded, so the one
     // that decides this is looked up once too.
     if (!mMaleParam)

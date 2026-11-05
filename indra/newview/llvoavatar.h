@@ -277,6 +277,23 @@ public:
     virtual void    updateDebugText();
     virtual bool    computeNeedsUpdate();
     virtual bool    updateCharacter(LLAgent &agent);
+    bool            updateCharacterAfterMotions(bool visible, bool was_sit_ground_constrained);  // Quasar
+    S32             qlPlaceSkeleton(bool visible, bool was_sit_ground_constrained);              // Quasar
+    bool            updateCharacterAfterSkeleton(bool visible, S32 joint_updates);              // Quasar
+    void            idleUpdateAfterCharacter(bool detailed_update);                             // Quasar
+
+    // ---- Quasar: avatars' motions across cores (QuasarParallelAvatarPose, llviewerobjectlist.cpp) ----------------
+    // While sQLSplitPose is set (the avatars' idleUpdate loop), an avatar whose motions can all run off the main thread
+    // stops its idleUpdate once they have been prepared, with qlPosePending() set; qlEvaluatePose() runs them on a job
+    // pool thread, and qlFinishPose() finishes the idleUpdate on the main thread.
+    static bool     sQLSplitPose;
+    bool            qlPosePending() const { return mQLPosePending; }
+    void            qlEvaluatePose();
+    void            qlFinishPose();
+    bool            mQLPosePending = false;
+    bool            mQLPoseVisible = false;
+    bool            mQLWasSitGroundConstrained = false;
+    S32             mQLJointUpdates = -1;
     void            updateFootstepSounds();
     void            computeUpdatePeriod();
     void            updateOrientation(LLAgent &agent, F32 speed, F32 delta_time);

@@ -198,6 +198,7 @@
 #include "qlvulkanpost.h"
 std::string ql_sun_shadow_cache_info();  // pipeline.cpp (QuasarSunShadowCache)
 std::string ql_parallel_cull_info();     // pipeline.cpp (QuasarParallelShadowCull)
+std::string ql_parallel_pose_info();     // llviewerobjectlist.cpp (QuasarParallelAvatarPose)
 #include "qldrawstats.h"
 #include "qlframewarp.h"
 #include "llappviewer.h"
@@ -686,6 +687,8 @@ public:
             addText(xpos, ypos, "Quasar sun cache: " + ql_sun_shadow_cache_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar parallel cull: " + ql_parallel_cull_info());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar parallel pose: " + ql_parallel_pose_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan post: " + QLVulkanPost::statusLine());
             ypos += y_inc;

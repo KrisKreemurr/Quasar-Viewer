@@ -34,6 +34,7 @@
 //-----------------------------------------------------------------------------
 LLFrameTimer LLSmoothInterpolation::sInternalTimer;
 std::vector<LLSmoothInterpolation::Interpolant> LLSmoothInterpolation::sInterpolants;
+bool LLSmoothInterpolation::sQLCacheFrozen = false;
 F32 LLSmoothInterpolation::sTimeDelta;
 
 // helper functors
@@ -94,6 +95,10 @@ F32 LLSmoothInterpolation::getInterpolant(F32SecondsImplicit time_constant, bool
         if (find_it != sInterpolants.end() && find_it->mTimeScale == time_constant)
         {
             return find_it->mInterpolant;
+        }
+        else if (sQLCacheFrozen)
+        {
+            return calcInterpolant(time_constant.value());
         }
         else
         {

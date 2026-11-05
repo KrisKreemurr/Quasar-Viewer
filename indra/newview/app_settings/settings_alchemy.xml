@@ -2883,6 +2883,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarParallelAvatarPose</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): run and blend the avatars' animations (dances, AOs, physics, blinking) on the job pool's cores, every avatar at once, rather than one after another on the main thread. An avatar playing anything not known to be safe off the main thread is updated on it as before.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarParallelShadowCull</key>
         <map>
             <key>Comment</key>

@@ -125,6 +125,23 @@ public:
     // of them had anything to apply
     virtual bool updateVisualParams();
 
+    // Quasar (QuasarParallelAvatarPose): while set, updateVisualParams() only notes that it was asked for, and
+    // qlApplyHeldVisualParams() runs it once the main thread has the character back. Applying parameters reshapes the
+    // character's meshes and may start or stop motions; a motion updating on a job pool thread sets their weights, which
+    // only writes the character's own parameters, and asks for the rest to wait.
+    void qlHoldVisualParams(bool hold) { mQLHoldVisualParams = hold; }
+    bool qlVisualParamsHeld() const { return mQLHoldVisualParams; }
+    void qlNoteVisualParamsAsked() { mQLVisualParamsAsked = true; }
+    void qlApplyHeldVisualParams()
+    {
+        mQLHoldVisualParams = false;
+        if (mQLVisualParamsAsked)
+        {
+            mQLVisualParamsAsked = false;
+            updateVisualParams();
+        }
+    }
+
     virtual void addDebugText( const std::string& text ) = 0;
 
     virtual std::string getDebugName() const { return getID().asString(); }
@@ -322,6 +339,8 @@ public:
 
 protected:
     LLMotionController  mMotionController;
+    bool                mQLHoldVisualParams = false;
+    bool                mQLVisualParamsAsked = false;
 
     void*               mAnimationChannels[NUM_ANIM_CHANNELS] = {};
     S32                 mHandPoseRequest = 0;

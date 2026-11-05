@@ -44,6 +44,10 @@ public:
     // ACCESSORS
     static F32 getInterpolant(F32SecondsImplicit time_constant, bool use_cache = true);
 
+    // Quasar: while set (by the main thread, around work it hands to the job pool), a time constant not yet cached is
+    // worked out and not added, so that threads reading the cache never see it change.
+    static bool sQLCacheFrozen;
+
     template<typename T>
     static T lerp(T a, T b, F32SecondsImplicit time_constant, bool use_cache = true)
     {

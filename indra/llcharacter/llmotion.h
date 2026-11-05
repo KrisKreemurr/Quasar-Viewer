@@ -152,6 +152,18 @@ public:
     // differences and phases from it in F64, and narrow only what comes out.
     virtual bool onUpdate(F64 activeTime, U8* joint_mask) = 0;
 
+    // Quasar (QuasarParallelAvatarPose): whether onUpdate may run on a job pool thread, at the same time as other
+    // characters' motions. Only a motion whose onUpdate writes nothing but its own state and its own character's (joint
+    // states, the character's animation data, its visual parameters' weights), and reads nothing another thread writes,
+    // says yes. Its character's updateVisualParams is held until the main thread is back (LLCharacter), and a motion it
+    // deactivates is deactivated there (LLMotionController). Off by default: a motion nobody has looked at stays on the
+    // main thread, and so does its character.
+    virtual bool canUpdateOffMainThread() const { return false; }
+
+    // Set once onUpdate has run on the main thread. A motion whose onUpdate makes something the first time it is run (a
+    // cached setting, a lazily built table) says yes only once this is set, so that it is made there, never on a worker.
+    bool mQLRanOnMain = false;
+
     // called when a motion is deactivated
     virtual void onDeactivate() = 0;
 

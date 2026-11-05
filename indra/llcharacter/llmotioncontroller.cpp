@@ -633,7 +633,7 @@ void LLMotionController::updateIdleMotion(LLMotion* motionp)
     LL_PROFILE_ZONE_SCOPED_CATEGORY_AVATAR;
     if (motionp->isStopped() && mAnimTime > motionp->getStopTime() + motionp->getEaseOutDuration())
     {
-        deactivateMotionInstance(motionp);
+        deactivateOrDefer(motionp);
     }
     else if (motionp->isStopped() && mAnimTime > motionp->getStopTime())
     {
@@ -791,7 +791,7 @@ void LLMotionController::updateMotionsByType(LLMotion::LLMotionBlendType anim_ty
                 if (motionp->isStopped() && mAnimTime > motionp->getStopTime() + ease_out_duration)
                 {
                     posep->setWeight(0.f);
-                    deactivateMotionInstance(motionp);
+                    deactivateOrDefer(motionp);
                 }
                 continue;
             }
@@ -829,7 +829,7 @@ void LLMotionController::updateMotionsByType(LLMotion::LLMotionBlendType anim_ty
             else
             {
                 posep->setWeight(0.f);
-                deactivateMotionInstance(motionp);
+                deactivateOrDefer(motionp);
                 continue;
             }
         }
@@ -925,6 +925,12 @@ void LLMotionController::updateMotionsByType(LLMotion::LLMotionBlendType anim_ty
 
         }
 
+        // Quasar: what its first run makes (a cached setting, an interpolant) is made on the main thread.
+        if (!mQLOffMainThread)
+        {
+            motionp->mQLRanOnMain = true;
+        }
+
         // even if onupdate returns false, add this motion in to the blend one last time
         mPoseBlender.addMotion(motionp, mJointSaturated);
         ++motions_blended;
@@ -1007,6 +1013,14 @@ void LLMotionController::updateLoadingMotions()
 void LLMotionController::updateMotions(bool force_update)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_AVATAR;
+    if (updateMotionsPrepare(force_update))
+    {
+        updateMotionsEvaluate(force_update);
+    }
+}
+
+bool LLMotionController::updateMotionsPrepare(bool force_update)
+{
     // SL-763: "Distant animated objects run at super fast speed"
     // The use_quantum optimization or possibly the associated code in setTimeStamp()
     // does not work as implemented.
@@ -1042,7 +1056,7 @@ void LLMotionController::updateMotions(bool force_update)
 
                 updateLoadingMotions();
 
-                return;
+                return false;
             }
 
             // is calculating a new keyframe pose, make sure the last one gets applied
@@ -1060,6 +1074,13 @@ void LLMotionController::updateMotions(bool force_update)
     }
 
     updateLoadingMotions();
+    return true;
+}
+
+void LLMotionController::updateMotionsEvaluate(bool force_update)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_AVATAR;
+    const bool use_quantum = (mTimeStep != 0.f);
 
     resetJointSignatures();
 
@@ -1089,6 +1110,51 @@ void LLMotionController::updateMotions(bool force_update)
 
     mHasRunOnce = true;
 //  LL_INFOS() << "Motion controller time " << motionTimer.getElapsedTimeF32() << LL_ENDL;
+}
+
+bool LLMotionController::canEvaluateOffMainThread() const
+{
+    if (mTimeStep != 0.f || mPaused)
+    {
+        return false;
+    }
+    for (const motion_list_t& motions : mActiveMotions)
+    {
+        for (const LLMotion* motionp : motions)
+        {
+            if (!motionp || !motionp->canUpdateOffMainThread())
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void LLMotionController::deactivateOrDefer(LLMotion* motion)
+{
+    if (mQLOffMainThread)
+    {
+        mQLDeferredDeactivations.push_back(motion);
+    }
+    else
+    {
+        deactivateMotionInstance(motion);
+    }
+}
+
+void LLMotionController::endOffMainThread()
+{
+    mQLOffMainThread = false;
+    for (LLMotion* motion : mQLDeferredDeactivations)
+    {
+        // As the update would have: a motion still on its active list (nothing else runs between).
+        if (isMotionActive(motion))
+        {
+            deactivateMotionInstance(motion);
+        }
+    }
+    mQLDeferredDeactivations.clear();
 }
 
 //-----------------------------------------------------------------------------

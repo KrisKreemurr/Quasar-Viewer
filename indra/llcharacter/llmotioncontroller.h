@@ -141,6 +141,23 @@ public:
     // deactivates terminated motions`
     void updateMotions(bool force_update = false);
 
+    // ---- Quasar: the update in two halves (QuasarParallelAvatarPose) ----------------------------------------------
+    // updateMotions() is updateMotionsPrepare() and then, if it says there is more to do, updateMotionsEvaluate().
+    // The first moves the clock on, caps the loaded motions and starts what has finished loading: on the main thread,
+    // since loading reads shared caches. The second runs and blends the active motions into the skeleton, and may run on
+    // a job pool thread when canEvaluateOffMainThread() says so, between beginOffMainThread() and, back on the main
+    // thread, endOffMainThread().
+    bool updateMotionsPrepare(bool force_update);
+    void updateMotionsEvaluate(bool force_update);
+
+    // Every active motion can update off the main thread and has run on it once, on the continuous clock, unpaused.
+    bool canEvaluateOffMainThread() const;
+
+    // While off the main thread, a motion the update would deactivate is kept for endOffMainThread() to deactivate:
+    // deactivating runs the motion's onDeactivate, and may delete it.
+    void beginOffMainThread() { mQLOffMainThread = true; }
+    void endOffMainThread();
+
     // minimal update (e.g. while hidden)
     void updateMotionsMinimal();
 
@@ -276,6 +293,11 @@ protected:
     U8                  mJointSaturated[LL_CHARACTER_MAX_ANIMATED_JOINTS];
 private:
     U32                 mLastCountAfterPurge; //for logging and debugging purposes
+
+    // Quasar: see beginOffMainThread().
+    bool                    mQLOffMainThread = false;
+    std::vector<LLMotion*>  mQLDeferredDeactivations;
+    void                    deactivateOrDefer(LLMotion* motion);
 };
 
 //-----------------------------------------------------------------------------
