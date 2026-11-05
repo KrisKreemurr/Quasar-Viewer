@@ -1171,6 +1171,9 @@ void LLRender::loadUIIdentity()
     mUIScale.back().splat(1);
 }
 
+// Quasar: the interface layer's alpha rules (QLUILayer); defined with blendFunc below.
+extern bool gQLUILayerAlpha;
+
 void LLRender::setColorMask(bool writeColor, bool writeAlpha)
 {
     setColorMask(writeColor, writeColor, writeColor, writeAlpha);
