@@ -96,10 +96,18 @@ if(WINDOWS)
   # instantiates LLWindowWin32 on an SDL build anyway. Headers stay listed so
   # llviewerwindow.cpp's (guarded) include still resolves.
   if(NOT AL_USE_SDL_WINDOW)
-    target_sources(llwindow PRIVATE llwindowwin32.cpp llkeyboardwin32.cpp lldragdropwin32.cpp)
+    target_sources(
+      llwindow
+      PRIVATE llwindowwin32.cpp llkeyboardwin32.cpp lldragdropwin32.cpp qlvulkanpresenter.cpp
+    )
+
+    # Quasar: Vulkan presentation (QuasarVulkanPresent). Only the headers: the runtime is loaded when it is asked for,
+    # so the viewer starts on a machine without one.
+    find_package(VulkanHeaders CONFIG REQUIRED)
+    target_link_libraries(llwindow PRIVATE Vulkan::Headers)
   endif()
   target_sources(
     llwindow
-    PUBLIC FILE_SET HEADERS FILES llwindowwin32.h llkeyboardwin32.h lldragdropwin32.h
+    PUBLIC FILE_SET HEADERS FILES llwindowwin32.h llkeyboardwin32.h lldragdropwin32.h qlvulkanpresenter.h
   )
 endif()

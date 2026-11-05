@@ -154,6 +154,10 @@
       "name": "vlc-bin",
       "platform": "windows | osx"
     },
+    {
+      "name": "vulkan-headers",
+      "platform": "windows"
+    },
     "xxhash",
     "zlib"
   ],

@@ -191,6 +191,12 @@ public:
     virtual void gatherInput() = 0;
     virtual void delayInputProcessing() = 0;
     virtual void swapBuffers() = 0;
+    // Quasar (QuasarVulkanPresent): hand the finished frames to a Vulkan swapchain instead of the GL one, where the
+    // platform can. Call with the GL context current, once it is set up. False where it is not supported or could not be
+    // set up, and the frames go on being presented by GL.
+    virtual bool enableVulkanPresent(bool vsync) { return false; }
+    // What presents the frames, for the status line: "OpenGL", or "Vulkan" with its details, or why Vulkan stopped.
+    virtual std::string getPresentInfo() const { return "OpenGL"; }
     virtual void bringToFront() = 0;
     virtual void focusClient() { };     // this may not have meaning or be required on other platforms, therefore, it's not abstract
     // handy coordinate space conversion routines

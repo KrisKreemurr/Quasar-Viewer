@@ -3695,6 +3695,13 @@ bool LLAppViewer::initWindow()
     stop_glerror();
     gViewerWindow->initGLDefaults();
 
+    // Quasar: the frames go to the screen through a Vulkan swapchain (QuasarVulkanPresent), where the window can.
+    if (gSavedSettings.getBOOL("QuasarVulkanPresent") && gViewerWindow->getWindow())
+    {
+        gViewerWindow->getWindow()->enableVulkanPresent(gSavedSettings.getBOOL("RenderVSyncEnable"));
+        LL_INFOS("AppInit") << "Presenting through " << gViewerWindow->getWindow()->getPresentInfo() << LL_ENDL;
+    }
+
     gSavedSettings.setBOOL("RenderInitError", false);
     gSavedSettings.saveToFile( gSavedSettings.getString("ClientSettingsFile"), true );
 

@@ -27,6 +27,7 @@
 #include "linden_common.h"
 
 #include "llwindowwin32.h"
+#include "qlvulkanpresenter.h"
 
 // LLWindow library includes
 #include "llkeyboardwin32.h"
@@ -1035,6 +1036,13 @@ void LLWindowWin32::close()
         gKeyboard->resetKeys();
     }
 
+    // Quasar: Vulkan's presentation holds GL imports, let go while the context is still current.
+    if (mVulkanPresenter)
+    {
+        mVulkanPresenter->shutdown();
+        mVulkanPresenter.reset();
+    }
+
     // Clean up remaining GL state
     if (gGLManager.mInited)
     {
@@ -1279,6 +1287,15 @@ bool LLWindowWin32::switchContext(bool fullscreen, const LLCoordScreen& size, bo
         current_refresh = 60;
     }
     mRefreshRate = current_refresh;
+
+    // Quasar: Vulkan's presentation holds the old context's imports. It is not started again on the new one: the viewer
+    // asks for it once, at start-up.
+    if (mVulkanPresenter)
+    {
+        mVulkanPresenter->shutdown();
+        mVulkanPresenter.reset();
+        mVulkanPresentNote = "OpenGL (Vulkan stopped when the GL context was made again)";
+    }
 
     gGLManager.shutdownGL();
     // Tear down the shared D3D11<->GL interop device (recreated below for the new
@@ -2033,8 +2050,40 @@ void LLWindowWin32::destroySharedContext(void* contextPtr)
     }
 }
 
+bool LLWindowWin32::enableVulkanPresent(bool vsync)
+{
+    if (mVulkanPresenter || !mWindowHandle || !mhRC)
+    {
+        return mVulkanPresenter != nullptr;
+    }
+    auto presenter = std::make_unique<QLVulkanPresenter>();
+    if (!presenter->init(mWindowHandle, vsync))
+    {
+        mVulkanPresentNote = presenter->describe();
+        LL_WARNS("Window") << "Vulkan presentation not started: " << mVulkanPresentNote << LL_ENDL;
+        return false;
+    }
+    mVulkanPresenter = std::move(presenter);
+    mVulkanPresentNote.clear();
+    LL_INFOS("Window") << "Presenting through " << mVulkanPresenter->describe() << LL_ENDL;
+    return true;
+}
+
+std::string LLWindowWin32::getPresentInfo() const
+{
+    if (mVulkanPresenter && mVulkanPresenter->active())
+    {
+        return mVulkanPresenter->describe();
+    }
+    return mVulkanPresentNote.empty() ? std::string("OpenGL") : mVulkanPresentNote;
+}
+
 void LLWindowWin32::toggleVSync(bool enable_vsync)
 {
+    if (mVulkanPresenter)
+    {
+        mVulkanPresenter->setVSync(enable_vsync);
+    }
     if (wglSwapIntervalEXT == nullptr)
     {
         LL_INFOS("Window") << "VSync: wglSwapIntervalEXT not initialized" << LL_ENDL;
@@ -4123,6 +4172,18 @@ bool LLWindowWin32::resetDisplayResolution()
 
 void LLWindowWin32::swapBuffers()
 {
+    // Quasar: the frame goes out through Vulkan while it can (QuasarVulkanPresent); once it cannot, through GL for good.
+    if (mVulkanPresenter)
+    {
+        if (mVulkanPresenter->active() && mVulkanPresenter->present())
+        {
+            return;
+        }
+        mVulkanPresentNote = mVulkanPresenter->describe();
+        LL_WARNS("Window") << "Vulkan presentation stopped, presenting through GL: " << mVulkanPresentNote << LL_ENDL;
+        mVulkanPresenter->shutdown();
+        mVulkanPresenter.reset();
+    }
     {
         LL_PROFILE_ZONE_SCOPED_CATEGORY_WIN32;
         SwapBuffers(mhDC);

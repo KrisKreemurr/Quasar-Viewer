@@ -675,6 +675,8 @@ public:
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_PROBE],
                                          gQLDrawStats.mLastCullMs[QLDrawStats::VIEW_OTHER]));
             ypos += y_inc;
+            addText(xpos, ypos, "Quasar present: " + (gViewerWindow && gViewerWindow->getWindow() ? gViewerWindow->getWindow()->getPresentInfo() : std::string("OpenGL")));
+            ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,
                                          LLVertexBuffer::sUseAttribBinding ? "" : " (fast path off)"));

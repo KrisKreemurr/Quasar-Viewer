@@ -29,6 +29,8 @@
 
 // Limit Windows API to small and manageable set.
 #include "llwin32headers.h"
+#include <memory>
+#include <string>
 
 #include "llwindow.h"
 #include "llwindowcallbacks.h"
@@ -47,6 +49,8 @@ inline constexpr DWORD WM_POST_UNINSTALL_MSG_SHUTDOWN = 1;
 inline constexpr DWORD WM_POST_UNINSTALL_MSG_UPDATE = 2;
 
 typedef void (*LLW32MsgCallback)(const MSG &msg);
+
+class QLVulkanPresenter;
 
 class LLWindowWin32 : public LLWindow
 {
@@ -104,6 +108,8 @@ public:
     void gatherInput() override;
     void delayInputProcessing() override;
     void swapBuffers() override;
+    bool enableVulkanPresent(bool vsync) override;
+    std::string getPresentInfo() const override;
 
     // handy coordinate space conversion routines
     bool convertCoords(LLCoordScreen from, LLCoordWindow *to) override;
@@ -216,6 +222,9 @@ protected:
 
     HWND        mWindowHandle = 0;  // window handle
     HGLRC       mhRC = 0;           // OpenGL rendering context
+    // Quasar: presents the frames through Vulkan while it is set (QuasarVulkanPresent).
+    std::unique_ptr<QLVulkanPresenter> mVulkanPresenter;
+    std::string mVulkanPresentNote;  // why Vulkan presentation stopped or could not start
     HDC         mhDC = 0;           // Windows Device context handle
     HINSTANCE   mhInstance;     // handle to application instance
     RECT        mOldMouseClip;  // Screen rect to which the mouse cursor was globally constrained before we changed it in clipMouse()
