@@ -13873,9 +13873,9 @@ LLRenderTarget* LLPipeline::getSpotShadowTarget(U32 i)
 // drawable and bridge lists through unfiltered. stateSort then builds the cascade's render
 // map from `dst`. Lets RenderShadowCullMode 1 share one octree walk across all cascades.
 // Quasar: whether a group is of what moves (a spatial bridge's), for the cached sun shadow (QuasarSunShadowCache).
-static bool ql_group_moves(const LLSpatialGroup* group)
+static bool ql_group_moves(LLSpatialGroup* group)
 {
-    const LLSpatialPartition* part = group->getSpatialPartition();
+    LLSpatialPartition* part = group->getSpatialPartition();
     return part && part->isBridge();
 }
 
