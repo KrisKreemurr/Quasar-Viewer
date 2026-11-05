@@ -14672,7 +14672,11 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                     && camera_holds(kept)
                     && (lightDir * kept.mLight) >= STAGGER_MIN_LIGHT_COS;
             }
-            if (cache_on && mRT->shadow[j].isComplete())
+            // The cascades nearer than QuasarSunCacheFromCascade (default the nearest alone) are fitted and drawn whole
+            // every frame: the camera's own avatar is in them, and its shadow on itself is fine enough to change with
+            // every refit, so a cached fit taking turns with fresh ones made it flicker.
+            static LLCachedControl<S32> cache_from(gSavedSettings, "QuasarSunCacheFromCascade", 1);
+            if (cache_on && (S32)j >= llclamp((S32)cache_from(), 0, 3) && mRT->shadow[j].isComplete())
             {
                 const QLShadowCascadeKeep& kept = sCascadeKeep[j];
                 const U32 frame = LLFrameTimer::getFrameCount();

@@ -2740,6 +2740,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarSunCacheFromCascade</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: the first sun shadow cascade the cache (QuasarSunShadowCache) is used for; the nearer ones are drawn whole every frame. 1 (default) keeps the nearest cascade, where your own avatar is, always fresh, so your shadow on yourself does not flicker; 0 caches all of them. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarSunCacheMovingRate</key>
         <map>
             <key>Comment</key>
