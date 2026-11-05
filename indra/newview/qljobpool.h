@@ -27,7 +27,9 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -67,6 +69,21 @@ public:
     /// on the calling thread as fn(0, count).
     void parallelFor(U32 count, U32 min_chunk, const std::function<void(U32, U32)>& fn);
 
+    // ---- one task alongside the main thread ----------------------------------------------------------------------
+
+    /// A task started with runAsync, to be waited for. Opaque; copyable.
+    struct Task;
+    using TaskHandle = std::shared_ptr<Task>;
+
+    /// Starts fn() on a free worker and returns at once, so the main thread carries on with other work; wait() collects
+    /// it. A task no worker has taken by then runs on the waiting thread, so a wait never depends on a worker coming
+    /// free; with no workers every task runs that way. The rules above hold for fn, and also: it may not call
+    /// parallelFor or runAsync, and it may run at the same time as a parallelFor job (on other workers).
+    TaskHandle runAsync(std::function<void()> fn);
+
+    /// Returns once the task has run (running it here if no worker has taken it). Main thread; once per task.
+    void wait(const TaskHandle& task);
+
 private:
     QLJobPool() = default;
     ~QLJobPool();
@@ -92,4 +109,15 @@ private:
     bool                    mOpen = false;
     std::atomic<U32>        mNext{ 0 };      // the next index to hand out
     std::atomic<U32>        mActive{ 0 };    // workers that joined the current job and have not yet left it
+
+    // Tasks not yet taken, under mMutex. A task is taken (by a worker, or by wait() on the waiting thread) by being
+    // removed from here under mMutex, so exactly one thread runs it.
+    std::deque<TaskHandle>  mTasks;
+    std::condition_variable mTaskDone;       // signalled, under mMutex, as each task taken by a worker finishes
+};
+
+struct QLJobPool::Task
+{
+    std::function<void()> mFn;
+    bool                  mDone = false;     // under the pool's mMutex
 };

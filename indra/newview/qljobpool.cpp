@@ -92,10 +92,23 @@ void QLJobPool::workerLoop(U32 index)
     {
         {
             std::unique_lock<std::mutex> lock(mMutex);
-            mWake.wait(lock, [&]() { return mQuit || (mOpen && mGeneration != seen); });
+            mWake.wait(lock, [&]() { return mQuit || (mOpen && mGeneration != seen) || !mTasks.empty(); });
             if (mQuit)
             {
                 return;
+            }
+            if (!(mOpen && mGeneration != seen))
+            {
+                // A task alongside the main thread: taken under the lock, run outside it, marked done under it.
+                TaskHandle task = std::move(mTasks.front());
+                mTasks.pop_front();
+                lock.unlock();
+                task->mFn();
+                lock.lock();
+                task->mDone = true;
+                lock.unlock();
+                mTaskDone.notify_all();
+                continue;
             }
             seen = mGeneration;
             // Joined while the job is open, under the lock its caller closes it under.
@@ -170,4 +183,49 @@ void QLJobPool::parallelFor(U32 count, U32 min_chunk, const std::function<void(U
         std::lock_guard<std::mutex> lock(mMutex);
         mFn = nullptr;
     }
+}
+
+QLJobPool::TaskHandle QLJobPool::runAsync(std::function<void()> fn)
+{
+    TaskHandle task = std::make_shared<Task>();
+    task->mFn = std::move(fn);
+    if (mThreads.empty())
+    {
+        return task;  // run by wait(), on the waiting thread
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mTasks.push_back(task);
+    }
+    mWake.notify_one();
+    return task;
+}
+
+void QLJobPool::wait(const TaskHandle& task)
+{
+    if (!task)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mMutex);
+    if (task->mDone)
+    {
+        return;
+    }
+    // Not taken yet (or never queued, with no workers): taken here, and run on this thread.
+    auto queued = std::find(mTasks.begin(), mTasks.end(), task);
+    if (queued != mTasks.end() || mThreads.empty())
+    {
+        if (queued != mTasks.end())
+        {
+            mTasks.erase(queued);
+        }
+        lock.unlock();
+        task->mFn();
+        lock.lock();
+        task->mDone = true;
+        return;
+    }
+    // A worker has it: wait for it to finish.
+    mTaskDone.wait(lock, [&]() { return task->mDone; });
 }
