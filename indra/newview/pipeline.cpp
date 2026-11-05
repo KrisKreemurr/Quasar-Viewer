@@ -16921,7 +16921,50 @@ namespace
     {
         std::unique_ptr<LLCullResult> mResult;
         S32                           mNodes = 0;
+        std::vector<LLDrawable*>      mDeferred;  // attachments whose avatar was not yet seen (ql_mark_group)
     };
+
+    // While a worker walks a stage of drawable groups: where it puts the attachments it leaves for after the stage.
+    thread_local std::vector<LLDrawable*>* sQLDeferred = nullptr;
+
+    // Whether a drawable has been seen this frame, as LLDrawable::isVisible() asks, without its lazy write.
+    bool ql_seen_now(const LLDrawable* drawable)
+    {
+        if (!drawable)
+        {
+            return false;
+        }
+        if ((S32)drawable->getVisible() == LLDrawable::getCurrentFrame())
+        {
+            return true;
+        }
+        const LLViewerOctreeGroup* group = drawable->getGroup();
+        return group && group->isVisible();
+    }
+
+    // An attachment's bridge whose avatar has not been seen yet: its own cull would turn it away
+    // (LLSpatialBridge::setVisible), though the avatar may be marked seen a moment later on another core, as one
+    // sitting on a linkset is, by the linkset's cull. It waits until every core is done.
+    bool ql_attachment_waits(LLDrawable* drawablep)
+    {
+        if (!drawablep->isSpatialBridge())
+        {
+            return false;
+        }
+        const LLDrawable* root = ((LLSpatialBridge*)drawablep)->mDrawable;
+        const LLViewerObject* vobj = root ? root->getVObj() : nullptr;
+        if (!vobj || !vobj->isAttachment() || vobj->isHUDAttachment())
+        {
+            return false;
+        }
+        const LLDrawable* parent = root->getParent();
+        const LLViewerObject* objparent = parent ? parent->getVObj() : nullptr;
+        if (!objparent || !objparent->isAvatar())
+        {
+            return false;
+        }
+        return !ql_seen_now(objparent->mDrawable);
+    }
 
     struct QLParallelCullStats
     {
@@ -16970,6 +17013,7 @@ namespace
             }
             slots[i].mResult->clear();
             slots[i].mNodes = 0;
+            slots[i].mDeferred.clear();
         }
     }
 
@@ -17113,6 +17157,11 @@ namespace
         for (LLSpatialGroup::element_iter i = group->getDataBegin(); i != group->getDataEnd(); ++i)
         {
             LLDrawable* drawablep = (LLDrawable*)(*i)->getDrawable();
+            if (sQLDeferred && drawablep && ql_attachment_waits(drawablep))
+            {
+                sQLDeferred->push_back(drawablep);
+                continue;
+            }
             gPipeline.markVisible(drawablep, camera);
         }
     }
@@ -17221,9 +17270,11 @@ namespace
                 QLCullSlot& slot = slots[r];
                 sCull = slot.mResult.get();
                 sQLVisibleNodes = &slot.mNodes;
+                sQLDeferred = &slot.mDeferred;
                 ql_mark_groups(groups.data(), (U32)((U64)count * r / runs), (U32)((U64)count * (r + 1) / runs),
                                *slot.mResult, camera);
             }
+            sQLDeferred = nullptr;
             sQLVisibleNodes = nullptr;
             sCull = saved;
         });
@@ -17232,6 +17283,23 @@ namespace
         {
             ql_merge_result(result, *slots[r].mResult);
             gPipeline.mNumVisibleNodes += slots[r].mNodes;
+        }
+
+        // The attachments that waited for their avatars, now that every core is done, on this thread (few: an avatar
+        // seated on a linkset, or one whose own cull ran on another core a moment late), and what their culls find.
+        const U32 nested_from = result.getDrawableGroupsSize();
+        bool any = false;
+        for (U32 r = 0; r < runs; ++r)
+        {
+            for (LLDrawable* drawablep : slots[r].mDeferred)
+            {
+                gPipeline.markVisible(drawablep, camera);
+                any = true;
+            }
+        }
+        if (any)
+        {
+            ql_mark_groups(nullptr, 0, 0, result, camera, nested_from);
         }
     }
 }
