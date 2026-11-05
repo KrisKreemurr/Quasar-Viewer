@@ -2696,6 +2696,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarSpotShadowMaxAvatars</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: how many avatars each shadow-casting spot light (projector) draws into its shadow, the nearest to the light, plus your own avatar always. In a club most of the spot shadows' cost is the avatars under the lights. 0 draws every avatar, as before. Applies at once; sun shadows are not affected.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>4</integer>
+        </map>
         <key>QuasarDLSSFrameGen</key>
         <map>
             <key>Comment</key>

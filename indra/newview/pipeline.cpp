@@ -14006,6 +14006,71 @@ namespace
     };
 }
 
+namespace
+{
+    // Quasar: which avatars a spot light's shadow map draws (QuasarSpotShadowMaxAvatars). In a club almost all of a
+    // projector's shadow draws are the avatars under it, every piece of every outfit, and the map is drawn again every
+    // frame while any of them is there. Only the avatars nearest the light, and the user's own, are drawn into it; the
+    // rest cast no spot shadow (their sun shadows are untouched).
+    struct QLSpotAvatarFilter
+    {
+        bool                           mActive = false;
+        std::vector<const LLVOAvatar*> mAllowed;
+    };
+    QLSpotAvatarFilter sSpotAvatars;
+
+    // Arms the filter for one spot light's cull, and disarms it on every way out.
+    struct QLSpotAvatarScope
+    {
+        explicit QLSpotAvatarScope(const LLVector3& light)
+        {
+            static LLCachedControl<S32> max_avatars(gSavedSettings, "QuasarSpotShadowMaxAvatars", 4);
+            QLSpotAvatarFilter& f = sSpotAvatars;
+            f.mAllowed.clear();
+            f.mActive = max_avatars() > 0;
+            if (!f.mActive)
+            {
+                return;
+            }
+            static std::vector<std::pair<F32, const LLVOAvatar*>> nearest;
+            nearest.clear();
+            for (LLCharacter* character : LLCharacter::sInstances)
+            {
+                const LLVOAvatar* avatar = static_cast<const LLVOAvatar*>(character);
+                if (!avatar || avatar->isDead() || avatar->isSelf())
+                {
+                    continue;
+                }
+                nearest.emplace_back((avatar->getPositionAgent() - light).lengthSquared(), avatar);
+            }
+            const size_t keep = llmin(nearest.size(), (size_t)max_avatars());
+            std::partial_sort(nearest.begin(), nearest.begin() + keep, nearest.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (size_t i = 0; i < keep; ++i)
+            {
+                f.mAllowed.push_back(nearest[i].second);
+            }
+            if (isAgentAvatarValid())
+            {
+                f.mAllowed.push_back(gAgentAvatarp);
+            }
+        }
+        ~QLSpotAvatarScope() { sSpotAvatars.mActive = false; }
+    };
+}
+
+// Whether a spot light's shadow leaves this avatar, and what it wears, out (lldrawable.cpp's bridge cull).
+bool ql_spot_shadow_skips_avatar(const LLVOAvatar* avatar)
+{
+    const QLSpotAvatarFilter& f = sSpotAvatars;
+    if (!f.mActive || !avatar || (LLViewerCamera::sCurCameraID != LLViewerCamera::CAMERA_SPOT_SHADOW0 &&
+                                  LLViewerCamera::sCurCameraID != LLViewerCamera::CAMERA_SPOT_SHADOW1))
+    {
+        return false;
+    }
+    return std::find(f.mAllowed.begin(), f.mAllowed.end(), avatar) == f.mAllowed.end();
+}
+
 // static
 bool LLPipeline::sunShadowCasterTooSmall(const LLVector4a& center, const LLVector4a& half)
 {
@@ -15091,7 +15156,10 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
 
                 // Culled and sorted every frame, which keeps what the light sees built, and drawn only when the map
                 // holds something other than what the light and its casters draw now.
-                sortShadow(shadow_cam, result[i], true, 0);
+                {
+                    QLSpotAvatarScope avatars(drawable->getPositionAgent());
+                    sortShadow(shadow_cam, result[i], true, 0);
+                }
 
                 ALSpotShadowCache::Key key;
                 key.mView       = view[i + 4];

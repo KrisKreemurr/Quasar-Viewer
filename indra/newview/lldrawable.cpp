@@ -1520,6 +1520,9 @@ public:
     }
 };
 
+// pipeline.cpp: whether a spot light's shadow leaves this avatar out (QuasarSpotShadowMaxAvatars).
+bool ql_spot_shadow_skips_avatar(const LLVOAvatar* avatar);
+
 void LLSpatialBridge::setVisible(LLCamera& camera_in, std::vector<LLDrawable*>* results, bool for_select)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWABLE;
@@ -1532,6 +1535,10 @@ void LLSpatialBridge::setVisible(LLCamera& camera_in, std::vector<LLDrawable*>* 
 
     //HACK don't draw attachments for avatars that haven't been visible in more than a frame
     LLViewerObject *vobj = mDrawable->getVObj();
+    if (vobj && vobj->isAvatar() && ql_spot_shadow_skips_avatar((LLVOAvatar*)vobj))
+    {
+        return;  // Quasar: not among the avatars this spot light's shadow draws (QuasarSpotShadowMaxAvatars)
+    }
     if (vobj && vobj->isAttachment() && !vobj->isHUDAttachment())
     {
         LLDrawable* av;
@@ -1548,6 +1555,10 @@ void LLSpatialBridge::setVisible(LLCamera& camera_in, std::vector<LLDrawable*>* 
             if (objparent->isAvatar())
             {
                 LLVOAvatar* avatarp = (LLVOAvatar*) objparent;
+                if (ql_spot_shadow_skips_avatar(avatarp))
+                {
+                    return;  // Quasar: not among the avatars this spot light's shadow draws (QuasarSpotShadowMaxAvatars)
+                }
                 if (avatarp->isVisible())
                 {
                     impostor = objparent->isAvatar() && !LLPipeline::sImpostorRender && ((LLVOAvatar*) objparent)->isImpostor();
