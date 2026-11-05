@@ -25,6 +25,7 @@
 
 #include "qlvulkanpost.h"
 
+#include "llglstates.h"
 #include "llrender.h"
 #include "llrendertarget.h"
 #include "llviewercontrol.h"
@@ -104,14 +105,18 @@ bool QLUILayer::begin()
     }
     gGL.flush();
     sUILayer.bindTarget();
-    const LLColor4 clear_color = gGL.getClearColor();
-    gGL.setClearColor(LLColor4(0.f, 0.f, 0.f, 0.f));
-    sUILayer.clear(GL_COLOR_BUFFER_BIT);
-    gGL.setClearColor(clear_color);
-
+    // Cleared whole, alpha too: a clear obeys the colour mask and the scissor, and whatever alpha a frame leaves is the
+    // next frame's interface if it is not cleared (black where a window was).
     gQLUILayerAlpha = true;
-    // Issued again under the layer's alpha rules: the cached state names the window's.
     gGL.setColorMask(true, true);
+    {
+        LLGLDisable no_scissor(GL_SCISSOR_TEST);
+        const LLColor4 clear_color = gGL.getClearColor();
+        gGL.setClearColor(LLColor4(0.f, 0.f, 0.f, 0.f));
+        sUILayer.clear(GL_COLOR_BUFFER_BIT);
+        gGL.setClearColor(clear_color);
+    }
+    // Issued again under the layer's alpha rules: the cached state names the window's.
     gGL.setSceneBlendType(LLRender::BT_ALPHA);
     sUILayerBound = true;
     return true;
