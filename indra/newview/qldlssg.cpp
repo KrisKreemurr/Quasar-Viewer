@@ -38,6 +38,7 @@
 #include "llmatrix4a.h"
 #include "llrender.h"
 #include "llrendertarget.h"
+#include "llshadermgr.h"
 #include "llviewercamera.h"
 #include "llviewerwindow.h"
 #include "pipeline.h"
