@@ -75,6 +75,7 @@
 #include "llconversationlog.h"
 #if LL_WINDOWS
 #include "lldxhardware.h"
+#include "llwin32headers.h"  // GetAsyncKeyState, for the Vulkan presentation escape
 #include <shellapi.h>
 #endif
 #include "lltexturestats.h"
@@ -3696,6 +3697,14 @@ bool LLAppViewer::initWindow()
     gViewerWindow->initGLDefaults();
 
     // Quasar: the frames go to the screen through a Vulkan swapchain (QuasarVulkanPresent), where the window can.
+#if LL_WINDOWS
+    // Shift held as the viewer starts keeps Vulkan presentation off, and saves it off: a way back from a black window.
+    if (gSavedSettings.getBOOL("QuasarVulkanPresent") && (GetAsyncKeyState(VK_SHIFT) & 0x8000))
+    {
+        LL_WARNS("AppInit") << "Shift held at start-up: Vulkan presentation turned off" << LL_ENDL;
+        gSavedSettings.setBOOL("QuasarVulkanPresent", false);
+    }
+#endif
     if (gSavedSettings.getBOOL("QuasarVulkanPresent") && gViewerWindow->getWindow())
     {
         gViewerWindow->getWindow()->enableVulkanPresent(gSavedSettings.getBOOL("RenderVSyncEnable"));

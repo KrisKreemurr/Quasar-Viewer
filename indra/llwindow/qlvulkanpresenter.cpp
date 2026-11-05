@@ -83,6 +83,7 @@ namespace
     typedef void (APIENTRY* QL_PFN_NamedFramebufferTexture)(GLuint, GLenum, GLuint, GLint);
     typedef GLenum (APIENTRY* QL_PFN_CheckNamedFramebufferStatus)(GLuint, GLenum);
     typedef void (APIENTRY* QL_PFN_NamedFramebufferReadBuffer)(GLuint, GLenum);
+    typedef void (APIENTRY* QL_PFN_ClearNamedFramebufferfv)(GLuint, GLenum, GLint, const GLfloat*);
     typedef void (APIENTRY* QL_PFN_BlitNamedFramebuffer)(GLuint, GLuint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
                                                          GLint, GLbitfield, GLenum);
     typedef void (APIENTRY* QL_PFN_MemoryObjectParameteriv)(GLuint, GLenum, const GLint*);
@@ -110,6 +111,7 @@ namespace
         QL_PFN_NamedFramebufferTexture      NamedFramebufferTexture = nullptr;
         QL_PFN_CheckNamedFramebufferStatus  CheckNamedFramebufferStatus = nullptr;
         QL_PFN_NamedFramebufferReadBuffer   NamedFramebufferReadBuffer = nullptr;
+        QL_PFN_ClearNamedFramebufferfv      ClearNamedFramebufferfv = nullptr;
         QL_PFN_BlitNamedFramebuffer         BlitNamedFramebuffer = nullptr;
         QL_PFN_CreateObjects                CreateMemoryObjectsEXT = nullptr;
         QL_PFN_DeleteObjects                DeleteMemoryObjectsEXT = nullptr;
@@ -143,6 +145,7 @@ namespace
             QL_GL_LOAD(NamedFramebufferTexture, "glNamedFramebufferTexture");
             QL_GL_LOAD(CheckNamedFramebufferStatus, "glCheckNamedFramebufferStatus");
             QL_GL_LOAD(NamedFramebufferReadBuffer, "glNamedFramebufferReadBuffer");
+            QL_GL_LOAD(ClearNamedFramebufferfv, "glClearNamedFramebufferfv");
             QL_GL_LOAD(BlitNamedFramebuffer, "glBlitNamedFramebuffer");
             QL_GL_LOAD(CreateMemoryObjectsEXT, "glCreateMemoryObjectsEXT");
             QL_GL_LOAD(DeleteMemoryObjectsEXT, "glDeleteMemoryObjectsEXT");
@@ -291,9 +294,10 @@ struct QLVulkanPresenter::Impl
     VkSemaphore     mAcquired[FRAMES_IN_FLIGHT] = {};
     U64             mFrame = 0;
 
-    // Diagnosis of a black screen: for its first DIAGNOSE_FRAMES presents, Vulkan fills the window with magenta rather
-    // than the frame. Magenta seen means Vulkan reaches the screen and the frame is lost on its way in from GL; nothing
-    // seen means Vulkan's presents do not reach the screen at all. GL's errors around the sharing go to the log too.
+    // Diagnosis of a black screen. For its first DIAGNOSE_FRAMES presents Vulkan fills the window with magenta rather
+    // than the frame: seen, Vulkan reaches the screen. For the next DIAGNOSE_FRAMES GL fills the shared image with green
+    // rather than copying its back buffer into it, and Vulkan presents that: seen, the sharing works and what comes back
+    // empty is GL's back buffer. GL's errors around the sharing go to the log too.
     static constexpr U64 DIAGNOSE_FRAMES = 240;
     bool mLoggedFirstCopy = false;
 
@@ -1146,9 +1150,22 @@ struct QLVulkanPresenter::Impl
         {
             gl.Disable(GL_FRAMEBUFFER_SRGB);
         }
-        gl.NamedFramebufferReadBuffer(0, GL_BACK);
-        gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
-                                (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        if (mFrame >= DIAGNOSE_FRAMES && mFrame < 2 * DIAGNOSE_FRAMES)
+        {
+            if (mFrame == DIAGNOSE_FRAMES)
+            {
+                LL_INFOS("Vulkan") << "Diagnosis: the next " << DIAGNOSE_FRAMES
+                                   << " frames are green, filled by GL into the shared image" << LL_ENDL;
+            }
+            const GLfloat green[4] = { 0.f, 1.f, 0.f, 1.f };
+            gl.ClearNamedFramebufferfv(mGLFramebuffer, GL_COLOR, 0, green);
+        }
+        else
+        {
+            gl.NamedFramebufferReadBuffer(0, GL_BACK);
+            gl.BlitNamedFramebuffer(0, mGLFramebuffer, 0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width,
+                                    (GLint)height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
         if (srgb)
         {
             gl.Enable(GL_FRAMEBUFFER_SRGB);
@@ -1268,8 +1285,9 @@ struct QLVulkanPresenter::Impl
         }
         else
         {
-            if (mFrame == DIAGNOSE_FRAMES)
+            if (mFrame == 2 * DIAGNOSE_FRAMES)
             {
+                logGLErrors("the green frames");
                 LL_INFOS("Vulkan") << "Diagnosis over: presenting the viewer's frames" << LL_ENDL;
             }
             vkCmdBlitImage(cmd, mShared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mSwapImages[index],
