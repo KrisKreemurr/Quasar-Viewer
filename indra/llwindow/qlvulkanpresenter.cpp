@@ -2685,19 +2685,40 @@ struct QLVulkanPresenter::Impl
     //     weights beside its position (same index, the second half), and each draw names its skeleton: the avatar's
     //     palette for the skin, written once a frame into a ring every map of the frame reads (qlshadowskin.vert).
     //     A map draws its unrigged casters, then its rigged ones: two indirect draws.
+    //   - Alpha-masked casters (step 3: hair, leaves, cut-out clothes), unrigged and rigged, after those: arenas of their
+    //     own that keep each vertex's texture coordinate and colour beside its position (and weights, rigged), and each
+    //     draw's texture as a tile of an alpha atlas, an RGBA8 image Vulkan allocates and GL imports and fills: GL blits
+    //     a texture into a tile the first time a map draws it (by its GL name and content stamp), from the mip level
+    //     nearest the tile's size. Each draw carries its tile, its texture matrix, its cutoff and which of GL's alpha
+    //     tests it takes (qlshadowmask.vert, qlshadowmaskskin.vert, qlshadowmask.frag). Up to four indirect draws a map.
     static constexpr U32          SH_SLOTS = 96;  // ~34 maps a frame at most (probe faces, hero faces, cascades, spots), times the pacing depth
     static constexpr U32          SH_MAX_DRAWS = 8192;
     static constexpr VkDeviceSize SH_MVP_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 64;
     static constexpr VkDeviceSize SH_CMD_BYTES = (VkDeviceSize)SH_MAX_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
     static constexpr VkDeviceSize SH_PALBASE_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 4;
+    static constexpr VkDeviceSize SH_MASK_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 48;  // three vec4s a draw (qlshadowmask.vert)
     static constexpr VkDeviceSize SH_SLOT_BYTES =
-        ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES) + 255) & ~(VkDeviceSize)255;
+        ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES + SH_MASK_BYTES) + 255) & ~(VkDeviceSize)255;
     static_assert((SH_MVP_BYTES + SH_CMD_BYTES) % 256 == 0, "each slot's palette bases start on a storage offset");
+    static_assert((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES) % 256 == 0, "each slot's masks start on a storage offset");
+    static constexpr VkDeviceSize SH_MASK_START = SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES;
     // The unrigged arena: positions, then indices. The rigged one: positions, weights beside them, then indices.
     static constexpr VkDeviceSize SH_ARENA_VERTEX_BYTES = 192ull << 20;
     static constexpr VkDeviceSize SH_ARENA_INDEX_BYTES = 64ull << 20;
     static constexpr VkDeviceSize SH_RIGGED_VERTEX_BYTES = 128ull << 20;
     static constexpr VkDeviceSize SH_RIGGED_INDEX_BYTES = 48ull << 20;
+    // The masked arenas: positions, (weights,) texture coordinates (8 bytes a vertex), colours (4), then indices.
+    static constexpr VkDeviceSize SH_MASKED_VERTEX_BYTES = 64ull << 20;
+    static constexpr VkDeviceSize SH_MASKED_INDEX_BYTES = 32ull << 20;
+    static constexpr VkDeviceSize SH_MASKED_RIGGED_VERTEX_BYTES = 96ull << 20;
+    static constexpr VkDeviceSize SH_MASKED_RIGGED_INDEX_BYTES = 64ull << 20;
+    // The alpha atlas: 4096 square, tiles of 128, 1024 of them (qlshadowmask.frag's ATLAS_SIZE).
+    static constexpr U32          SH_ATLAS_SIZE = 4096;
+    static constexpr U32          SH_TILE = 128;
+    static constexpr U32          SH_TILES_ACROSS = SH_ATLAS_SIZE / SH_TILE;
+    static constexpr U32          SH_TILES = SH_TILES_ACROSS * SH_TILES_ACROSS;
+    // The kinds of draw, in the order a map's draws are written.
+    enum : U32 { SH_KIND_STATIC = 0, SH_KIND_RIGGED, SH_KIND_MASKED, SH_KIND_MASKED_RIGGED, SH_KINDS };
     // A palette as LLVOAvatar packs it for GL: the origin, then three columns a joint, each a vec4; a slot of the ring
     // holds the most a mesh can have. The ring is a segment a frame, four frames round: what the GPU reads of a frame is
     // done three frames on, by the pacing depth GL's frame fences keep.
@@ -2713,21 +2734,35 @@ struct QLVulkanPresenter::Impl
         U32 mBaseIndex = 0;
     };
     // A buffer Vulkan allocates and GL imports, positions (16 bytes a vertex), weights beside them where it keeps any
-    // (the same index, from vertexBytes on), then 16-bit indices; filled by GL's copies, found again by content stamp.
+    // (the same index, from vertexBytes on), texture coordinates (8 bytes) and colours (4) after those where it keeps
+    // them, then 16-bit indices; filled by GL's copies, found again by content stamp.
     struct ShArena
     {
         VkBuffer       buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         HANDLE         handle = nullptr;
         GLuint         glMemory = 0, gl = 0;
-        VkDeviceSize   vertexBytes = 0, weightBytes = 0, indexBytes = 0;
+        VkDeviceSize   vertexBytes = 0, weightBytes = 0, uvBytes = 0, colorBytes = 0, indexBytes = 0;
         VkDeviceSize   vertexTop = 0, indexTop = 0;
         U32            resets = 0;
         std::unordered_map<U64, ShArenaEntry> entries;
 
-        VkDeviceSize indexStart() const { return vertexBytes + weightBytes; }
-        VkDeviceSize totalBytes() const { return vertexBytes + weightBytes + indexBytes; }
-        VkDeviceSize used() const { return vertexTop * (weightBytes ? 2 : 1) + indexTop; }
+        VkDeviceSize uvStart() const { return vertexBytes + weightBytes; }
+        VkDeviceSize colorStart() const { return uvStart() + uvBytes; }
+        VkDeviceSize indexStart() const { return colorStart() + colorBytes; }
+        VkDeviceSize totalBytes() const { return indexStart() + indexBytes; }
+        VkDeviceSize used() const
+        {
+            return vertexTop * (weightBytes ? 2 : 1) + (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + indexTop;
+        }
+    };
+    // A texture's place in the alpha atlas: which texture, as it held what (its content stamp), and the last map that
+    // drew with it (a tile drawn with in the map being collected is never given to another texture).
+    struct ShTile
+    {
+        GLuint texture = 0;
+        U64    stamp = 0;
+        U64    lastPass = 0;
     };
     struct ShDepth
     {
@@ -2756,6 +2791,30 @@ struct QLVulkanPresenter::Impl
 
     ShArena        mShStatic;
     ShArena        mShRigged;
+
+    // The masked casters (step 3): their arenas, the atlas and what GL fills it through; made after the rest, and
+    // where they cannot be, the masked casters stay GL's and the rest goes on (mShMaskNote says why).
+    ShArena        mShMasked;
+    ShArena        mShMaskedRigged;
+    bool           mShMaskReady = false;
+    std::string    mShMaskNote = "not made yet";
+    VkImage        mShAtlas = VK_NULL_HANDLE;
+    VkDeviceMemory mShAtlasMemory = VK_NULL_HANDLE;
+    HANDLE         mShAtlasHandle = nullptr;
+    VkImageView    mShAtlasView = VK_NULL_HANDLE;
+    VkSampler      mShAtlasSampler = VK_NULL_HANDLE;
+    GLuint         mShAtlasGLMemory = 0, mShAtlasGL = 0;
+    GLuint         mShReadFbo = 0, mShAtlasFbo = 0;  // a caster's texture, and the atlas: a blit from one to the other
+    std::vector<ShTile> mShTiles;
+    std::map<std::pair<GLuint, U64>, U32> mShTileOf;
+    U64            mShPassSerial = 0;
+    U32            mShTilesTaken = 0;  // tiles given out so far; once all are, the least recently drawn goes
+    U32            mShTileUploadsNow = 0, mShTileUploadsLast = 0;
+    U32            mShMaskedNow = 0, mShMaskedLast = 0;
+    U32            mShMaskedRiggedNow = 0, mShMaskedRiggedLast = 0;
+    VkShaderModule mShMaskModule = VK_NULL_HANDLE, mShMaskSkinModule = VK_NULL_HANDLE, mShMaskFragModule = VK_NULL_HANDLE;
+    VkPipeline     mShMaskPipelines[4] = {};      // [clamp][greater]
+    VkPipeline     mShMaskSkinPipelines[4] = {};
 
     // The palettes: a host-visible ring Vulkan reads, a segment a frame; this frame's, found by avatar and skin.
     VkBuffer       mShPalettes = VK_NULL_HANDLE;
@@ -2793,8 +2852,8 @@ struct QLVulkanPresenter::Impl
     bool     mShInPass = false;
     U32      mShSlot = 0;
     U32      mShDraws = 0;
-    U32      mShStaticDraws = 0;  // the first draws, unrigged; the rest are rigged
-    bool     mShRiggedStarted = false;
+    U32      mShKind = SH_KIND_STATIC;  // the kind of the draws being written; a map's draws come kind by kind
+    U32      mShKindFirst[SH_KINDS + 1] = {};
     U32      mShWidth = 0, mShHeight = 0;
     bool     mShClamp = false, mShGreater = false, mShRemapDepth = false;
 
@@ -2834,8 +2893,8 @@ struct QLVulkanPresenter::Impl
             return false;
         }
 
-        if (!createArena(mShStatic, SH_ARENA_VERTEX_BYTES, false, SH_ARENA_INDEX_BYTES, "unrigged arena") ||
-            !createArena(mShRigged, SH_RIGGED_VERTEX_BYTES, true, SH_RIGGED_INDEX_BYTES, "rigged arena"))
+        if (!createArena(mShStatic, SH_ARENA_VERTEX_BYTES, false, false, SH_ARENA_INDEX_BYTES, "unrigged arena") ||
+            !createArena(mShRigged, SH_RIGGED_VERTEX_BYTES, true, false, SH_RIGGED_INDEX_BYTES, "rigged arena"))
         {
             return false;
         }
@@ -2899,29 +2958,30 @@ struct QLVulkanPresenter::Impl
         }
         mShPalettesMapped = static_cast<U8*>(mapped);
 
-        // The descriptor set of each slot: its matrices.
-        // The slot's matrices, its palette bases, and the palettes' ring.
-        VkDescriptorSetLayoutBinding bindings[3] = {};
-        for (U32 b = 0; b < 3; ++b)
+        // The descriptor set of each slot: the slot's matrices, its palette bases, the palettes' ring, the slot's masks,
+        // and the alpha atlas (written once the masked casters' objects are made).
+        VkDescriptorSetLayoutBinding bindings[5] = {};
+        for (U32 b = 0; b < 5; ++b)
         {
             bindings[b].binding         = b;
-            bindings[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[b].descriptorType  = b == 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[b].descriptorCount = 1;
-            bindings[b].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+            bindings[b].stageFlags      = b == 4 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
         }
         VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        set_info.bindingCount = 3;
+        set_info.bindingCount = 5;
         set_info.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mShSetLayout) != VK_SUCCESS)
         {
             mShSetLayout = VK_NULL_HANDLE;
             return shFail("vkCreateDescriptorSetLayout (shadows)");
         }
-        VkDescriptorPoolSize pool_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS * 3 };
+        const VkDescriptorPoolSize pool_sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS * 4 },
+                                                     { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SH_SLOTS } };
         VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pool_info.maxSets       = SH_SLOTS;
-        pool_info.poolSizeCount = 1;
-        pool_info.pPoolSizes    = &pool_size;
+        pool_info.poolSizeCount = 2;
+        pool_info.pPoolSizes    = pool_sizes;
         if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &mShDescriptorPool) != VK_SUCCESS)
         {
             mShDescriptorPool = VK_NULL_HANDLE;
@@ -2960,13 +3020,14 @@ struct QLVulkanPresenter::Impl
             {
                 return shFail("vkAllocateDescriptorSets (shadows)");
             }
-            const VkDescriptorBufferInfo buffers[3] = {
+            const VkDescriptorBufferInfo buffers[4] = {
                 { mShHost, SH_SLOT_BYTES * i, SH_MVP_BYTES },
                 { mShHost, SH_SLOT_BYTES * i + SH_MVP_BYTES + SH_CMD_BYTES, SH_PALBASE_BYTES },
                 { mShPalettes, 0, SH_PALETTE_SEGMENT_BYTES * SH_PALETTE_SEGMENTS },
+                { mShHost, SH_SLOT_BYTES * i + SH_MASK_START, SH_MASK_BYTES },
             };
-            VkWriteDescriptorSet writes[3] = {};
-            for (U32 b = 0; b < 3; ++b)
+            VkWriteDescriptorSet writes[4] = {};
+            for (U32 b = 0; b < 4; ++b)
             {
                 writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[b].dstSet          = slot.set;
@@ -2975,7 +3036,7 @@ struct QLVulkanPresenter::Impl
                 writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[b].pBufferInfo     = &buffers[b];
             }
-            vkUpdateDescriptorSets(mDevice, 3, writes, 0, nullptr);
+            vkUpdateDescriptorSets(mDevice, 4, writes, 0, nullptr);
         }
 
         // The render pass: a depth attachment loaded and stored, GENERAL throughout as every shared image is kept.
@@ -3025,8 +3086,8 @@ struct QLVulkanPresenter::Impl
                 {
                     continue;
                 }
-                if (!createShadowPipeline(clamp != 0, greater != 0, false, mShPipelines[clamp * 2 + greater]) ||
-                    !createShadowPipeline(clamp != 0, greater != 0, true, mShSkinPipelines[clamp * 2 + greater]))
+                if (!createShadowPipeline(clamp != 0, greater != 0, false, false, mShPipelines[clamp * 2 + greater]) ||
+                    !createShadowPipeline(clamp != 0, greater != 0, true, false, mShSkinPipelines[clamp * 2 + greater]))
                 {
                     return false;
                 }
@@ -3042,27 +3103,50 @@ struct QLVulkanPresenter::Impl
         mShReady = true;
         mShNote  = llformat("ready%s%s", mHasMultiIndirect ? "" : " (no multi-draw indirect: one call a draw)",
                             mHasDepthClamp ? "" : " (no depth clamp: the sun stays in GL)");
+        createMaskObjects();
         LL_INFOS("Vulkan") << "Shadows in Vulkan " << mShNote << ": arenas of "
                            << (mShStatic.totalBytes() >> 20) << " MB (unrigged) and " << (mShRigged.totalBytes() >> 20)
                            << " MB (rigged), " << SH_SLOTS << " slots of " << SH_MAX_DRAWS << " draws" << LL_ENDL;
         return true;
     }
 
-    bool createShadowPipeline(bool clamp, bool greater, bool rigged, VkPipeline& pipeline)
+    // A pipeline for one kind of caster. Masked: a fragment stage too (the alpha test), and failure says so in
+    // mShMaskNote rather than failing the shadows.
+    bool createShadowPipeline(bool clamp, bool greater, bool rigged, bool masked, VkPipeline& pipeline)
     {
-        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
-        stage.module = rigged ? mShSkinModule : mShModule;
-        stage.pName  = "main";
-        // Positions at binding 0; for a rigged caster, its weights at binding 1 (the arena's second part, bound there).
-        const VkVertexInputBindingDescription vertex_bindings[2] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
-                                                                     { 1, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
-        const VkVertexInputAttributeDescription attributes[2] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
-                                                                  { 1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
+        VkPipelineShaderStageCreateInfo stages[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
+                                                      { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
+        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = masked ? (rigged ? mShMaskSkinModule : mShMaskModule) : (rigged ? mShSkinModule : mShModule);
+        stages[0].pName  = "main";
+        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = mShMaskFragModule;
+        stages[1].pName  = "main";
+        // Positions at binding 0; for a rigged caster, its weights at binding 1 (the arena's second part, bound there);
+        // for a masked one, its texture coordinates and colours at the next two (locations 2 and 3).
+        VkVertexInputBindingDescription vertex_bindings[4] = {};
+        VkVertexInputAttributeDescription attributes[4] = {};
+        U32 streams = 0;
+        auto stream = [&](U32 location, U32 stride, VkFormat format)
+        {
+            vertex_bindings[streams] = { streams, stride, VK_VERTEX_INPUT_RATE_VERTEX };
+            attributes[streams] = { location, streams, format, 0 };
+            ++streams;
+        };
+        stream(0, 16, VK_FORMAT_R32G32B32_SFLOAT);
+        if (rigged)
+        {
+            stream(1, 16, VK_FORMAT_R32G32B32A32_SFLOAT);
+        }
+        if (masked)
+        {
+            stream(2, 8, VK_FORMAT_R32G32_SFLOAT);
+            stream(3, 4, VK_FORMAT_R8G8B8A8_UNORM);
+        }
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertex_input.vertexBindingDescriptionCount   = rigged ? 2 : 1;
+        vertex_input.vertexBindingDescriptionCount   = streams;
         vertex_input.pVertexBindingDescriptions      = vertex_bindings;
-        vertex_input.vertexAttributeDescriptionCount = rigged ? 2 : 1;
+        vertex_input.vertexAttributeDescriptionCount = streams;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -3089,8 +3173,8 @@ struct QLVulkanPresenter::Impl
         dynamic.dynamicStateCount = 2;
         dynamic.pDynamicStates    = dynamic_states;
         VkGraphicsPipelineCreateInfo pipeline_info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-        pipeline_info.stageCount          = 1;
-        pipeline_info.pStages             = &stage;
+        pipeline_info.stageCount          = masked ? 2 : 1;
+        pipeline_info.pStages             = stages;
         pipeline_info.pVertexInputState   = &vertex_input;
         pipeline_info.pInputAssemblyState = &assembly;
         pipeline_info.pViewportState      = &viewport_state;
@@ -3104,10 +3188,255 @@ struct QLVulkanPresenter::Impl
         if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
+            if (masked)
+            {
+                mShMaskNote = rigged ? "failed: vkCreateGraphicsPipelines (rigged masked shadows)"
+                                     : "failed: vkCreateGraphicsPipelines (masked shadows)";
+                return false;
+            }
             return shFail(rigged ? "vkCreateGraphicsPipelines (rigged shadows)" : "vkCreateGraphicsPipelines (shadows)");
         }
         return true;
     }
+
+    // The masked casters' objects: their two arenas, the atlas (an RGBA8 image Vulkan allocates, GL imports, GL's blits
+    // fill and Vulkan samples), its sampler, the framebuffers GL blits through, and the pipelines. Where any cannot be
+    // made, nothing of them is left and the masked casters stay GL's (mShMaskNote says why); the rest goes on.
+    bool createMaskObjects()
+    {
+        mShMaskReady = false;
+        mShMaskNote = "being made";
+        auto fail = [&](const std::string& why)
+        {
+            if (mShMaskNote.compare(0, 8, "failed: ") != 0)
+            {
+                mShMaskNote = "failed: " + why;
+            }
+            LL_WARNS("Vulkan") << "Masked shadow casters in Vulkan " << mShMaskNote << LL_ENDL;
+            destroyMaskObjects();
+            return false;
+        };
+        if (!createArena(mShMasked, SH_MASKED_VERTEX_BYTES, false, true, SH_MASKED_INDEX_BYTES, "masked arena") ||
+            !createArena(mShMaskedRigged, SH_MASKED_RIGGED_VERTEX_BYTES, true, true, SH_MASKED_RIGGED_INDEX_BYTES,
+                         "rigged masked arena"))
+        {
+            return fail("an arena");
+        }
+
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        info.extent        = { SH_ATLAS_SIZE, SH_ATLAS_SIZE, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mDevice, &info, nullptr, &mShAtlas) != VK_SUCCESS)
+        {
+            mShAtlas = VK_NULL_HANDLE;
+            return fail("vkCreateImage (atlas)");
+        }
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, mShAtlas, &req);
+        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (device_type == U32_MAX)
+        {
+            return fail("no device-local memory for the atlas");
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.image = mShAtlas;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = device_type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &mShAtlasMemory) != VK_SUCCESS)
+        {
+            mShAtlasMemory = VK_NULL_HANDLE;
+            return fail("vkAllocateMemory (atlas)");
+        }
+        vkBindImageMemory(mDevice, mShAtlas, mShAtlasMemory, 0);
+        VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view_info.image            = mShAtlas;
+        view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format           = VK_FORMAT_R8G8B8A8_UNORM;
+        view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(mDevice, &view_info, nullptr, &mShAtlasView) != VK_SUCCESS)
+        {
+            mShAtlasView = VK_NULL_HANDLE;
+            return fail("vkCreateImageView (atlas)");
+        }
+        VkSamplerCreateInfo sampler_info = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sampler_info.magFilter    = VK_FILTER_LINEAR;
+        sampler_info.minFilter    = VK_FILTER_LINEAR;
+        sampler_info.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.maxLod       = 0.f;
+        if (vkCreateSampler(mDevice, &sampler_info, nullptr, &mShAtlasSampler) != VK_SUCCESS)
+        {
+            mShAtlasSampler = VK_NULL_HANDLE;
+            return fail("vkCreateSampler (atlas)");
+        }
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = mShAtlasMemory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return fail("vkGetMemoryWin32HandleKHR (atlas)");
+        }
+        if (!mKMT)
+        {
+            mShAtlasHandle = handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &mShAtlasGLMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(mShAtlasGLMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(mShAtlasGLMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateTextures(GL_TEXTURE_2D, 1, &mShAtlasGL);
+        gl.TextureParameteri(mShAtlasGL, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(mShAtlasGL, 1, GL_RGBA8, (GLsizei)SH_ATLAS_SIZE, (GLsizei)SH_ATLAS_SIZE,
+                                  mShAtlasGLMemory, 0);
+        gl.CreateFramebuffers(1, &mShReadFbo);
+        gl.CreateFramebuffers(1, &mShAtlasFbo);
+        gl.NamedFramebufferTexture(mShAtlasFbo, GL_COLOR_ATTACHMENT0, mShAtlasGL, 0);
+        // Asked once, as it is made (a query waits for a threaded driver, so never a frame): the atlas must be one GL
+        // can blit into.
+        const GLenum status = gl.CheckNamedFramebufferStatus(mShAtlasFbo, GL_DRAW_FRAMEBUFFER);
+        gl.Finish();
+        logGLErrors("importing the shadow alpha atlas");
+        if (status != GL_FRAMEBUFFER_COMPLETE)
+        {
+            return fail(llformat("GL cannot draw into the atlas (framebuffer status 0x%x)", (U32)status));
+        }
+
+        VkShaderModuleCreateInfo module_info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        module_info.codeSize = sizeof(ql_spv_qlshadowmask_vert);
+        module_info.pCode    = ql_spv_qlshadowmask_vert;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mShMaskModule) != VK_SUCCESS)
+        {
+            mShMaskModule = VK_NULL_HANDLE;
+            return fail("vkCreateShaderModule (masked shadows)");
+        }
+        module_info.codeSize = sizeof(ql_spv_qlshadowmaskskin_vert);
+        module_info.pCode    = ql_spv_qlshadowmaskskin_vert;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mShMaskSkinModule) != VK_SUCCESS)
+        {
+            mShMaskSkinModule = VK_NULL_HANDLE;
+            return fail("vkCreateShaderModule (rigged masked shadows)");
+        }
+        module_info.codeSize = sizeof(ql_spv_qlshadowmask_frag);
+        module_info.pCode    = ql_spv_qlshadowmask_frag;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mShMaskFragModule) != VK_SUCCESS)
+        {
+            mShMaskFragModule = VK_NULL_HANDLE;
+            return fail("vkCreateShaderModule (masked shadows' alpha test)");
+        }
+        for (U32 clamp = 0; clamp < 2; ++clamp)
+        {
+            for (U32 greater = 0; greater < 2; ++greater)
+            {
+                if (clamp && !mHasDepthClamp)
+                {
+                    continue;
+                }
+                if (!createShadowPipeline(clamp != 0, greater != 0, false, true, mShMaskPipelines[clamp * 2 + greater]) ||
+                    !createShadowPipeline(clamp != 0, greater != 0, true, true, mShMaskSkinPipelines[clamp * 2 + greater]))
+                {
+                    return fail("a pipeline");
+                }
+            }
+        }
+
+        // Every slot's set samples the atlas.
+        const VkDescriptorImageInfo image = { mShAtlasSampler, mShAtlasView, VK_IMAGE_LAYOUT_GENERAL };
+        for (ShSlot& slot : mShSlots)
+        {
+            VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            write.dstSet          = slot.set;
+            write.dstBinding      = 4;
+            write.descriptorCount = 1;
+            write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo      = &image;
+            vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+        }
+
+        mShTiles.assign(SH_TILES, ShTile());
+        mShTileOf.clear();
+        mShTilesTaken = 0;
+        mShMaskReady = true;
+        mShMaskNote  = "ready";
+        LL_INFOS("Vulkan") << "Masked shadow casters in Vulkan ready: arenas of " << (mShMasked.totalBytes() >> 20)
+                           << " MB and " << (mShMaskedRigged.totalBytes() >> 20) << " MB (rigged), an atlas of "
+                           << SH_TILES << " tiles of " << SH_TILE << " square" << LL_ENDL;
+        return true;
+    }
+
+    // Everything createMaskObjects makes, once GL and Vulkan are done with it (made and destroyed only off the frame's
+    // path: as the shadows are made, on failure, at shutdown).
+    void destroyMaskObjects()
+    {
+        mShMaskReady = false;
+        if (!mDevice)
+        {
+            return;
+        }
+        vkDeviceWaitIdle(mDevice);
+        if (gl.Finish)
+        {
+            gl.Finish();
+        }
+        for (VkPipeline& p : mShMaskPipelines)
+        {
+            if (p) vkDestroyPipeline(mDevice, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
+        for (VkPipeline& p : mShMaskSkinPipelines)
+        {
+            if (p) vkDestroyPipeline(mDevice, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
+        for (VkShaderModule* m : { &mShMaskModule, &mShMaskSkinModule, &mShMaskFragModule })
+        {
+            if (*m) vkDestroyShaderModule(mDevice, *m, nullptr);
+            *m = VK_NULL_HANDLE;
+        }
+        if (mShReadFbo) gl.DeleteFramebuffers(1, &mShReadFbo);
+        if (mShAtlasFbo) gl.DeleteFramebuffers(1, &mShAtlasFbo);
+        if (mShAtlasGL) gl.DeleteTextures(1, &mShAtlasGL);
+        if (mShAtlasGLMemory) gl.DeleteMemoryObjectsEXT(1, &mShAtlasGLMemory);
+        mShReadFbo = mShAtlasFbo = mShAtlasGL = mShAtlasGLMemory = 0;
+        if (mShAtlasSampler) vkDestroySampler(mDevice, mShAtlasSampler, nullptr);
+        if (mShAtlasView) vkDestroyImageView(mDevice, mShAtlasView, nullptr);
+        if (mShAtlas) vkDestroyImage(mDevice, mShAtlas, nullptr);
+        if (mShAtlasMemory) vkFreeMemory(mDevice, mShAtlasMemory, nullptr);
+        if (mShAtlasHandle) CloseHandle(mShAtlasHandle);
+        mShAtlasSampler = VK_NULL_HANDLE;
+        mShAtlasView = VK_NULL_HANDLE;
+        mShAtlas = VK_NULL_HANDLE;
+        mShAtlasMemory = VK_NULL_HANDLE;
+        mShAtlasHandle = nullptr;
+        destroyArena(mShMasked);
+        destroyArena(mShMaskedRigged);
+        mShTiles.clear();
+        mShTileOf.clear();
+        mShTilesTaken = 0;
+    }
+
 
     // The depth image of a map's size, made the first time that size is drawn; the least recently used of more than
     // six goes (a frame draws four sizes: the main view's sun, its spots, the probes' sun, the hero probe's sun).
@@ -3267,6 +3596,7 @@ struct QLVulkanPresenter::Impl
         {
             gl.Finish();
         }
+        destroyMaskObjects();
         for (ShDepth& d : mShDepths)
         {
             destroyShadowDepth(d);
@@ -3345,6 +3675,10 @@ struct QLVulkanPresenter::Impl
             mShCopiedLast = mShCopiedNow;
             mShPassesNow = mShDrawsNow = 0;
             mShCopiedNow = 0;
+            mShMaskedLast = mShMaskedNow;
+            mShMaskedRiggedLast = mShMaskedRiggedNow;
+            mShTileUploadsLast = mShTileUploadsNow;
+            mShMaskedNow = mShMaskedRiggedNow = mShTileUploadsNow = 0;
             mShFrame = frame;
         }
     }
@@ -3362,6 +3696,11 @@ struct QLVulkanPresenter::Impl
         // Start an arena over when it is nearly full, before any of this map's draws is in it.
         resetArenaIfFull(mShStatic);
         resetArenaIfFull(mShRigged);
+        if (mShMaskReady)
+        {
+            resetArenaIfFull(mShMasked);
+            resetArenaIfFull(mShMaskedRigged);
+        }
         ShSlot& slot = mShSlots[mShNextSlot];
         if (slot.submitted)
         {
@@ -3376,8 +3715,12 @@ struct QLVulkanPresenter::Impl
         mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
         mShInPass     = true;
         mShDraws      = 0;
-        mShStaticDraws   = 0;
-        mShRiggedStarted = false;
+        mShKind       = SH_KIND_STATIC;
+        for (U32& first : mShKindFirst)
+        {
+            first = 0;
+        }
+        ++mShPassSerial;
         mShWidth      = width;
         mShHeight     = height;
         mShClamp      = clamp;
@@ -3388,8 +3731,11 @@ struct QLVulkanPresenter::Impl
 
     // A mesh in an arena: found by its content stamp, or copied in now (its weights too, where the arena keeps them).
     // False when it does not fit.
+    // A masked arena's mesh copies its texture coordinates and colours from uv_offset and color_offset as well; a
+    // colour offset of U32_MAX (a mesh without colours, for a test that reads none) leaves its colours as they are.
     bool arenaPlace(ShArena& arena, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
-                    U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index)
+                    U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index,
+                    U32 uv_offset = 0, U32 color_offset = U32_MAX)
     {
         if (!mShInPass)
         {
@@ -3416,6 +3762,17 @@ struct QLVulkanPresenter::Impl
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)weight_offset,
                                       (GLintptr)(arena.vertexBytes + arena.vertexTop), (GLsizeiptr)vertex_bytes);
         }
+        if (arena.uvBytes)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv_offset,
+                                      (GLintptr)(arena.uvStart() + arena.vertexTop / 2), (GLsizeiptr)vertex_count * 8);
+            if (color_offset != U32_MAX)
+            {
+                gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)color_offset,
+                                          (GLintptr)(arena.colorStart() + arena.vertexTop / 4),
+                                          (GLsizeiptr)vertex_count * 4);
+            }
+        }
         gl.CopyNamedBufferSubData(index_buffer, arena.gl, 0, (GLintptr)(arena.indexStart() + arena.indexTop),
                                   (GLsizeiptr)index_count * 2);
         ShArenaEntry entry;
@@ -3424,7 +3781,8 @@ struct QLVulkanPresenter::Impl
         arena.entries.emplace(stamp, entry);
         arena.vertexTop += vertex_bytes;
         arena.indexTop += index_bytes;
-        mShCopiedNow += vertex_bytes * (arena.weightBytes ? 2 : 1) + index_bytes;
+        mShCopiedNow += vertex_bytes * (arena.weightBytes ? 2 : 1) + (arena.uvBytes ? vertex_count * 12ull : 0) +
+                        index_bytes;
         base_vertex = entry.mBaseVertex;
         base_index  = entry.mBaseIndex;
         return true;
@@ -3442,6 +3800,91 @@ struct QLVulkanPresenter::Impl
     {
         return arenaPlace(mShRigged, stamp, vertex_buffer, vertex_offset, weight_offset, vertex_count, index_buffer,
                           index_count, base_vertex, base_index);
+    }
+
+    bool shadowArenaMasked(bool rigged, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
+                           U32 uv_offset, U32 color_offset, U32 vertex_count, GLuint index_buffer, U32 index_count,
+                           U32& base_vertex, U32& base_index)
+    {
+        if (!mShMaskReady)
+        {
+            return false;
+        }
+        return arenaPlace(rigged ? mShMaskedRigged : mShMasked, stamp, vertex_buffer, vertex_offset, weight_offset,
+                          vertex_count, index_buffer, index_count, base_vertex, base_index, uv_offset, color_offset);
+    }
+
+    // A texture's tile in the alpha atlas: found by its GL name and content stamp, or blitted in now by GL from the
+    // level nearest the tile's size (levels: how many it has). The tile is the least recently drawn once all are
+    // given out, never one the map being collected draws with. False when none is free: the caster is GL's.
+    bool shadowMaskTexture(GLuint texture, U64 stamp, U32 width, U32 height, U32 levels, U32& tile)
+    {
+        if (!mShInPass || !mShMaskReady || !texture || width == 0 || height == 0)
+        {
+            return false;
+        }
+        const std::pair<GLuint, U64> key(texture, stamp);
+        const auto found = mShTileOf.find(key);
+        if (found != mShTileOf.end())
+        {
+            tile = found->second;
+            mShTiles[tile].lastPass = mShPassSerial;
+            return true;
+        }
+        U32 at = U32_MAX;
+        if (mShTilesTaken < SH_TILES)
+        {
+            at = mShTilesTaken++;
+        }
+        else
+        {
+            U64 oldest = U64_MAX;
+            for (U32 i = 0; i < SH_TILES; ++i)
+            {
+                if (mShTiles[i].lastPass != mShPassSerial && mShTiles[i].lastPass < oldest)
+                {
+                    oldest = mShTiles[i].lastPass;
+                    at = i;
+                }
+            }
+            if (at == U32_MAX)
+            {
+                return false;
+            }
+            mShTileOf.erase(std::make_pair(mShTiles[at].texture, mShTiles[at].stamp));
+        }
+        // The level whose size is nearest the tile's from above (a linear blit then takes at most two texels to one).
+        U32 level = 0;
+        while (level + 1 < levels && llmax(width >> (level + 1), height >> (level + 1)) >= SH_TILE)
+        {
+            ++level;
+        }
+        const GLint src_w = (GLint)llmax(1u, width >> level);
+        const GLint src_h = (GLint)llmax(1u, height >> level);
+        const GLint x = (GLint)((at % SH_TILES_ACROSS) * SH_TILE);
+        const GLint y = (GLint)((at / SH_TILES_ACROSS) * SH_TILE);
+        // A blit is cut by the scissor test, and nothing else of the fragment pipeline: off for it where llrender has it
+        // on. The read framebuffer lets go of the texture after, so the texture can go when its owner deletes it.
+        const bool scissor = ql_gl_cap_tracked_enabled(GL_SCISSOR_TEST);
+        if (scissor)
+        {
+            gl.Disable(GL_SCISSOR_TEST);
+        }
+        gl.NamedFramebufferTexture(mShReadFbo, GL_COLOR_ATTACHMENT0, texture, (GLint)level);
+        gl.BlitNamedFramebuffer(mShReadFbo, mShAtlasFbo, 0, 0, src_w, src_h, x, y, x + (GLint)SH_TILE,
+                                y + (GLint)SH_TILE, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        gl.NamedFramebufferTexture(mShReadFbo, GL_COLOR_ATTACHMENT0, 0, 0);
+        if (scissor)
+        {
+            gl.Enable(GL_SCISSOR_TEST);
+        }
+        ++mShTileUploadsNow;
+        mShTiles[at].texture  = texture;
+        mShTiles[at].stamp    = stamp;
+        mShTiles[at].lastPass = mShPassSerial;
+        mShTileOf.emplace(key, at);
+        tile = at;
+        return true;
     }
 
     void resetArenaIfFull(ShArena& arena)
@@ -3507,12 +3950,27 @@ struct QLVulkanPresenter::Impl
         return base;
     }
 
-    bool createArena(ShArena& arena, VkDeviceSize vertex_bytes, bool weights, VkDeviceSize index_bytes, const char* what)
+    // An arena (see ShArena), with texture coordinates and colours where masked. A failure is the shadows' (shFail) for
+    // the arenas every map needs; a masked arena's leaves the rest made and says why in mShMaskNote.
+    bool createArena(ShArena& arena, VkDeviceSize vertex_bytes, bool weights, bool masked, VkDeviceSize index_bytes,
+                     const char* what)
     {
         const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
                                                                     : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        auto shFail = [&](const std::string& why)
+        {
+            if (masked)
+            {
+                mShMaskNote = "failed: " + why;
+                LL_WARNS("Vulkan") << "Masked shadow casters in Vulkan " << mShMaskNote << LL_ENDL;
+                return false;
+            }
+            return this->shFail(why);
+        };
         arena.vertexBytes = vertex_bytes;
         arena.weightBytes = weights ? vertex_bytes : 0;
+        arena.uvBytes     = masked ? vertex_bytes / 2 : 0;
+        arena.colorBytes  = masked ? vertex_bytes / 4 : 0;
         arena.indexBytes  = index_bytes;
         VkExternalMemoryBufferCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
         external.handleTypes = handle_type;
@@ -3584,14 +4042,27 @@ struct QLVulkanPresenter::Impl
         arena = ShArena();
     }
 
+    // The map's draws come kind by kind (SH_KIND_*): a draw of a kind before the one being written is refused.
+    bool enterKind(U32 kind)
+    {
+        if (!mShInPass || kind < mShKind || mShDraws >= SH_MAX_DRAWS)
+        {
+            return false;
+        }
+        while (mShKind < kind)
+        {
+            mShKindFirst[++mShKind] = mShDraws;
+        }
+        return true;
+    }
+
     bool shadowDraw(const float mvp[16], U32 base_vertex, U32 first_index, U32 index_count)
     {
-        if (!mShInPass || mShRiggedStarted || mShDraws >= SH_MAX_DRAWS)
+        if (!enterKind(SH_KIND_STATIC))
         {
             return false;
         }
         writeShadowDraw(mvp, base_vertex, first_index, index_count, 0);
-        mShStaticDraws = mShDraws;
         return true;
     }
 
@@ -3599,12 +4070,36 @@ struct QLVulkanPresenter::Impl
     // rigged arena.
     bool shadowDrawRigged(const float mvp[16], U32 palette_base, U32 base_vertex, U32 first_index, U32 index_count)
     {
-        if (!mShInPass || mShDraws >= SH_MAX_DRAWS || palette_base == U32_MAX)
+        if (palette_base == U32_MAX || !enterKind(SH_KIND_RIGGED))
         {
             return false;
         }
-        mShRiggedStarted = true;
         writeShadowDraw(mvp, base_vertex, first_index, index_count, palette_base);
+        return true;
+    }
+
+    // A masked caster, after all the map's opaque ones (and unrigged before rigged): its matrix, its palette (U32_MAX
+    // unrigged), its texture's tile (shadowMaskTexture), its texture matrix (null: none), its cutoff and its test (as
+    // qlshadowmask.frag numbers them), its mesh in the masked arena of its kind.
+    bool shadowDrawMasked(const float mvp[16], U32 palette_base, U32 tile, const float* texture_matrix, float cutoff,
+                          U32 test, U32 base_vertex, U32 first_index, U32 index_count)
+    {
+        const bool rigged = palette_base != U32_MAX;
+        if (!mShMaskReady || tile >= SH_TILES || !enterKind(rigged ? SH_KIND_MASKED_RIGGED : SH_KIND_MASKED))
+        {
+            return false;
+        }
+        // The texture matrix's rows for x and y over (u, v, 1), as GL's texture_matrix0 * vec4(uv, 0, 1) takes them
+        // (column major: element [column * 4 + row]).
+        static const float identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        const float* m = texture_matrix ? texture_matrix : identity;
+        const float mask[12] = { m[0], m[4], m[12], cutoff,
+                                 m[1], m[5], m[13], (float)test,
+                                 (float)((tile % SH_TILES_ACROSS) * SH_TILE), (float)((tile / SH_TILES_ACROSS) * SH_TILE),
+                                 (float)SH_TILE, 0.f };
+        memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_MASK_START + (size_t)mShDraws * sizeof(mask), mask,
+               sizeof(mask));
+        writeShadowDraw(mvp, base_vertex, first_index, index_count, rigged ? palette_base : 0);
         return true;
     }
 
@@ -3637,19 +4132,37 @@ struct QLVulkanPresenter::Impl
         }
         ShDepth* target = shadowDepth(mShWidth, mShHeight);
         const U32 variant = (mShClamp ? 2 : 0) + (mShGreater ? 1 : 0);
-        const VkPipeline pipeline = mShPipelines[variant];
-        const VkPipeline skin_pipeline = mShSkinPipelines[variant];
-        if (!target || !pipeline || !skin_pipeline || !depth_texture)
+        while (mShKind < SH_KINDS)
+        {
+            mShKindFirst[++mShKind] = mShDraws;  // the kinds not reached are empty, and the last ends the draws
+        }
+        auto kind_draws = [&](U32 kind) { return mShKindFirst[kind + 1] - mShKindFirst[kind]; };
+        const U32 rigged_draws        = kind_draws(SH_KIND_RIGGED);
+        const U32 masked_draws        = kind_draws(SH_KIND_MASKED);
+        const U32 masked_rigged_draws = kind_draws(SH_KIND_MASKED_RIGGED);
+        const bool masked = masked_draws + masked_rigged_draws > 0;
+        const VkPipeline pipelines[SH_KINDS] = { mShPipelines[variant], mShSkinPipelines[variant],
+                                                 mShMaskPipelines[variant], mShMaskSkinPipelines[variant] };
+        if (!target || !pipelines[0] || !pipelines[1] || (masked && (!pipelines[2] || !pipelines[3])) || !depth_texture)
         {
             return false;
         }
-        const U32 static_draws = mShStaticDraws;
-        const U32 rigged_draws = mShDraws - mShStaticDraws;
-        const GLuint gl_buffers[2] = { mShStatic.gl, mShRigged.gl };
+        // What GL hands over: every arena, the map's depth image and, with masked casters, the atlas its blits wrote.
+        GLuint gl_buffers[4] = { mShStatic.gl, mShRigged.gl, 0, 0 };
+        GLuint gl_textures[2] = { target->glTexture, mShAtlasGL };
+        const GLenum layouts[2] = { GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT };
+        GLuint buffer_count = 2;
+        const GLuint texture_count = masked ? 2 : 1;
+        if (mShMaskReady)
+        {
+            gl_buffers[buffer_count++] = mShMasked.gl;
+            gl_buffers[buffer_count++] = mShMaskedRigged.gl;
+        }
+        const ShArena* arenas[4] = { &mShStatic, &mShRigged, &mShMasked, &mShMaskedRigged };
+        const U32 arena_count = mShMaskReady ? 4 : 2;
         LL_PROFILE_ZONE_NAMED("vulkan shadow map");
         const GLint w = (GLint)mShWidth;
         const GLint h = (GLint)mShHeight;
-        const GLenum general = GL_LAYOUT_GENERAL_EXT;
 
         // GL: the map as it stands into Vulkan's image, and both over to Vulkan. Each step its own zone, to find
         // which, if any, waits for a threaded driver's thread.
@@ -3664,7 +4177,7 @@ struct QLVulkanPresenter::Impl
             // the arenas and the depth image is what makes NVIDIA's driver wait for its thread here.
             if (sShSignalObjects)
             {
-                gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+                gl.SignalSemaphoreEXT(mShGLDoneGL, buffer_count, gl_buffers, texture_count, gl_textures, layouts);
             }
             else
             {
@@ -3685,11 +4198,25 @@ struct QLVulkanPresenter::Impl
         VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(slot.cmd, &begin);
-        for (const ShArena* arena : { &mShStatic, &mShRigged })
+        for (U32 a = 0; a < arena_count; ++a)
         {
-            bufferBarrier(slot.cmd, arena->buffer, 0, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+            bufferBarrier(slot.cmd, arenas[a]->buffer, 0, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
                           VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                           VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+        }
+        VkImageMemoryBarrier atlas_acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        atlas_acquire.srcAccessMask       = 0;
+        atlas_acquire.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        atlas_acquire.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        atlas_acquire.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        atlas_acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        atlas_acquire.dstQueueFamilyIndex = mQueueFamily;
+        atlas_acquire.image               = mShAtlas;
+        atlas_acquire.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (masked)
+        {
+            vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &atlas_acquire);
         }
         VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         acquire.srcAccessMask       = 0;
@@ -3740,29 +4267,54 @@ struct QLVulkanPresenter::Impl
                 }
             }
         };
-        if (static_draws)
+        // Each kind: its pipeline, its arena's streams as the pipeline's bindings take them (positions, weights where
+        // rigged, texture coordinates and colours where masked), its range of the slot's draws.
+        for (U32 kind = 0; kind < SH_KINDS; ++kind)
         {
-            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            const VkDeviceSize zero = 0;
-            vkCmdBindVertexBuffers(slot.cmd, 0, 1, &mShStatic.buffer, &zero);
-            vkCmdBindIndexBuffer(slot.cmd, mShStatic.buffer, mShStatic.indexStart(), VK_INDEX_TYPE_UINT16);
-            draw_range(0, static_draws);
-        }
-        if (rigged_draws)
-        {
-            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skin_pipeline);
-            const VkBuffer buffers[2] = { mShRigged.buffer, mShRigged.buffer };
-            const VkDeviceSize offsets[2] = { 0, mShRigged.vertexBytes };
-            vkCmdBindVertexBuffers(slot.cmd, 0, 2, buffers, offsets);
-            vkCmdBindIndexBuffer(slot.cmd, mShRigged.buffer, mShRigged.indexStart(), VK_INDEX_TYPE_UINT16);
-            draw_range(static_draws, rigged_draws);
+            const U32 count = kind_draws(kind);
+            if (count == 0)
+            {
+                continue;
+            }
+            const ShArena& arena = *arenas[kind];
+            VkBuffer buffers[4];
+            VkDeviceSize offsets[4];
+            U32 streams = 0;
+            buffers[streams] = arena.buffer;
+            offsets[streams++] = 0;
+            if (arena.weightBytes)
+            {
+                buffers[streams] = arena.buffer;
+                offsets[streams++] = arena.vertexBytes;
+            }
+            if (arena.uvBytes)
+            {
+                buffers[streams] = arena.buffer;
+                offsets[streams++] = arena.uvStart();
+                buffers[streams] = arena.buffer;
+                offsets[streams++] = arena.colorStart();
+            }
+            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[kind]);
+            vkCmdBindVertexBuffers(slot.cmd, 0, streams, buffers, offsets);
+            vkCmdBindIndexBuffer(slot.cmd, arena.buffer, arena.indexStart(), VK_INDEX_TYPE_UINT16);
+            draw_range(mShKindFirst[kind], count);
         }
         vkCmdEndRenderPass(slot.cmd);
 
-        for (const ShArena* arena : { &mShStatic, &mShRigged })
+        for (U32 a = 0; a < arena_count; ++a)
         {
-            bufferBarrier(slot.cmd, arena->buffer, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+            bufferBarrier(slot.cmd, arenas[a]->buffer, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
                           VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
+        if (masked)
+        {
+            VkImageMemoryBarrier atlas_release = atlas_acquire;
+            atlas_release.srcAccessMask       = 0;
+            atlas_release.dstAccessMask       = 0;
+            atlas_release.srcQueueFamilyIndex = mQueueFamily;
+            atlas_release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+                                 0, nullptr, 0, nullptr, 1, &atlas_release);
         }
         VkImageMemoryBarrier release = acquire;
         release.srcAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -3795,7 +4347,7 @@ struct QLVulkanPresenter::Impl
         }
         slot.submitted = true;
         slot.serial    = ++mShSubmitSerial;
-        if (rigged_draws)
+        if (rigged_draws || masked_rigged_draws)
         {
             mShSegmentSerial[mShFrame % SH_PALETTE_SEGMENTS] = slot.serial;
         }
@@ -3805,7 +4357,7 @@ struct QLVulkanPresenter::Impl
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl wait");
             if (sShSignalObjects)
             {
-                gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+                gl.WaitSemaphoreEXT(mShVKDoneGL, buffer_count, gl_buffers, texture_count, gl_textures, layouts);
             }
             else
             {
@@ -3820,6 +4372,8 @@ struct QLVulkanPresenter::Impl
         ++mShPassesNow;
         mShDrawsNow += mShDraws;
         mShRiggedNow += rigged_draws;
+        mShMaskedNow += masked_draws;
+        mShMaskedRiggedNow += masked_rigged_draws;
         return true;
     }
 
@@ -3835,12 +4389,21 @@ struct QLVulkanPresenter::Impl
         {
             return mShNote;
         }
-        return llformat("%u maps, %u draws (%u rigged) last frame | arenas %.0f/%.0f + %.0f/%.0f MB, %.1f MB copied, "
-                        "%u+%u resets, %u palettes",
-                        mShPassesLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
-                        (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
-                        (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20),
-                        mShStatic.resets, mShRigged.resets, mShPaletteCountLast);
+        std::string info =
+            llformat("%u maps, %u draws (%u rigged) last frame | arenas %.0f/%.0f + %.0f/%.0f MB, %.1f MB copied, "
+                     "%u+%u resets, %u palettes",
+                     mShPassesLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
+                     (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
+                     (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20), mShStatic.resets,
+                     mShRigged.resets, mShPaletteCountLast);
+        if (!mShMaskReady)
+        {
+            return info + " | masked: " + mShMaskNote;
+        }
+        return info + llformat(" | masked %u (%u rigged), arenas %.0f + %.0f MB, %u+%u resets, atlas %u/%u, %u new",
+                               mShMaskedLast + mShMaskedRiggedLast, mShMaskedRiggedLast,
+                               (double)mShMasked.used() / (1 << 20), (double)mShMaskedRigged.used() / (1 << 20),
+                               mShMasked.resets, mShMaskedRigged.resets, mShTilesTaken, SH_TILES, mShTileUploadsLast);
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
@@ -5410,6 +5973,33 @@ bool QLVulkanPresenter::shadowDrawRigged(const float mvp[16], unsigned palette, 
                                          unsigned first_index, unsigned index_count)
 {
     return sActive && sActive->shadowDrawRigged(mvp, palette, base_vertex, first_index, index_count);
+}
+
+// static
+bool QLVulkanPresenter::shadowArenaMasked(bool rigged, unsigned long long stamp, unsigned vertex_buffer,
+                                          unsigned vertex_offset, unsigned weight_offset, unsigned uv_offset,
+                                          unsigned color_offset, unsigned vertex_count, unsigned index_buffer,
+                                          unsigned index_count, unsigned& base_vertex, unsigned& base_index)
+{
+    return sActive && sActive->shadowArenaMasked(rigged, (U64)stamp, vertex_buffer, vertex_offset, weight_offset,
+                                                 uv_offset, color_offset, vertex_count, index_buffer, index_count,
+                                                 base_vertex, base_index);
+}
+
+// static
+bool QLVulkanPresenter::shadowMaskTexture(unsigned texture, unsigned long long stamp, unsigned width, unsigned height,
+                                          unsigned levels, unsigned& tile)
+{
+    return sActive && sActive->shadowMaskTexture(texture, (U64)stamp, width, height, levels, tile);
+}
+
+// static
+bool QLVulkanPresenter::shadowDrawMasked(const float mvp[16], unsigned palette, unsigned tile,
+                                         const float* texture_matrix, float cutoff, unsigned test,
+                                         unsigned base_vertex, unsigned first_index, unsigned index_count)
+{
+    return sActive && sActive->shadowDrawMasked(mvp, palette, tile, texture_matrix, cutoff, test, base_vertex,
+                                                first_index, index_count);
 }
 
 // static

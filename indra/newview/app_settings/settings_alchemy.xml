@@ -2916,6 +2916,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarVulkanShadowsMasked</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): with QuasarVulkanShadows on, alpha-masked shadow casters (cut-out hair, leaves, clothes and fences; legacy material masks), rigged or not, are drawn by Vulkan too, their textures' alpha copied into an atlas. Off: they stay in GL.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanShadows</key>
         <map>
             <key>Comment</key>

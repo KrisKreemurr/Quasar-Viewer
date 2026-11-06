@@ -13300,6 +13300,45 @@ public:
     static bool shortIndices(const LLVertexBuffer* vb) { return vb->mIndicesType == GL_UNSIGNED_SHORT; }
 };
 
+// The masked passes drawShadow draws with an alpha test, which Vulkan can take (QuasarVulkanShadowsMasked): each
+// with the test its GL program makes (qlshadowmask.frag: 0 shadowAlphaMaskF, 1 the same fullbright, 2 treeShadowF) and
+// whether GL's pass batches textures (a batch of several is then GL's, drawn through the indexed lookup). Each has its
+// rigged twin at the next type.
+struct QLMaskPass
+{
+    U32  mType;
+    U32  mTest;
+    bool mBatchTextures;
+};
+static constexpr QLMaskPass QL_MASK_PASSES[] = {
+    { LLRenderPass::PASS_ALPHA_MASK, 0, true },
+    { LLRenderPass::PASS_FULLBRIGHT_ALPHA_MASK, 1, true },
+    { LLRenderPass::PASS_NORMSPEC_MASK, 2, false },
+    { LLRenderPass::PASS_MATERIAL_ALPHA_MASK, 2, false },
+    { LLRenderPass::PASS_SPECMAP_MASK, 2, false },
+    { LLRenderPass::PASS_NORMMAP_MASK, 2, false },
+};
+static constexpr U32 QL_MASK_PASS_COUNT = LL_ARRAY_SIZE(QL_MASK_PASSES);
+
+// What Vulkan left of each masked pass, unrigged and rigged, for GL to draw as its pass would.
+struct QLMaskLeftovers
+{
+    bool mTaken = false;  // Vulkan drew this map's masked passes; GL draws only what is left here
+    std::vector<LLDrawInfo*> mLists[QL_MASK_PASS_COUNT][2];
+};
+
+static S32 ql_mask_pass_index(U32 type)
+{
+    for (U32 p = 0; p < QL_MASK_PASS_COUNT; ++p)
+    {
+        if (QL_MASK_PASSES[p].mType == type)
+        {
+            return (S32)p;
+        }
+    }
+    return -1;
+}
+
 static bool ql_vulkan_shadows_wanted()
 {
 #if QL_VULKAN_SHADOWS
@@ -13315,10 +13354,17 @@ static bool ql_vulkan_shadows_wanted()
 // has: drawShadow then leaves the unrigged out of its own pass, and the rigged too where `rigged` comes back set, and
 // draws those Vulkan could not take, left in `leftovers` and `rigged_leftovers`, with GL.
 static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, std::vector<LLDrawInfo*>& leftovers,
-                                     bool& rigged, std::vector<LLDrawInfo*>& rigged_leftovers)
+                                     bool& rigged, std::vector<LLDrawInfo*>& rigged_leftovers,
+                                     QLMaskLeftovers& masked_leftovers)
 {
     rigged = false;
     rigged_leftovers.clear();
+    masked_leftovers.mTaken = false;
+    for (auto& lists : masked_leftovers.mLists)
+    {
+        lists[0].clear();
+        lists[1].clear();
+    }
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
     static LLCachedControl<bool> signal_objects(gSavedSettings, "QuasarVulkanShadowSignalObjects", true);
@@ -13463,12 +13509,175 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         }
     }
 
+    // The masked casters (step 3), after every opaque one, unrigged then rigged: each texture's alpha into the atlas,
+    // each mesh with its texture coordinates and colours into a masked arena, each draw with its tile, texture matrix,
+    // cutoff and test, as pushMaskBatches and pushBatch bind them for GL. GL keeps what Vulkan cannot take (a batch of
+    // several textures, a texture it cannot blit, no colours where the test reads them, a full atlas or arena).
+    static LLCachedControl<bool> masked_enabled(gSavedSettings, "QuasarVulkanShadowsMasked", true);
+    masked_leftovers.mTaken = masked_enabled();
+    if (masked_leftovers.mTaken)
+    {
+        LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan masked casters");
+        // Whether a texture matrix applies, as pushBatch decides it.
+        const bool texture_matrices = !gCubeSnapshot || gPipeline.mHeroProbeManager.isMirrorPass();
+        for (U32 r = 0; r < 2; ++r)
+        {
+            const bool rig = r == 1;
+            last_vb = nullptr;
+            last_in_arena = false;
+            const LLImageGL* last_image = nullptr;
+            U64 last_stamp = 0;
+            bool last_tiled = false;
+            bool last_colors = false;
+            unsigned tile = 0;
+            const LLVOAvatar* last_avatar = nullptr;
+            U64 last_skin = 0;
+            unsigned palette = ~0u;
+            bool skip_skin = true;
+            for (U32 p = 0; p < QL_MASK_PASS_COUNT; ++p)
+            {
+                const QLMaskPass& pass = QL_MASK_PASSES[p];
+                const U32 type = pass.mType + (rig ? 1 : 0);
+                auto* end = gPipeline.endRenderMap(type);
+                for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(type); i != end;)
+                {
+                    LLDrawInfo* params = *i;
+                    LLCullResult::increment_iterator(i, end);
+                    // As pushMaskBatches passes over them: nothing to draw, or a multi-material batch the indexed
+                    // pass draws.
+                    if (!params || !params->mCount || params->mMaterialSlotList.size() > 1)
+                    {
+                        continue;
+                    }
+                    auto gl_draws = [&]() { masked_leftovers.mLists[p][r].push_back(params); };
+                    if ((pass.mBatchTextures && params->mTextureList.size() > 1) || params->mTexture.isNull())
+                    {
+                        gl_draws();
+                        continue;
+                    }
+                    if (rig)
+                    {
+                        if (!params->mAvatar || !params->mSkinInfo)
+                        {
+                            gl_draws();
+                            continue;
+                        }
+                        LLVOAvatar* avatar = params->mAvatar.get();
+                        const U64 skin = params->mSkinInfo->mHash;
+                        if (avatar != last_avatar || skin != last_skin)
+                        {
+                            last_avatar = avatar;
+                            last_skin   = skin;
+                            const LLVOAvatar::MatrixPaletteCache& mpc =
+                                avatar->updateSkinInfoMatrixPalette(params->mSkinInfo);
+                            skip_skin = mpc.mMatrixPalette.empty();
+                            palette   = skip_skin ? ~0u
+                                                  : QLVulkanPresenter::shadowPalette((U64)(uintptr_t)avatar, skin,
+                                                                                     mpc.mGLMp.data(),
+                                                                                     (U32)mpc.mGLMp.size());
+                        }
+                        if (skip_skin)
+                        {
+                            continue;  // no palette yet: GL would not draw it either
+                        }
+                        if (palette == ~0u)
+                        {
+                            gl_draws();
+                            continue;
+                        }
+                    }
+
+                    // The texture: RGB or RGBA (an alpha-only or two-channel texture reads through a swizzle a blit
+                    // does not take), uncompressed, 2D.
+                    const LLImageGL* image = params->mTexture->getGLTexture();
+                    const U64 image_stamp = image ? image->getContentStamp() : 0;
+                    if (image != last_image || image_stamp != last_stamp)
+                    {
+                        last_image = image;
+                        last_stamp = image_stamp;
+                        last_tiled = false;
+                        if (image && image->getHasGLTexture() && image->getTexTarget() == GL_TEXTURE_2D &&
+                            image->getComponents() >= 3 && !image->isAlphaOnly())
+                        {
+                            const S32 format = image->getStorageInternalFormat();
+                            const S32 width  = image->getWidth();
+                            const S32 height = image->getHeight();
+                            if ((format == GL_RGBA8 || format == GL_SRGB8_ALPHA8 || format == GL_RGB8 ||
+                                 format == GL_SRGB8) && width > 0 && height > 0)
+                            {
+                                unsigned levels = 1;
+                                if (image->getUseMipMaps())
+                                {
+                                    for (S32 size = llmax(width, height); size > 1; size >>= 1)
+                                    {
+                                        ++levels;
+                                    }
+                                }
+                                last_tiled = QLVulkanPresenter::shadowMaskTexture(image->getTexName(), image_stamp,
+                                                                                  (unsigned)width, (unsigned)height,
+                                                                                  levels, tile);
+                            }
+                        }
+                    }
+                    if (!last_tiled)
+                    {
+                        gl_draws();
+                        continue;
+                    }
+
+                    const LLVertexBuffer* vb = params->mVertexBuffer.get();
+                    if (vb != last_vb)
+                    {
+                        last_vb = vb;
+                        // test 0 multiplies by the vertex colour's alpha, so needs the colours; the others read none.
+                        const bool colors = vb && vb->hasDataType(LLVertexBuffer::TYPE_COLOR);
+                        last_in_arena =
+                            vb && LLNavShapeVBOManager::shortIndices(vb) &&
+                            vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD0) &&
+                            (!rig || vb->hasDataType(LLVertexBuffer::TYPE_WEIGHT4)) &&
+                            QLVulkanPresenter::shadowArenaMasked(
+                                rig, vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
+                                vb->getOffset(LLVertexBuffer::TYPE_VERTEX),
+                                rig ? vb->getOffset(LLVertexBuffer::TYPE_WEIGHT4) : 0,
+                                vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD0),
+                                colors ? vb->getOffset(LLVertexBuffer::TYPE_COLOR) : ~0u, vb->getNumVerts(),
+                                LLNavShapeVBOManager::glIndices(vb), vb->getNumIndices(), base_vertex, base_index);
+                        // A mesh without colours is placed without them: only a test that reads none draws it.
+                        last_colors = colors;
+                    }
+                    if (!last_in_arena || (pass.mTest == 0 && !last_colors))
+                    {
+                        gl_draws();
+                        continue;
+                    }
+                    LLMatrix4a modelview = view;
+                    if (params->mModelMatrix)
+                    {
+                        modelview.setMul(*params->mModelMatrix, modelview);
+                    }
+                    LLMatrix4a mvp;
+                    mvp.setMul(modelview, proj);
+                    const F32* texture_matrix = (params->mTextureMatrix && texture_matrices)
+                                                    ? (const F32*)params->mTextureMatrix->mMatrix
+                                                    : nullptr;
+                    if (!QLVulkanPresenter::shadowDrawMasked(mvp.getF32ptr(), rig ? palette : ~0u, tile, texture_matrix,
+                                                             params->mAlphaMaskCutoff, pass.mTest, base_vertex,
+                                                             base_index + params->mOffset, params->mCount))
+                    {
+                        gl_draws();
+                    }
+                }
+            }
+        }
+    }
+
     gGL.flush();
     if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
     {
         leftovers.clear();
         rigged = false;
         rigged_leftovers.clear();
+        masked_leftovers.mTaken = false;
         return false;  // nothing drawn: GL draws them all
     }
     return true;
@@ -13585,9 +13794,44 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
     // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows); the few it could not
     // take are drawn with GL in the unrigged pass below.
     static std::vector<LLDrawInfo*> vulkan_leftovers, vulkan_rigged_leftovers;
+    static QLMaskLeftovers vulkan_masked;
     bool vulkan_rigged = false;
-    const bool vulkan_casters =
-        ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers, vulkan_rigged, vulkan_rigged_leftovers);
+    const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers, vulkan_rigged,
+                                                         vulkan_rigged_leftovers, vulkan_masked);
+    // A masked pass: what Vulkan left of it where Vulkan drew the map's masked casters, as pushMaskBatches and
+    // pushRiggedMaskBatches draw them; otherwise the pass as before.
+    auto masked_objects = [&](LLRenderPass* pool, U32 type, bool batch_textures, bool rigged)
+    {
+        const S32 index = ql_mask_pass_index(type);
+        if (!vulkan_casters || !vulkan_masked.mTaken || index < 0)
+        {
+            if (pool == mFullbrightAlphaMaskPool)
+            {
+                renderFullbrightMaskedObjects(type, true, batch_textures, rigged);
+            }
+            else
+            {
+                renderMaskedObjects(type, true, batch_textures, rigged);
+            }
+            return;
+        }
+        gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        gGLLastMatrix = NULL;
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_mesh = 0;
+        bool skip_last = false;
+        for (LLDrawInfo* params : vulkan_masked.mLists[index][rigged ? 1 : 0])
+        {
+            LLGLSLShader::sCurBoundShaderPtr->setMinimumAlpha(params->mAlphaMaskCutoff);
+            if (!rigged || LLRenderPass::uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh,
+                                                             skip_last))
+            {
+                pool->pushBatch(*params, true, batch_textures);
+            }
+        }
+        gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        gGLLastMatrix = NULL;
+    };
 
     for (int j = 0; j < 2; ++j) // 0 -- static, 1 -- rigged
     {
@@ -13680,7 +13924,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 // Masked: opaque wherever it draws, so solid where it casts. The blended pass below
                 // shares the program and stipples.
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_STIPPLE, 0.f);
-                renderMaskedObjects(LLRenderPass::PASS_ALPHA_MASK, true, true, rigged);
+                masked_objects(mAlphaMaskPool, LLRenderPass::PASS_ALPHA_MASK, true, rigged);
             }
 
             {
@@ -13696,7 +13940,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::SUN_UP_FACTOR, sun_up);
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_TARGET_WIDTH, (float)target_width);
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_STIPPLE, 0.f); // masked
-                renderFullbrightMaskedObjects(LLRenderPass::PASS_FULLBRIGHT_ALPHA_MASK, true, true, rigged);
+                masked_objects(mFullbrightAlphaMaskPool, LLRenderPass::PASS_FULLBRIGHT_ALPHA_MASK, true, rigged);
             }
 
             {
@@ -13715,10 +13959,10 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 {
                     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow alpha material");
                     LL_PROFILE_GPU_ZONE("shadow alpha material");
-                    renderMaskedObjects(LLRenderPass::PASS_NORMSPEC_MASK, true, false, rigged);
-                    renderMaskedObjects(LLRenderPass::PASS_MATERIAL_ALPHA_MASK, true, false, rigged);
-                    renderMaskedObjects(LLRenderPass::PASS_SPECMAP_MASK, true, false, rigged);
-                    renderMaskedObjects(LLRenderPass::PASS_NORMMAP_MASK, true, false, rigged);
+                    masked_objects(mAlphaMaskPool, LLRenderPass::PASS_NORMSPEC_MASK, false, rigged);
+                    masked_objects(mAlphaMaskPool, LLRenderPass::PASS_MATERIAL_ALPHA_MASK, false, rigged);
+                    masked_objects(mAlphaMaskPool, LLRenderPass::PASS_SPECMAP_MASK, false, rigged);
+                    masked_objects(mAlphaMaskPool, LLRenderPass::PASS_NORMMAP_MASK, false, rigged);
 
                     // multi-material indexed legacy mask batches alpha-test per-slot
                     if (LLGLSLShader::sIndexedLegacyMaterials && gDeferredShadowMaterialIndexedProgram.isComplete())
