@@ -13736,15 +13736,31 @@ static void ql_shadow_part(EQLShadowPart part, U32 draws_before)
 
 std::string ql_shadow_gl_draws_info()
 {
+    static const char* const names[QL_SHADOW_PARTS] = { "opaque", "gltf", "occlusion", "geom",
+                                                         "masked", "blend", "grass", "gltf mask" };
     const U32* d = sQLShadowPartLast;
+    U32 order[QL_SHADOW_PARTS];
     U32 total = 0;
     for (U32 i = 0; i < QL_SHADOW_PARTS; ++i)
     {
+        order[i] = i;
         total += d[i];
     }
-    return llformat("%u | opaque %u, gltf %u, occlusion %u, geom %u, masked %u, blend %u, grass %u, gltf mask %u", total,
-                    d[QL_SHADOW_OPAQUE], d[QL_SHADOW_GLTF], d[QL_SHADOW_OCCLUSION], d[QL_SHADOW_GEOM],
-                    d[QL_SHADOW_MASKED], d[QL_SHADOW_BLEND], d[QL_SHADOW_GRASS], d[QL_SHADOW_GLTF_MASK]);
+    // The largest first: the line is long, and the screen cuts its end.
+    std::stable_sort(order, order + QL_SHADOW_PARTS, [d](U32 a, U32 b) { return d[a] > d[b]; });
+    std::string info = llformat("%u |", total);
+    for (U32 i = 0; i < QL_SHADOW_PARTS; ++i)
+    {
+        info += llformat(" %s %u", names[order[i]], d[order[i]]);
+    }
+    // In the log too, every half minute, where the whole line can be read.
+    static LLFrameTimer logged;
+    if (logged.getElapsedTimeF32() > 30.f)
+    {
+        logged.reset();
+        LL_INFOS("QuasarShadows") << "GL shadow draws last frame: " << info << LL_ENDL;
+    }
+    return info;
 }
 
 std::string ql_vulkan_shadows_info()
