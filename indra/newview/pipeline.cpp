@@ -13758,7 +13758,10 @@ std::string ql_shadow_gl_draws_info()
     if (logged.getElapsedTimeF32() > 30.f)
     {
         logged.reset();
-        LL_INFOS("QuasarShadows") << "GL shadow draws last frame: " << info << LL_ENDL;
+        LL_INFOS("QuasarShadows") << "GL shadow draws last frame: " << info << " (raw: opaque " << d[0] << ", gltf "
+                                  << d[1] << ", occlusion " << d[2] << ", geom " << d[3] << ", masked " << d[4]
+                                  << ", blend " << d[5] << ", grass " << d[6] << ", gltf mask " << d[7] << ")"
+                                  << LL_ENDL;
     }
     return info;
 }
