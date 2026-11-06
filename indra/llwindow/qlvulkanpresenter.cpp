@@ -129,6 +129,7 @@ namespace
     typedef void (APIENTRY* QL_PFN_TextureStorage2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei);
     typedef void (APIENTRY* QL_PFN_CopyNamedBufferSubData)(GLuint, GLuint, GLintptr, GLintptr, GLsizeiptr);
     typedef void (APIENTRY* QL_PFN_NamedBufferStorageMemEXT)(GLuint, GLsizeiptr, GLuint, GLuint64);
+    typedef void (APIENTRY* QL_PFN_GetTextureParameteriv)(GLuint, GLenum, GLint*);
     typedef void (APIENTRY* QL_PFN_ClearTexSubImage)(GLuint, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei,
                                                      GLenum, GLenum, const void*);
     typedef void (APIENTRY* QL_PFN_CopyImageSubData)(GLuint, GLenum, GLint, GLint, GLint, GLint, GLuint, GLenum, GLint,
@@ -175,6 +176,8 @@ namespace
         QL_PFN_NamedBufferStorageMemEXT     NamedBufferStorageMemEXT = nullptr;
         QL_PFN_CreateObjects                CreateBuffers = nullptr;
         QL_PFN_ClearTexSubImage             ClearTexSubImage = nullptr;
+        QL_PFN_GetTextureParameteriv        GetTextureParameteriv = nullptr;
+        QL_PFN_NamedFramebufferReadBuffer   NamedFramebufferDrawBuffer = nullptr;
         QL_PFN_DeleteObjects                DeleteBuffers = nullptr;
 
         bool load()
@@ -220,6 +223,8 @@ namespace
             QL_GL_LOAD(NamedBufferStorageMemEXT, "glNamedBufferStorageMemEXT");
             QL_GL_LOAD(CreateBuffers, "glCreateBuffers");
             QL_GL_LOAD(ClearTexSubImage, "glClearTexSubImage");
+            QL_GL_LOAD(GetTextureParameteriv, "glGetTextureParameteriv");
+            QL_GL_LOAD(NamedFramebufferDrawBuffer, "glNamedFramebufferDrawBuffer");
             QL_GL_LOAD(DeleteBuffers, "glDeleteBuffers");
 #undef QL_GL_LOAD
             return true;
@@ -2752,12 +2757,16 @@ struct QLVulkanPresenter::Impl
         }
         void deleted(int count, const unsigned* textures) override
         {
+            // Out of the map at once, by value: GL may hand the name out again before the next present, to a target
+            // given Vulkan's memory anew.
             std::lock_guard<std::mutex> lock(mOwner.mExtMutex);
             for (int i = 0; i < count; ++i)
             {
-                if (mOwner.mExtTextures.count(textures[i]))
+                auto found = mOwner.mExtTextures.find(textures[i]);
+                if (found != mOwner.mExtTextures.end())
                 {
-                    mOwner.mExtDeleted.push_back(textures[i]);
+                    mOwner.mExtFreeing.push_back(found->second);
+                    mOwner.mExtTextures.erase(found);
                 }
             }
         }
@@ -2773,7 +2782,14 @@ struct QLVulkanPresenter::Impl
 
     mutable std::mutex mExtMutex;
     std::unordered_map<GLuint, ExtTexture> mExtTextures;
-    std::vector<GLuint> mExtDeleted;
+    std::vector<ExtTexture> mExtFreeing;  // taken out of mExtTextures as GL deleted their names; freed at the next present
+    bool        mExtKeptAlive = false;    // shut down while GL still held some: the device was kept for them
+
+    size_t extLiveCount() const
+    {
+        std::lock_guard<std::mutex> lock(mExtMutex);
+        return mExtTextures.size() + mExtFreeing.size();
+    }
     bool        mExtFormatOK[EXT_FORMAT_COUNT] = {};
     bool        mExtTested = false;
     bool        mExtPassed = false;  // at least the G-buffer's formats passed
@@ -2885,9 +2901,6 @@ struct QLVulkanPresenter::Impl
         {
             ext.handle = handle;  // kept open while GL holds the import (a threaded driver imports on its own thread)
         }
-        while (gl.GetError() != GL_NO_ERROR)
-        {
-        }
         gl.CreateMemoryObjectsEXT(1, &ext.glMemory);
         const GLint dedicated_flag = GL_TRUE;
         gl.MemoryObjectParameterivEXT(ext.glMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
@@ -2895,9 +2908,20 @@ struct QLVulkanPresenter::Impl
                                       mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
         gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
         gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, ext.glMemory, 0);
-        // Asked once an allocation, off the frame's path (render targets are made as the render inputs change).
-        const GLenum error = gl.GetError();
-        if (error != GL_NO_ERROR)
+        // Asked once an allocation, off the frame's path (render targets are made as the render inputs change): every
+        // flag these calls raised is taken, so none is left for llrender's own check of the allocation, and whether
+        // the texture has storage now decides, not the flags.
+        GLenum error = GL_NO_ERROR;
+        for (GLenum e = gl.GetError(); e != GL_NO_ERROR; e = gl.GetError())
+        {
+            error = error == GL_NO_ERROR ? e : error;
+        }
+        GLint immutable = GL_FALSE;
+        gl.GetTextureParameteriv(texture, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+        while (gl.GetError() != GL_NO_ERROR)
+        {
+        }
+        if (!immutable)
         {
             LL_WARNS("Vulkan") << "Vulkan memory for a " << width << "x" << height << " " << format.name
                                << " texture: GL would not take it (0x" << std::hex << error << std::dec << ")" << LL_ENDL;
@@ -2925,24 +2949,13 @@ struct QLVulkanPresenter::Impl
     // The images of the names GL has deleted, on the main thread (each present).
     void extCollect()
     {
-        std::vector<GLuint> deleted;
+        std::vector<ExtTexture> freeing;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
-            deleted.swap(mExtDeleted);
+            freeing.swap(mExtFreeing);
         }
-        for (GLuint name : deleted)
+        for (ExtTexture& ext : freeing)
         {
-            ExtTexture ext;
-            {
-                std::lock_guard<std::mutex> lock(mExtMutex);
-                auto found = mExtTextures.find(name);
-                if (found == mExtTextures.end())
-                {
-                    continue;
-                }
-                ext = found->second;
-                mExtTextures.erase(found);
-            }
             VkMemoryRequirements req = {};
             vkGetImageMemoryRequirements(mDevice, ext.image, &req);
             mExtBytes -= llmin(mExtBytes, (U64)req.size);
@@ -2989,6 +3002,7 @@ struct QLVulkanPresenter::Impl
         VkFence fence = VK_NULL_HANDLE;
         auto cleanup = [&]()
         {
+            gl.Finish();  // GL's signal and wait done before their semaphores go
             if (fence) vkDestroyFence(mDevice, fence, nullptr);
             if (cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cmd);
             if (gl_done_gl) gl.DeleteSemaphoresEXT(1, &gl_done_gl);
@@ -3124,6 +3138,27 @@ struct QLVulkanPresenter::Impl
         vkWaitForFences(mDevice, 1, &fence, VK_TRUE, UINT64_MAX);
         gl.WaitSemaphoreEXT(vk_done_gl, 0, nullptr, (GLuint)made_names.size(), made_names.data(), layouts.data());
 
+        // Each must be one GL can draw into: attached to a framebuffer, complete.
+        bool drawable[EXT_FORMAT_COUNT] = {};
+        GLuint fbo = 0;
+        gl.CreateFramebuffers(1, &fbo);
+        for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+        {
+            if (!made[i])
+            {
+                continue;
+            }
+            const ExtFormat& format = EXT_FORMATS[i];
+            const GLenum attachment = !format.depth ? GL_COLOR_ATTACHMENT0
+                                                    : (format.stencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT);
+            gl.NamedFramebufferTexture(fbo, attachment, textures[i], 0);
+            gl.NamedFramebufferDrawBuffer(fbo, format.depth ? GL_NONE : GL_COLOR_ATTACHMENT0);
+            gl.NamedFramebufferReadBuffer(fbo, format.depth ? GL_NONE : GL_COLOR_ATTACHMENT0);
+            drawable[i] = gl.CheckNamedFramebufferStatus(fbo, GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            gl.NamedFramebufferTexture(fbo, attachment, 0, 0);
+        }
+        gl.DeleteFramebuffers(1, &fbo);
+
         // Each read back where GL's texel (8, 8) is: colour as floats, depth as a float. An sRGB format may come back
         // as stored or decoded: either passes.
         std::string results;
@@ -3133,7 +3168,11 @@ struct QLVulkanPresenter::Impl
             const ExtFormat& format = EXT_FORMATS[i];
             bool ok = false;
             std::string got;
-            if (made[i])
+            if (made[i] && !drawable[i])
+            {
+                got = "no complete framebuffer";
+            }
+            else if (made[i])
             {
                 if (format.depth)
                 {
@@ -3168,8 +3207,8 @@ struct QLVulkanPresenter::Impl
             }
             mExtFormatOK[i] = ok;
             passed += ok ? 1 : 0;
-            results += llformat("%s%s %s", results.empty() ? "" : ", ", format.name,
-                                !made[i] ? "not made" : (ok ? "ok" : ("WRONG (" + got + ")").c_str()));
+            const std::string verdict = !made[i] ? std::string("not made") : (ok ? std::string("ok") : "WRONG (" + got + ")");
+            results += llformat("%s%s %s", results.empty() ? "" : ", ", format.name, verdict.c_str());
         }
         logGLErrors("the render target self-test");
 
@@ -6060,10 +6099,21 @@ struct QLVulkanPresenter::Impl
                 vkDestroyCommandPool(mDevice, mCommandPool, nullptr);
                 mCommandPool = VK_NULL_HANDLE;
             }
-            vkDestroyDevice(mDevice, nullptr);
+            // Render targets GL still draws into live in this device's memory (QuasarVulkanTargets): the device, its
+            // memory, the instance and the library stay, for the process's life, rather than go from under them.
+            mExtKeptAlive = extLiveCount() > 0;
+            if (mExtKeptAlive)
+            {
+                LL_WARNS("Vulkan") << "Vulkan presentation ends with " << extLiveCount()
+                                   << " render targets in its memory: the device is kept for them" << LL_ENDL;
+            }
+            else
+            {
+                vkDestroyDevice(mDevice, nullptr);
+            }
             mDevice = VK_NULL_HANDLE;
         }
-        if (mInstance)
+        if (mInstance && !mExtKeptAlive)
         {
             if (mSurface && vkDestroySurfaceKHR)
             {
@@ -6081,7 +6131,7 @@ struct QLVulkanPresenter::Impl
             }
             mInstance = VK_NULL_HANDLE;
         }
-        if (mLibrary)
+        if (mLibrary && !mExtKeptAlive)
         {
             FreeLibrary(mLibrary);
             mLibrary = nullptr;
