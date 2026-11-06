@@ -49,6 +49,9 @@ S32 LLDrawPoolGLTFPBR::getNumDeferredPasses()
     return 1;
 }
 
+// Quasar: the opaque pass's draws GL keeps while Vulkan draws the rest (QuasarVulkanPBRDraws; pipeline.cpp).
+extern std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers;
+
 void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
 {
     llassert(!LLPipeline::sRenderingHUDs);
@@ -78,7 +81,22 @@ void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
     LLGLSLShader* opaque = scalar_program.selectVariant();
 
     opaque->bind();
-    if (indexed)
+    if (!alpha_mask && gQLVulkanPBRLeftovers)
+    {
+        // Quasar: Vulkan draws the opaque pass's draws it could take (QuasarVulkanPBRDraws, pipeline.cpp); GL draws the
+        // rest, as the sweep below would (multi-material infos are the indexed sweep's where it runs).
+        LLFetchedGLTFMaterial* last_mat = nullptr;
+        LLViewerTexture* last_tex = nullptr;
+        for (LLDrawInfo* params : *gQLVulkanPBRLeftovers)
+        {
+            if (indexed && params->mGLTFMaterialList.size() > 1)
+            {
+                continue;
+            }
+            pushGLTFBatch(*params, last_mat, last_tex);
+        }
+    }
+    else if (indexed)
     { // multi-material infos are drawn separately below; render only scalar here
         pushGLTFBatchesScalar(mRenderType);
     }

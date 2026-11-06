@@ -199,10 +199,31 @@ public:
                              unsigned height, bool greater, bool remap_depth, float anisotropy);
     static bool gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                              unsigned normal_offset, unsigned uv_offset, unsigned color_offset, unsigned vertex_count,
-                             unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index);
-    static bool gbufferDraw(const float mvp[16], const float normal_matrix[16], unsigned texture,
-                            unsigned texture_levels, unsigned base_vertex, unsigned first_index,
-                            unsigned index_count);
+                             unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index,
+                             unsigned tangent_offset = ~0u);
+
+    /// One draw of the G-buffer pass. Simple: textures[0] alone (the diffuse), times the tint. PBR (GL's
+    /// pbropaqueF.glsl, opaque, unrigged): base colour, normal, occlusion-roughness-metal and emissive textures, a 0 in
+    /// any slot standing for GL's default there (white, or the flat normal in the normal slot), the KHR texture
+    /// transforms packed as LLGLTFMaterial::TextureTransform::getPacked packs them, the factors, and whether it is
+    /// double-sided; the mesh needs tangents (gbufferArena's tangent_offset). Every texture named must be in Vulkan's
+    /// memory. levels: as many as GL samples of each.
+    enum GbKind : unsigned { GB_SIMPLE = 0, GB_PBR = 1 };
+    struct GbDraw
+    {
+        float    mvp[16];
+        float    normal_matrix[16];
+        float    texture_matrix[16];      // the texture animation's (identity where there is none)
+        float    transforms[4][8] = {};   // base colour, normal, ORM, emissive
+        float    emissive[3] = {};
+        float    metallic = 0.f, roughness = 0.f;
+        unsigned kind = GB_SIMPLE;
+        bool     double_sided = false;
+        unsigned textures[4] = {};
+        unsigned levels[4] = { 1, 1, 1, 1 };
+        unsigned base_vertex = 0, first_index = 0, index_count = 0;
+    };
+    static bool gbufferDraw(const GbDraw& draw);
     static bool gbufferEnd();
     static void gbufferAbandon();
     static std::string gbufferInfo();

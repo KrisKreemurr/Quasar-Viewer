@@ -53,6 +53,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <array>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -4157,19 +4158,21 @@ struct QLVulkanPresenter::Impl
         VkDeviceMemory memory = VK_NULL_HANDLE;
         HANDLE         handle = nullptr;
         GLuint         glMemory = 0, gl = 0;
-        VkDeviceSize   vertexBytes = 0, weightBytes = 0, normalBytes = 0, uvBytes = 0, colorBytes = 0, indexBytes = 0;
+        VkDeviceSize   vertexBytes = 0, weightBytes = 0, normalBytes = 0, tangentBytes = 0, uvBytes = 0, colorBytes = 0,
+                       indexBytes = 0;
         VkDeviceSize   vertexTop = 0, indexTop = 0;
         U32            resets = 0;
         std::unordered_map<U64, ShArenaEntry> entries;
 
         VkDeviceSize normalStart() const { return vertexBytes + weightBytes; }
-        VkDeviceSize uvStart() const { return vertexBytes + weightBytes + normalBytes; }
+        VkDeviceSize tangentStart() const { return vertexBytes + weightBytes + normalBytes; }
+        VkDeviceSize uvStart() const { return vertexBytes + weightBytes + normalBytes + tangentBytes; }
         VkDeviceSize colorStart() const { return uvStart() + uvBytes; }
         VkDeviceSize indexStart() const { return colorStart() + colorBytes; }
         VkDeviceSize totalBytes() const { return indexStart() + indexBytes; }
         VkDeviceSize used() const
         {
-            return vertexTop * (1 + (weightBytes ? 1 : 0) + (normalBytes ? 1 : 0)) +
+            return vertexTop * (1 + (weightBytes ? 1 : 0) + (normalBytes ? 1 : 0) + (tangentBytes ? 1 : 0)) +
                    (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + indexTop;
         }
     };
@@ -5244,7 +5247,8 @@ struct QLVulkanPresenter::Impl
     // colour offset of U32_MAX (a mesh without colours, for a test that reads none) leaves its colours as they are.
     bool arenaPlace(ShArena& arena, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
                     U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index,
-                    U32 uv_offset = 0, U32 color_offset = U32_MAX, U32 normal_offset = 0, bool any_pass = false)
+                    U32 uv_offset = 0, U32 color_offset = U32_MAX, U32 normal_offset = 0, bool any_pass = false,
+                    U32 tangent_offset = U32_MAX)
     {
         if (!mShInPass && !any_pass)
         {
@@ -5276,6 +5280,12 @@ struct QLVulkanPresenter::Impl
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)normal_offset,
                                       (GLintptr)(arena.normalStart() + arena.vertexTop), (GLsizeiptr)vertex_bytes);
         }
+        // Tangents where the mesh has them (the PBR and material draws need them; the rest leave the space unread).
+        if (arena.tangentBytes && tangent_offset != U32_MAX)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)tangent_offset,
+                                      (GLintptr)(arena.tangentStart() + arena.vertexTop), (GLsizeiptr)vertex_bytes);
+        }
         if (arena.uvBytes)
         {
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv_offset,
@@ -5295,7 +5305,8 @@ struct QLVulkanPresenter::Impl
         arena.entries.emplace(stamp, entry);
         arena.vertexTop += vertex_bytes;
         arena.indexTop += index_bytes;
-        mShCopiedNow += vertex_bytes * (1 + (arena.weightBytes ? 1 : 0) + (arena.normalBytes ? 1 : 0)) +
+        mShCopiedNow += vertex_bytes * (1 + (arena.weightBytes ? 1 : 0) + (arena.normalBytes ? 1 : 0) +
+                                        (arena.tangentBytes && tangent_offset != U32_MAX ? 1 : 0)) +
                         (arena.uvBytes ? vertex_count * 12ull : 0) + index_bytes;
         base_vertex = entry.mBaseVertex;
         base_index  = entry.mBaseIndex;
@@ -5478,7 +5489,7 @@ struct QLVulkanPresenter::Impl
     // An arena (see ShArena), with texture coordinates and colours where masked. A failure is the shadows' (shFail) for
     // the arenas every map needs; a masked arena's leaves the rest made and says why in mShMaskNote.
     bool createArena(ShArena& arena, VkDeviceSize vertex_bytes, bool weights, bool masked, VkDeviceSize index_bytes,
-                     const char* what, bool normals = false)
+                     const char* what, bool normals = false, bool tangents = false)
     {
         const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
                                                                     : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
@@ -5495,6 +5506,7 @@ struct QLVulkanPresenter::Impl
         arena.vertexBytes = vertex_bytes;
         arena.weightBytes = weights ? vertex_bytes : 0;
         arena.normalBytes = normals ? vertex_bytes : 0;
+        arena.tangentBytes = tangents ? vertex_bytes : 0;
         arena.uvBytes     = masked ? vertex_bytes / 2 : 0;
         arena.colorBytes  = masked ? vertex_bytes / 4 : 0;
         arena.indexBytes  = index_bytes;
@@ -6087,7 +6099,9 @@ struct QLVulkanPresenter::Impl
     //   - A render pass and framebuffer for each set of attachments, kept until one of their images goes.
     static constexpr U32          GB_SLOTS = 16;
     static constexpr U32          GB_MAX_DRAWS = 8192;
-    static constexpr VkDeviceSize GB_DRAW_BYTES = 128;  // mvp, normal matrix
+    // A draw's data (qlgbuffer.vert's Draw): mvp, normal matrix, texture matrix, the four KHR transforms, the PBR
+    // factors and kind, the emissive colour, and room for the legacy materials' to come.
+    static constexpr VkDeviceSize GB_DRAW_BYTES = 384;
     static constexpr VkDeviceSize GB_SLOT_BYTES =
         ((VkDeviceSize)GB_MAX_DRAWS * (GB_DRAW_BYTES + sizeof(VkDrawIndexedIndirectCommand)) + 255) & ~(VkDeviceSize)255;
     static constexpr VkDeviceSize GB_ARENA_VERTEX_BYTES = 64ull << 20;  // positions; normals the same, uvs half, colours a quarter
@@ -6110,13 +6124,24 @@ struct QLVulkanPresenter::Impl
         VkImageView   views[5] = {};
         VkRenderPass  pass = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        VkPipeline    pipelines[2] = {};  // [greater]
+        VkPipeline    pipelines[4] = {};  // [greater * 2 + double-sided]
+        bool          normHdr = false;    // the normals attachment is RGBA16 (GL's GBUFFER_NORM_HDR)
     };
-    struct GbDraw
+    struct GbQueued
     {
-        GLuint texture;
-        U32    index;
+        VkDescriptorSet set;  // its textures'
+        U32             index;
+        U32             pipe;  // double-sided
     };
+    // A texture slot's default where a draw names none (GL binds sWhiteImagep, or sFlatNormalImagep in the normal
+    // slot): images of Vulkan's own.
+    struct GbDefault
+    {
+        VkImage        image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView    view = VK_NULL_HANDLE;
+    };
+    using GbMatKey = std::array<VkImage, 4>;
 
     bool        mGbTried = false, mGbReady = false;
     std::string mGbNote = "off (QuasarVulkanProbeDraws)";
@@ -6140,7 +6165,12 @@ struct QLVulkanPresenter::Impl
     S32              mGbTarget = -1;
     bool             mGbGreater = false, mGbRemap = false;
     F32              mGbAnisotropy = 1.f;  // GL's level (LLRender::sAnisotropicFilteringLevel) as the sampler was made
-    std::vector<GbDraw> mGbDraws;
+    std::vector<GbQueued> mGbDraws;
+    std::vector<GLuint>   mGbPassTextures;        // the textures the pass draws with, each once, for the hand-over
+    std::vector<VkImage>  mGbPassImages;
+    GbDefault             mGbWhite, mGbFlat;
+    std::map<GbMatKey, VkDescriptorSet> mGbMatSets;  // a set for each four images drawn with together
+    std::unordered_multimap<VkImage, GbMatKey> mGbMatUse;  // the sets an image is in
     // For the status line: this frame's and the last whole frame's.
     U32              mGbFrame = 0;
     U32              mGbPassesNow = 0, mGbPassesLast = 0, mGbDrawsNow = 0, mGbDrawsLast = 0;
@@ -6178,7 +6208,8 @@ struct QLVulkanPresenter::Impl
             mGbNote = "needs QuasarVulkanTargets and QuasarVulkanTextures, their self-tests passed";
             return false;
         }
-        if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, false, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true))
+        if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, false, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true,
+                         true))
         {
             return gbFail("its arena");
         }
@@ -6226,19 +6257,24 @@ struct QLVulkanPresenter::Impl
             mGbSetLayout = VK_NULL_HANDLE;
             return gbFail("vkCreateDescriptorSetLayout (draws)");
         }
-        VkDescriptorSetLayoutBinding tex_binding = {};
-        tex_binding.binding         = 0;
-        tex_binding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        tex_binding.descriptorCount = 1;
-        tex_binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-        set_info.pBindings = &tex_binding;
+        // Set 1: a draw's four textures (qlgbuffer.frag: base colour or diffuse, normal, ORM, emissive).
+        VkDescriptorSetLayoutBinding tex_bindings[4] = {};
+        for (U32 i = 0; i < 4; ++i)
+        {
+            tex_bindings[i].binding         = i;
+            tex_bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            tex_bindings[i].descriptorCount = 1;
+            tex_bindings[i].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        set_info.bindingCount = 4;
+        set_info.pBindings    = tex_bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mGbTexLayout) != VK_SUCCESS)
         {
             mGbTexLayout = VK_NULL_HANDLE;
             return gbFail("vkCreateDescriptorSetLayout (textures)");
         }
         const VkDescriptorSetLayout layouts[2] = { mGbSetLayout, mGbTexLayout };
-        VkPushConstantRange push = { VK_SHADER_STAGE_VERTEX_BIT, 0, 16 };
+        VkPushConstantRange push = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 };
         VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         layout_info.setLayoutCount         = 2;
         layout_info.pSetLayouts            = layouts;
@@ -6259,7 +6295,7 @@ struct QLVulkanPresenter::Impl
             mGbPool = VK_NULL_HANDLE;
             return gbFail("vkCreateDescriptorPool (draws)");
         }
-        const VkDescriptorPoolSize tex_size = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GB_MAX_TEXTURE_SETS };
+        const VkDescriptorPoolSize tex_size = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GB_MAX_TEXTURE_SETS * 4 };
         pool_info.flags      = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         pool_info.maxSets    = GB_MAX_TEXTURE_SETS;
         pool_info.pPoolSizes = &tex_size;
@@ -6332,11 +6368,116 @@ struct QLVulkanPresenter::Impl
         {
             return gbFail("its semaphores could not be shared");
         }
+        if (!createGbDefaults())
+        {
+            return gbFail("its default textures");
+        }
         mGbReady = true;
         mGbNote  = "ready";
         LL_INFOS("Vulkan") << "Probe draws in Vulkan ready: an arena of " << (mGbArena.totalBytes() >> 20) << " MB, "
                            << GB_SLOTS << " slots of " << GB_MAX_DRAWS << " draws" << LL_ENDL;
         return true;
+    }
+
+    // White and the flat normal (128, 128, 255), as GL's defaults hold them, small, cleared once.
+    bool createGbDefaults()
+    {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(mDevice, &cmd_info, &cmd) != VK_SUCCESS)
+        {
+            return false;
+        }
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+        bool made = true;
+        const float colors[2][4] = { { 1.f, 1.f, 1.f, 1.f }, { 128.f / 255.f, 128.f / 255.f, 1.f, 1.f } };
+        GbDefault* defaults[2] = { &mGbWhite, &mGbFlat };
+        for (U32 i = 0; i < 2 && made; ++i)
+        {
+            GbDefault& d = *defaults[i];
+            VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            info.imageType     = VK_IMAGE_TYPE_2D;
+            info.format        = VK_FORMAT_R8G8B8A8_UNORM;
+            info.extent        = { 4, 4, 1 };
+            info.mipLevels     = 1;
+            info.arrayLayers   = 1;
+            info.samples       = VK_SAMPLE_COUNT_1_BIT;
+            info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+            info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+            info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (vkCreateImage(mDevice, &info, nullptr, &d.image) != VK_SUCCESS)
+            {
+                d.image = VK_NULL_HANDLE;
+                made = false;
+                break;
+            }
+            VkMemoryRequirements req = {};
+            vkGetImageMemoryRequirements(mDevice, d.image, &req);
+            VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            alloc.allocationSize  = req.size;
+            alloc.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (alloc.memoryTypeIndex == U32_MAX || vkAllocateMemory(mDevice, &alloc, nullptr, &d.memory) != VK_SUCCESS)
+            {
+                d.memory = VK_NULL_HANDLE;
+                made = false;
+                break;
+            }
+            vkBindImageMemory(mDevice, d.image, d.memory, 0);
+            VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            view_info.image            = d.image;
+            view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format           = VK_FORMAT_R8G8B8A8_UNORM;
+            view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            if (vkCreateImageView(mDevice, &view_info, nullptr, &d.view) != VK_SUCCESS)
+            {
+                d.view = VK_NULL_HANDLE;
+                made = false;
+                break;
+            }
+            VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image               = d.image;
+            b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &b);
+            VkClearColorValue value = {};
+            memcpy(value.float32, colors[i], sizeof(colors[i]));
+            vkCmdClearColorImage(cmd, d.image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &b.subresourceRange);
+            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b.oldLayout     = VK_IMAGE_LAYOUT_GENERAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &b);
+        }
+        vkEndCommandBuffer(cmd);
+        if (made)
+        {
+            VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers    = &cmd;
+            made = vkQueueSubmit(mQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+            vkDeviceWaitIdle(mDevice);  // once, as the draws are made ready
+        }
+        vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cmd);
+        return made;
+    }
+
+    void destroyGbDefault(GbDefault& d)
+    {
+        if (d.view) vkDestroyImageView(mDevice, d.view, nullptr);
+        if (d.image) vkDestroyImage(mDevice, d.image, nullptr);
+        if (d.memory) vkFreeMemory(mDevice, d.memory, nullptr);
+        d = GbDefault();
     }
 
     void destroyGbTarget(GbTarget& t)
@@ -6358,7 +6499,36 @@ struct QLVulkanPresenter::Impl
     // with it (frees come EXT_FREE_PRESENTS presents after GL deleted the name).
     void gbForget(const ExtTexture& ext)
     {
-        if (ext.block >= 0 || mGbTargets.empty())
+        if (ext.block >= 0)
+        {
+            // A texture: the sets it is in go (made again, without it, when next drawn with).
+            const auto range = mGbMatUse.equal_range(ext.image);
+            std::vector<GbMatKey> keys;
+            for (auto it = range.first; it != range.second; ++it)
+            {
+                keys.push_back(it->second);
+            }
+            for (const GbMatKey& key : keys)
+            {
+                const auto found = mGbMatSets.find(key);
+                if (found == mGbMatSets.end())
+                {
+                    continue;
+                }
+                if (mGbTexPool) vkFreeDescriptorSets(mDevice, mGbTexPool, 1, &found->second);
+                mGbMatSets.erase(found);
+                for (VkImage image : key)
+                {
+                    auto use = mGbMatUse.equal_range(image);
+                    for (auto it = use.first; it != use.second;)
+                    {
+                        it = it->second == key ? mGbMatUse.erase(it) : std::next(it);
+                    }
+                }
+            }
+            return;
+        }
+        if (mGbTargets.empty())
         {
             return;
         }
@@ -6400,13 +6570,10 @@ struct QLVulkanPresenter::Impl
             destroyGbTarget(t);
         }
         mGbTargets.clear();
-        {
-            std::lock_guard<std::mutex> lock(mExtMutex);
-            for (auto& entry : mExtTextures)
-            {
-                entry.second.texSet = VK_NULL_HANDLE;  // the pool goes, and its sets with it
-            }
-        }
+        mGbMatSets.clear();  // the pool goes, and its sets with it
+        mGbMatUse.clear();
+        destroyGbDefault(mGbWhite);
+        destroyGbDefault(mGbFlat);
         for (GbSlot& slot : mGbSlots)
         {
             if (slot.fence) vkDestroyFence(mDevice, slot.fence, nullptr);
@@ -6485,49 +6652,91 @@ struct QLVulkanPresenter::Impl
         return ext.view;
     }
 
-    // A texture's descriptor set for the draws, made the first time it is drawn with. Null where it cannot be.
-    // levels: as many as GL samples (its GL_TEXTURE_MAX_LEVEL plus one): the view reaches no further, since the levels
-    // below are not filled. One- and two-channel textures stay GL's: they hold luminance or alpha read through a swizzle
-    // GL's texture keeps (LLImageGL::applySwizzleForDeprecatedFormat), which the view would not.
-    VkDescriptorSet gbTextureSet(GLuint texture, U32 levels)
+    // A texture slot's view: the texture's own (in Vulkan's memory, as far as GL samples it), or the slot's default
+    // where none is named. Null where the texture cannot be drawn with: not Vulkan's, or one or two channels (they hold
+    // luminance or alpha read through a swizzle GL's texture keeps, LLImageGL::applySwizzleForDeprecatedFormat, which a
+    // view would not). srgb: the view decodes sRGB (the image is an sRGB format), which GL's data samplers do not.
+    VkImageView gbSlotView(GLuint texture, U32 levels, U32 slot, VkImage& image, bool& srgb)
     {
+        srgb = false;
+        if (!texture)
+        {
+            const GbDefault& d = slot == 1 ? mGbFlat : mGbWhite;
+            image = d.image;
+            return d.view;
+        }
+        VkFormat format = VK_FORMAT_UNDEFINED;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             const auto found = mExtTextures.find(texture);
-            if (found == mExtTextures.end() || found->second.vk == VK_FORMAT_R8_UNORM ||
+            if (found == mExtTextures.end() || found->second.block < 0 || found->second.vk == VK_FORMAT_R8_UNORM ||
                 found->second.vk == VK_FORMAT_R8G8_UNORM)
             {
                 return VK_NULL_HANDLE;
             }
+            image = found->second.image;
         }
-        const VkImageView view = extView(texture, VK_IMAGE_ASPECT_COLOR_BIT, nullptr, levels);
-        if (!view)
+        const VkImageView view = extView(texture, VK_IMAGE_ASPECT_COLOR_BIT, &format, levels);
+        srgb = format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_BC1_RGBA_SRGB_BLOCK ||
+               format == VK_FORMAT_BC2_SRGB_BLOCK || format == VK_FORMAT_BC3_SRGB_BLOCK;
+        return view;
+    }
+
+    // The descriptor set of a draw's four textures, made the first time they are drawn with together, kept until one
+    // of them goes (gbForget). Null where one cannot be drawn with, or the pool is full: the draw is GL's.
+    VkDescriptorSet gbMaterialSet(const unsigned textures[4], const unsigned levels[4], U32& srgb_bits)
+    {
+        GbMatKey key = {};
+        VkImageView views[4] = {};
+        srgb_bits = 0;
+        for (U32 i = 0; i < 4; ++i)
         {
-            return VK_NULL_HANDLE;
-        }
-        std::lock_guard<std::mutex> lock(mExtMutex);
-        ExtTexture& ext = mExtTextures[texture];
-        if (!ext.texSet)
-        {
-            VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-            set_alloc.descriptorPool     = mGbTexPool;
-            set_alloc.descriptorSetCount = 1;
-            set_alloc.pSetLayouts        = &mGbTexLayout;
-            if (vkAllocateDescriptorSets(mDevice, &set_alloc, &ext.texSet) != VK_SUCCESS)
+            bool srgb = false;
+            views[i] = gbSlotView(textures[i], levels[i], i, key[i], srgb);
+            if (!views[i])
             {
-                ext.texSet = VK_NULL_HANDLE;
-                return VK_NULL_HANDLE;  // the pool is full: this texture's draws stay GL's
+                return VK_NULL_HANDLE;
             }
-            const VkDescriptorImageInfo image = { mGbSampler, view, VK_IMAGE_LAYOUT_GENERAL };
-            VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            write.dstSet          = ext.texSet;
-            write.dstBinding      = 0;
-            write.descriptorCount = 1;
-            write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.pImageInfo      = &image;
-            vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+            srgb_bits |= srgb ? (1u << i) : 0u;
         }
-        return ext.texSet;
+        const auto found = mGbMatSets.find(key);
+        if (found != mGbMatSets.end())
+        {
+            return found->second;
+        }
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        set_alloc.descriptorPool     = mGbTexPool;
+        set_alloc.descriptorSetCount = 1;
+        set_alloc.pSetLayouts        = &mGbTexLayout;
+        if (vkAllocateDescriptorSets(mDevice, &set_alloc, &set) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;  // the pool is full: these draws stay GL's
+        }
+        VkDescriptorImageInfo images[4];
+        VkWriteDescriptorSet writes[4];
+        for (U32 i = 0; i < 4; ++i)
+        {
+            images[i] = { mGbSampler, views[i], VK_IMAGE_LAYOUT_GENERAL };
+            writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            writes[i].dstSet          = set;
+            writes[i].dstBinding      = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo      = &images[i];
+        }
+        vkUpdateDescriptorSets(mDevice, 4, writes, 0, nullptr);
+        mGbMatSets.emplace(key, set);
+        for (U32 i = 0; i < 4; ++i)
+        {
+            // Defaults never go, and an image twice in a set is listed once.
+            const bool repeated = std::find(key.begin(), key.begin() + i, key[i]) != key.begin() + i;
+            if (textures[i] && !repeated)
+            {
+                mGbMatUse.emplace(key[i], key);
+            }
+        }
+        return set;
     }
 
     // The render pass, framebuffer and pipelines for a G-buffer: its colour attachments and depth, each in Vulkan's
@@ -6644,9 +6853,14 @@ struct QLVulkanPresenter::Impl
             destroyGbTarget(t);
             return -1;
         }
-        for (U32 greater = 0; greater < 2; ++greater)
         {
-            if (!createGbPipeline(t, greater != 0, t.pipelines[greater]))
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            const auto normals = color_count > 2 ? mExtTextures.find(colors[2]) : mExtTextures.end();
+            t.normHdr = normals != mExtTextures.end() && normals->second.vk == VK_FORMAT_R16G16B16A16_UNORM;
+        }
+        for (U32 p = 0; p < 4; ++p)
+        {
+            if (!createGbPipeline(t, (p & 2) != 0, (p & 1) != 0, t.pipelines[p]))
             {
                 gbWhy("its pipeline failed");
                 destroyGbTarget(t);
@@ -6659,7 +6873,7 @@ struct QLVulkanPresenter::Impl
         return (S32)mGbTargets.size() - 1;
     }
 
-    bool createGbPipeline(const GbTarget& t, bool greater, VkPipeline& pipeline)
+    bool createGbPipeline(const GbTarget& t, bool greater, bool double_sided, VkPipeline& pipeline)
     {
         VkPipelineShaderStageCreateInfo stages[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
                                                       { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
@@ -6669,19 +6883,21 @@ struct QLVulkanPresenter::Impl
         stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = mGbFrag;
         stages[1].pName  = "main";
-        // Positions, normals (16 bytes a vertex, as LLVertexBuffer keeps both), texture coordinates, colours.
-        const VkVertexInputBindingDescription bindings[4] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
+        // Positions, normals (16 bytes a vertex, as LLVertexBuffer keeps both), texture coordinates, colours, tangents.
+        const VkVertexInputBindingDescription bindings[5] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 1, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 2, 8, VK_VERTEX_INPUT_RATE_VERTEX },
-                                                              { 3, 4, VK_VERTEX_INPUT_RATE_VERTEX } };
-        const VkVertexInputAttributeDescription attributes[4] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+                                                              { 3, 4, VK_VERTEX_INPUT_RATE_VERTEX },
+                                                              { 4, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
+        const VkVertexInputAttributeDescription attributes[5] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 2, 2, VK_FORMAT_R32G32_SFLOAT, 0 },
-                                                                  { 3, 3, VK_FORMAT_R8G8B8A8_UNORM, 0 } };
+                                                                  { 3, 3, VK_FORMAT_R8G8B8A8_UNORM, 0 },
+                                                                  { 4, 4, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertex_input.vertexBindingDescriptionCount   = 4;
+        vertex_input.vertexBindingDescriptionCount   = 5;
         vertex_input.pVertexBindingDescriptions      = bindings;
-        vertex_input.vertexAttributeDescriptionCount = 4;
+        vertex_input.vertexAttributeDescriptionCount = 5;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -6691,7 +6907,7 @@ struct QLVulkanPresenter::Impl
         // As the shadows' pipelines: GL's counter-clockwise front, turned over by Vulkan's framebuffer rows.
         VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
         raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode    = VK_CULL_MODE_BACK_BIT;
+        raster.cullMode    = double_sided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;  // a double-sided material
         raster.frontFace   = VK_FRONT_FACE_CLOCKWISE;
         raster.lineWidth   = 1.f;
         VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -6793,41 +7009,77 @@ struct QLVulkanPresenter::Impl
         mGbGreater  = greater;
         mGbRemap    = remap_depth;
         mGbDraws.clear();
+        mGbPassTextures.clear();
+        mGbPassImages.clear();
         mGbInPass   = true;
         return true;
     }
 
     bool gbufferArena(U64 stamp, GLuint vertex_buffer, U32 position_offset, U32 normal_offset, U32 uv_offset,
                       U32 color_offset, U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex,
-                      U32& base_index)
+                      U32& base_index, U32 tangent_offset)
     {
         if (!mGbInPass)
         {
             return false;
         }
         return arenaPlace(mGbArena, stamp, vertex_buffer, position_offset, 0, vertex_count, index_buffer, index_count,
-                          base_vertex, base_index, uv_offset, color_offset, normal_offset, true);
+                          base_vertex, base_index, uv_offset, color_offset, normal_offset, true, tangent_offset);
     }
 
-    bool gbufferDraw(const float mvp[16], const float normal_matrix[16], GLuint texture, U32 texture_levels,
-                     U32 base_vertex, U32 first_index, U32 index_count)
+    bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
     {
-        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || !gbTextureSet(texture, texture_levels))
+        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_PBR)
+        {
+            return false;
+        }
+        // A simple draw reads its diffuse alone: its other slots take the defaults, whatever it names.
+        const bool simple = d.kind == QLVulkanPresenter::GB_SIMPLE;
+        const unsigned textures[4] = { d.textures[0], simple ? 0u : d.textures[1], simple ? 0u : d.textures[2],
+                                       simple ? 0u : d.textures[3] };
+        if (simple && !textures[0])
+        {
+            return false;
+        }
+        U32 srgb_bits = 0;
+        const VkDescriptorSet set = gbMaterialSet(textures, d.levels, srgb_bits);
+        if (!set)
         {
             return false;
         }
         const U32 index = (U32)mGbDraws.size();
         U8* slot = mGbHostMapped + GB_SLOT_BYTES * mGbSlot;
-        memcpy(slot + (size_t)index * GB_DRAW_BYTES, mvp, 64);
-        memcpy(slot + (size_t)index * GB_DRAW_BYTES + 64, normal_matrix, 64);
+        // qlgbuffer.vert's Draw.
+        float* out = reinterpret_cast<float*>(slot + (size_t)index * GB_DRAW_BYTES);
+        memcpy(out, d.mvp, 64);
+        memcpy(out + 16, d.normal_matrix, 64);
+        memcpy(out + 32, d.texture_matrix, 64);
+        memcpy(out + 48, d.transforms, sizeof(d.transforms));  // 32 floats
+        out[80] = d.metallic;
+        out[81] = d.roughness;
+        out[82] = (float)d.kind;
+        out[83] = (float)srgb_bits;
+        out[84] = d.emissive[0];
+        out[85] = d.emissive[1];
+        out[86] = d.emissive[2];
+        out[87] = 0.f;
         VkDrawIndexedIndirectCommand cmd = {};
-        cmd.indexCount    = index_count;
+        cmd.indexCount    = d.index_count;
         cmd.instanceCount = 1;
-        cmd.firstIndex    = first_index;
-        cmd.vertexOffset  = (S32)base_vertex;
+        cmd.firstIndex    = d.first_index;
+        cmd.vertexOffset  = (S32)d.base_vertex;
         cmd.firstInstance = index;
         memcpy(slot + (size_t)GB_MAX_DRAWS * GB_DRAW_BYTES + (size_t)index * sizeof(cmd), &cmd, sizeof(cmd));
-        mGbDraws.push_back({ texture, index });
+        mGbDraws.push_back({ set, index, d.double_sided ? 1u : 0u });
+        for (U32 i = 0; i < 4; ++i)
+        {
+            if (textures[i] &&
+                std::find(mGbPassTextures.begin(), mGbPassTextures.end(), (GLuint)textures[i]) == mGbPassTextures.end())
+            {
+                mGbPassTextures.push_back(textures[i]);
+                mGbPassImages.push_back(extImageOf(textures[i]));
+            }
+        }
         return true;
     }
 
@@ -6847,15 +7099,8 @@ struct QLVulkanPresenter::Impl
         const GbTarget& target = mGbTargets[mGbTarget];
         // What GL hands over: the arena, the attachments, and every texture drawn with (once each).
         std::vector<GLuint> textures(target.names, target.names + target.colors + 1);
-        std::vector<VkImage> texture_images;
-        for (const GbDraw& d : mGbDraws)
-        {
-            if (std::find(textures.begin() + target.colors + 1, textures.end(), d.texture) == textures.end())
-            {
-                textures.push_back(d.texture);
-                texture_images.push_back(extImageOf(d.texture));
-            }
-        }
+        textures.insert(textures.end(), mGbPassTextures.begin(), mGbPassTextures.end());
+        const std::vector<VkImage>& texture_images = mGbPassImages;
         const std::vector<GLenum> layouts(textures.size(), GL_LAYOUT_GENERAL_EXT);
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl signal");
@@ -6924,30 +7169,37 @@ struct QLVulkanPresenter::Impl
         const VkRect2D scissor = { { 0, 0 }, { target.width, target.height } };
         vkCmdSetViewport(slot.cmd, 0, 1, &viewport);
         vkCmdSetScissor(slot.cmd, 0, 1, &scissor);
-        vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, target.pipelines[mGbGreater ? 1 : 0]);
-        const float flags[4] = { mGbRemap ? 1.f : 0.f, 0.f, 0.f, 0.f };
-        vkCmdPushConstants(slot.cmd, mGbLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(flags), flags);
+        // Flags: the depth remap, the normals' format (GBUFFER_NORM_HDR), whether there is an emissive attachment.
+        const float flags[4] = { mGbRemap ? 1.f : 0.f, target.normHdr ? 1.f : 0.f, target.colors > 3 ? 1.f : 0.f, 0.f };
+        vkCmdPushConstants(slot.cmd, mGbLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(flags), flags);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 0, 1, &slot.set, 0, nullptr);
-        const VkBuffer buffers[4] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer };
-        const VkDeviceSize offsets[4] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart() };
-        vkCmdBindVertexBuffers(slot.cmd, 0, 4, buffers, offsets);
+        const VkBuffer buffers[5] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer,
+                                      mGbArena.buffer };
+        const VkDeviceSize offsets[5] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart(),
+                                          mGbArena.tangentStart() };
+        vkCmdBindVertexBuffers(slot.cmd, 0, 5, buffers, offsets);
         vkCmdBindIndexBuffer(slot.cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
         const VkDeviceSize commands = GB_SLOT_BYTES * mGbSlot + (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES;
         const VkDrawIndexedIndirectCommand* cmds =
             reinterpret_cast<const VkDrawIndexedIndirectCommand*>(mGbHostMapped + commands);
-        // Draws of one texture in a row: one indirect draw under its set.
+        // Draws of one set and pipeline in a row: one indirect draw.
+        U32 bound_pipe = U32_MAX;
         for (size_t first = 0; first < mGbDraws.size();)
         {
             size_t last = first + 1;
-            while (last < mGbDraws.size() && mGbDraws[last].texture == mGbDraws[first].texture)
+            while (last < mGbDraws.size() && mGbDraws[last].set == mGbDraws[first].set &&
+                   mGbDraws[last].pipe == mGbDraws[first].pipe)
             {
                 ++last;
             }
-            VkDescriptorSet tex_set = VK_NULL_HANDLE;
+            if (mGbDraws[first].pipe != bound_pipe)
             {
-                std::lock_guard<std::mutex> lock(mExtMutex);
-                tex_set = mExtTextures[mGbDraws[first].texture].texSet;
+                bound_pipe = mGbDraws[first].pipe;
+                vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  target.pipelines[(mGbGreater ? 2 : 0) + bound_pipe]);
             }
+            const VkDescriptorSet tex_set = mGbDraws[first].set;
             vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 1, 1, &tex_set, 0, nullptr);
             const U32 count = (U32)(last - first);
             if (mHasMultiIndirect)
@@ -8700,20 +8952,17 @@ bool QLVulkanPresenter::gbufferBegin(const unsigned* colors, unsigned color_coun
 bool QLVulkanPresenter::gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                                      unsigned normal_offset, unsigned uv_offset, unsigned color_offset,
                                      unsigned vertex_count, unsigned index_buffer, unsigned index_count,
-                                     unsigned& base_vertex, unsigned& base_index)
+                                     unsigned& base_vertex, unsigned& base_index, unsigned tangent_offset)
 {
     return sActive && sActive->gbufferArena((U64)stamp, vertex_buffer, position_offset, normal_offset, uv_offset,
                                             color_offset, vertex_count, index_buffer, index_count, base_vertex,
-                                            base_index);
+                                            base_index, tangent_offset);
 }
 
 // static
-bool QLVulkanPresenter::gbufferDraw(const float mvp[16], const float normal_matrix[16], unsigned texture,
-                                    unsigned texture_levels, unsigned base_vertex, unsigned first_index,
-                                    unsigned index_count)
+bool QLVulkanPresenter::gbufferDraw(const GbDraw& draw)
 {
-    return sActive && sActive->gbufferDraw(mvp, normal_matrix, texture, texture_levels, base_vertex, first_index,
-                                           index_count);
+    return sActive && sActive->gbufferDraw(draw);
 }
 
 // static

@@ -5526,7 +5526,13 @@ U32 LLPipeline::sCurRenderPoolType = 0 ;
 
 // Quasar: a probe face's simple prims drawn by Vulkan (QuasarVulkanProbeDraws), defined with the shadows' Vulkan code.
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view);
-static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end();  // what GL must draw after all, or null
+// What GL must draw after all where the hand-over failed: the simple draws Vulkan took, and its PBR draws.
+struct QLVulkanLost
+{
+    const std::vector<LLDrawInfo*>* simple = nullptr;
+    const std::vector<LLDrawInfo*>* pbr = nullptr;
+};
+static QLVulkanLost ql_vulkan_probe_draws_end();
 
 void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 {
@@ -5711,13 +5717,27 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 
         // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
         // the hand-over failed (Vulkan's draws are then off from now on), GL draws what it left to Vulkan.
-        if (const std::vector<LLDrawInfo*>* lost = ql_vulkan_probe_draws_end())
+        const QLVulkanLost lost = ql_vulkan_probe_draws_end();
+        if (lost.simple || lost.pbr)
         {
             LLGLDisable blend(GL_BLEND);
-            gDeferredDiffuseProgram.selectVariant()->bind();
-            for (LLDrawInfo* params : *lost)
+            if (lost.simple && !lost.simple->empty())
             {
-                mSimplePool->pushBatch(*params, true, true);
+                gDeferredDiffuseProgram.selectVariant()->bind();
+                for (LLDrawInfo* params : *lost.simple)
+                {
+                    mSimplePool->pushBatch(*params, true, true);
+                }
+            }
+            if (lost.pbr && !lost.pbr->empty())
+            {
+                gDeferredPBROpaqueProgram.selectVariant()->bind();
+                LLFetchedGLTFMaterial* last_mat = nullptr;
+                LLViewerTexture* last_tex = nullptr;
+                for (LLDrawInfo* params : *lost.pbr)
+                {
+                    LLRenderPass::pushGLTFBatch(*params, last_mat, last_tex);
+                }
             }
             gGLLastMatrix = NULL;
             gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
@@ -13506,13 +13526,51 @@ static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
 }
 #endif
 
+// The PBR draws (QuasarVulkanPBRDraws): what Vulkan took (GL's to draw after all if the hand-over fails) and what it
+// left, which LLDrawPoolGLTFPBR::renderDeferred draws in place of the opaque pass's scalar draws while it is set.
+static std::vector<LLDrawInfo*> sQLPBRLeftovers;
+static std::vector<LLDrawInfo*> sQLPBRTaken;
+std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers = nullptr;  // lldrawpoolpbropaque.cpp
+static U64 sQLPBRLastDraws = 0, sQLPBRLastKept = 0, sQLPBRDraws = 0, sQLPBRKept = 0;
+
+#if QL_VULKAN_SHADOWS
+// The levels of a texture GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
+static U32 ql_sampled_levels(const LLImageGL* image)
+{
+    return image->getUseMipMaps() ? (U32)llmax(1, image->getMaxDiscardLevel() - image->getDiscardLevel() + 1) : 1u;
+}
+
+// A material slot's texture for Vulkan: 0 for GL's default there (none, white, or the flat normal), its GL name
+// otherwise; false where the slot names a texture with no GL texture yet (GL's then).
+static bool ql_slot_texture(LLViewerTexture* texture, U32& name, U32& levels)
+{
+    name   = 0;
+    levels = 1;
+    if (!texture || texture == LLViewerFetchedTexture::sWhiteImagep.get() ||
+        texture == LLViewerFetchedTexture::sFlatNormalImagep.get())
+    {
+        return true;
+    }
+    const LLImageGL* image = texture->getGLTexture();
+    name = image ? image->getTexName() : 0;
+    if (!name)
+    {
+        return false;
+    }
+    levels = ql_sampled_levels(image);
+    return true;
+}
+#endif
+
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 {
     sQLProbeDrawsOpen = false;
     gQLVulkanSimpleLeftovers = nullptr;
+    gQLVulkanPBRLeftovers = nullptr;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
+    static LLCachedControl<bool> pbr_wanted(gSavedSettings, "QuasarVulkanPBRDraws", false);
     if (!main_view && !wanted())
     {
         return false;
@@ -13537,9 +13595,58 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     const LLMatrix4a proj = gGL.getProjectionMatrix();
     sQLProbeLeftovers.clear();
     sQLProbeTaken.clear();
+    sQLPBRLeftovers.clear();
+    sQLPBRTaken.clear();
     const LLVertexBuffer* last_vb = nullptr;
-    bool last_in_arena = false;
+    bool last_in_arena = false, last_tangents = false;
     unsigned base_vertex = 0, base_index = 0;
+    // The mesh in the arena (positions, normals, texture coordinates, colours, tangents where it has them).
+    const auto place = [&](const LLVertexBuffer* vb)
+    {
+        if (vb != last_vb)
+        {
+            last_vb       = vb;
+            last_tangents = vb && vb->hasDataType(LLVertexBuffer::TYPE_TANGENT);
+            last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
+                            vb->hasDataType(LLVertexBuffer::TYPE_NORMAL) &&
+                            vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD0) &&
+                            vb->hasDataType(LLVertexBuffer::TYPE_COLOR) &&
+                            QLVulkanPresenter::gbufferArena(
+                                vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
+                                vb->getOffset(LLVertexBuffer::TYPE_VERTEX), vb->getOffset(LLVertexBuffer::TYPE_NORMAL),
+                                vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD0), vb->getOffset(LLVertexBuffer::TYPE_COLOR),
+                                vb->getNumVerts(), LLNavShapeVBOManager::glIndices(vb), vb->getNumIndices(), base_vertex,
+                                base_index,
+                                last_tangents ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TANGENT) : ~0u);
+        }
+        return last_in_arena;
+    };
+    // The matrices, as applyModelMatrix, LLRender::syncMatrices and setup_texture_matrix work them: a texture
+    // animation's matrix applies outside a probe face (pushBatch, setup_texture_matrix skip it under gCubeSnapshot).
+    const auto matrices = [&](const LLDrawInfo& params, QLVulkanPresenter::GbDraw& d)
+    {
+        LLMatrix4a modelview = view;
+        if (params.mModelMatrix)
+        {
+            modelview.setMul(*params.mModelMatrix, modelview);
+        }
+        LLMatrix4a mvp;
+        mvp.setMul(modelview, proj);
+        memcpy(d.mvp, mvp.getF32ptr(), sizeof(d.mvp));
+        ql_normal_matrix(modelview, d.normal_matrix);
+        if (main_view && params.mTextureMatrix)
+        {
+            memcpy(d.texture_matrix, params.mTextureMatrix->mMatrix, sizeof(d.texture_matrix));
+        }
+        else
+        {
+            memcpy(d.texture_matrix, LLMatrix4a::identity().getF32ptr(), sizeof(d.texture_matrix));
+        }
+        d.base_vertex = base_vertex;
+        d.first_index = base_index + params.mOffset;
+        d.index_count = params.mCount;
+    };
+
     auto* end = gPipeline.endRenderMap(LLRenderPass::PASS_SIMPLE);
     for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_SIMPLE); i != end;)
     {
@@ -13555,42 +13662,14 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                                      : nullptr;
         const U32 texture = image ? image->getTexName() : 0;
         bool drawn = false;
-        if (texture)
+        if (texture && place(params->mVertexBuffer.get()))
         {
-            const LLVertexBuffer* vb = params->mVertexBuffer.get();
-            if (vb != last_vb)
-            {
-                last_vb = vb;
-                last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
-                                vb->hasDataType(LLVertexBuffer::TYPE_NORMAL) &&
-                                vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD0) &&
-                                vb->hasDataType(LLVertexBuffer::TYPE_COLOR) &&
-                                QLVulkanPresenter::gbufferArena(
-                                    vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
-                                    vb->getOffset(LLVertexBuffer::TYPE_VERTEX), vb->getOffset(LLVertexBuffer::TYPE_NORMAL),
-                                    vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD0),
-                                    vb->getOffset(LLVertexBuffer::TYPE_COLOR), vb->getNumVerts(),
-                                    LLNavShapeVBOManager::glIndices(vb), vb->getNumIndices(), base_vertex, base_index);
-            }
-            if (last_in_arena)
-            {
-                // As applyModelMatrix and LLRender::syncMatrices work it.
-                LLMatrix4a modelview = view;
-                if (params->mModelMatrix)
-                {
-                    modelview.setMul(*params->mModelMatrix, modelview);
-                }
-                LLMatrix4a mvp;
-                mvp.setMul(modelview, proj);
-                F32 normal_matrix[16];
-                ql_normal_matrix(modelview, normal_matrix);
-                // The levels GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
-                const U32 levels = image->getUseMipMaps()
-                                       ? (U32)llmax(1, image->getMaxDiscardLevel() - image->getDiscardLevel() + 1)
-                                       : 1u;
-                drawn = QLVulkanPresenter::gbufferDraw(mvp.getF32ptr(), normal_matrix, texture, levels, base_vertex,
-                                                       base_index + params->mOffset, params->mCount);
-            }
+            QLVulkanPresenter::GbDraw d;
+            matrices(*params, d);
+            d.kind        = QLVulkanPresenter::GB_SIMPLE;
+            d.textures[0] = texture;
+            d.levels[0]   = ql_sampled_levels(image);
+            drawn         = QLVulkanPresenter::gbufferDraw(d);
         }
         (drawn ? sQLProbeTaken : sQLProbeLeftovers).push_back(params);
         if (main_view)
@@ -13603,6 +13682,72 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                                                                                            : sQLProbeDrawRefused);
         }
     }
+    gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
+
+    // PBR, opaque and unrigged, one material a draw (QuasarVulkanPBRDraws): as LLFetchedGLTFMaterial::bind binds it.
+    if (pbr_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PASS_GLTF_PBR))
+    {
+        U64 pbr_draws = 0, pbr_kept = 0;
+        auto* pbr_end = gPipeline.endRenderMap(LLRenderPass::PASS_GLTF_PBR);
+        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_GLTF_PBR); i != pbr_end;)
+        {
+            LLDrawInfo* params = *i;
+            LLCullResult::increment_iterator(i, pbr_end);
+            if (!params)
+            {
+                continue;
+            }
+            LLFetchedGLTFMaterial* mat = params->mGLTFMaterial.get();
+            bool drawn = false;
+            // Not a multi-material batch (the indexed sweep's), not a media face (bind's media override), with tangents.
+            if (mat && params->mCount && params->mGLTFMaterialList.size() <= 1 && params->mTexture.isNull() &&
+                place(params->mVertexBuffer.get()) && last_tangents)
+            {
+                QLVulkanPresenter::GbDraw d;
+                matrices(*params, d);
+                d.kind         = QLVulkanPresenter::GB_PBR;
+                d.double_sided = mat->mDoubleSided;
+                LLViewerTexture* normal = mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL);
+                if (normal && normal->getDiscardLevel() > 4)
+                {
+                    normal = nullptr;  // the flat normal, as bind takes it
+                }
+                bool textured =
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), d.textures[0],
+                                    d.levels[0]) &&
+                    ql_slot_texture(normal, d.textures[1], d.levels[1]) &&
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS),
+                                    d.textures[2], d.levels[2]) &&
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), d.textures[3],
+                                    d.levels[3]);
+                if (textured)
+                {
+                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR].getPacked(d.transforms[0]);
+                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL].getPacked(d.transforms[1]);
+                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS].getPacked(
+                        d.transforms[2]);
+                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].getPacked(d.transforms[3]);
+                    d.emissive[0] = mat->mEmissiveColor.mV[VRED];
+                    d.emissive[1] = mat->mEmissiveColor.mV[VGREEN];
+                    d.emissive[2] = mat->mEmissiveColor.mV[VBLUE];
+                    d.metallic    = mat->mMetallicFactor;
+                    d.roughness   = mat->mRoughnessFactor;
+                    drawn         = QLVulkanPresenter::gbufferDraw(d);
+                }
+            }
+            (drawn ? sQLPBRTaken : sQLPBRLeftovers).push_back(params);
+            ++(drawn ? pbr_draws : pbr_kept);
+        }
+        sQLPBRDraws += pbr_draws;
+        sQLPBRKept += pbr_kept;
+        if (main_view)
+        {
+            sQLPBRLastDraws = pbr_draws;
+            sQLPBRLastKept  = pbr_kept;
+        }
+        gQLVulkanPBRLeftovers = &sQLPBRLeftovers;
+    }
+
     if (main_view)
     {
         sQLMainDraws += main_draws;
@@ -13610,7 +13755,6 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         sQLMainLastDraws = main_draws;
         sQLMainLastKept  = main_kept;
     }
-    gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
     sQLProbeDrawsOpen = true;
     return true;
 #else
@@ -13619,23 +13763,40 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 #endif
 }
 
-static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end()
+static QLVulkanLost ql_vulkan_probe_draws_end()
 {
     gQLVulkanSimpleLeftovers = nullptr;
+    gQLVulkanPBRLeftovers = nullptr;
     if (!sQLProbeDrawsOpen)
     {
-        return nullptr;
+        return {};
     }
     sQLProbeDrawsOpen = false;
 #if QL_VULKAN_SHADOWS
     gGL.flush();
-    if (!QLVulkanPresenter::gbufferEnd() && !sQLProbeTaken.empty())
+    if (!QLVulkanPresenter::gbufferEnd() && (!sQLProbeTaken.empty() || !sQLPBRTaken.empty()))
     {
         ++sQLProbeHandOversFailed;
-        return &sQLProbeTaken;  // GL draws them (renderGeomDeferred); cleared at the next begin
+        return { &sQLProbeTaken, &sQLPBRTaken };  // GL draws them (renderGeomDeferred); cleared at the next begin
     }
 #endif
-    return nullptr;
+    return {};
+}
+
+std::string ql_vulkan_pbr_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanPBRDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanPBRDraws)";
+    }
+    return llformat("main view last frame %llu Vulkan, %llu GL | since start %llu Vulkan, %llu GL (probes too)",
+                    (unsigned long long)sQLPBRLastDraws, (unsigned long long)sQLPBRLastKept,
+                    (unsigned long long)sQLPBRDraws, (unsigned long long)sQLPBRKept);
+#else
+    return "not on this platform";
+#endif
 }
 
 std::string ql_vulkan_main_draws_info()
