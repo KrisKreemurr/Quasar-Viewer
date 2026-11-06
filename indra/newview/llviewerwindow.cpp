@@ -199,6 +199,7 @@
 std::string ql_sun_shadow_cache_info();  // pipeline.cpp (QuasarSunShadowCache)
 std::string ql_parallel_cull_info();     // pipeline.cpp (QuasarParallelShadowCull)
 std::string ql_parallel_pose_info();     // llviewerobjectlist.cpp (QuasarParallelAvatarPose)
+std::string ql_vulkan_shadows_info();    // pipeline.cpp (QuasarVulkanShadows)
 #include "qldrawstats.h"
 #include "qlframewarp.h"
 #include "llappviewer.h"
@@ -695,6 +696,8 @@ public:
             addText(xpos, ypos, "Quasar UI layer: " + QLUILayer::statusLine());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan geometry: " + QLVulkanPost::geometryLine());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan shadows: " + ql_vulkan_shadows_info());
             ypos += y_inc;
             addText(xpos, ypos, llformat("Quasar buffers: %u fast | %u full%s",
                                          gQLDrawStats.mLastFastSwitches, gQLDrawStats.mLastFullSetups,

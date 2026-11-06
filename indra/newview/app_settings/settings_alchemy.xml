@@ -2883,6 +2883,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanShadows</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): each shadow map's unrigged opaque casters (buildings, furniture, prims), drawn by Vulkan in one indirect draw instead of one GL call each. Avatars, cut-out textures, terrain and trees stay in GL. Needs Vulkan presentation, the shadow map self-test passed, 32-bit float shadow depth and RenderShadowDetail 2 or less.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarParallelAvatarPose</key>
         <map>
             <key>Comment</key>

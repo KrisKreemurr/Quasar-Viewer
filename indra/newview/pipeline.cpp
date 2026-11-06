@@ -169,6 +169,11 @@
 #endif
 #define A_CPU 1
 #include "app_settings/shaders/class1/deferred/CASF.glsl" // This is also C++
+
+#if LL_WINDOWS && !LL_SDL_WINDOW
+#include "qlvulkanpresenter.h"
+#define QL_VULKAN_SHADOWS 1
+#endif
 #if LL_CLANG
 #pragma clang diagnostic pop
 #elif LL_GNUC
@@ -13274,6 +13279,152 @@ static constexpr U32 SHADOW_GEOMETRY_PASSES[] = {
     LLRenderPass::PASS_NORMSPEC_EMISSIVE
 };
 
+// ---- QuasarVulkanShadows: a shadow map's unrigged opaque casters drawn by Vulkan (step 2 of shadows in Vulkan) ------
+//
+// The casters of SHADOW_GEOMETRY_PASSES that are not rigged, which drawShadow had GL draw one call each through
+// gDeferredShadowProgram (position by model-view-projection, nothing else), handed to the Vulkan presenter instead:
+// each caster's mesh into its arena (once, by content stamp) and its matrix, worked out as GL's matrix stack works it,
+// into the map's draw list, which Vulkan draws over the map in one indirect draw (QLVulkanPresenter::shadowBegin). GL
+// draws what Vulkan could not take (32-bit indices, a full arena) and everything else as before.
+//
+// Only into a map whose depth is DEPTH_COMPONENT32F (reverse-Z, or AlchemyRenderShadowDepth32F) and only while colour is
+// not written (RenderShadowDetail 2 or less: no variance maps).
+
+// LLVertexBuffer keeps its GL names to itself, and names one friend the viewer has never defined (pathfinding's nav
+// shapes, long gone): defined here, it reads them without llvertexbuffer.h changing, which most of the viewer includes.
+class LLNavShapeVBOManager
+{
+public:
+    static U32 glBuffer(const LLVertexBuffer* vb) { return vb->mGLBuffer; }
+    static U32 glIndices(const LLVertexBuffer* vb) { return vb->mGLIndices; }
+    static bool shortIndices(const LLVertexBuffer* vb) { return vb->mIndicesType == GL_UNSIGNED_SHORT; }
+};
+
+static bool ql_vulkan_shadows_wanted()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> enabled(gSavedSettings, "QuasarVulkanShadows", false);
+    return enabled();
+#else
+    return false;
+#endif
+}
+
+// Draws the unrigged casters of SHADOW_GEOMETRY_PASSES into the bound shadow map with Vulkan, and those it could not
+// hand over with GL. True when they are drawn: drawShadow then leaves them out of its own pass.
+static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp)
+{
+#if QL_VULKAN_SHADOWS
+    QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
+    if (!ql_vulkan_shadows_wanted() || gPipeline.resourceInputs().mShadowDetail > 2)
+    {
+        return false;
+    }
+    LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
+    if (!target || !target->getDepth() || target->getDepthFormat() != LLRenderTarget::DEPTH_FMT_32F)
+    {
+        return false;
+    }
+    // Under reverse-Z GL's clip space already holds depth from 0 to 1 (glClipControl) and the test is GREATER.
+    if (!QLVulkanPresenter::shadowBegin(target->getWidth(), target->getHeight(), depth_clamp, LLRender::sReverseZ,
+                                        !LLRender::sReverseZ))
+    {
+        return false;
+    }
+    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan shadow casters");
+
+    const LLMatrix4a& view = LLViewerCamera::getCurrent().getModelview();
+    static std::vector<LLDrawInfo*> leftovers;
+    leftovers.clear();
+    const LLVertexBuffer* last_vb = nullptr;
+    bool last_in_arena = false;
+    unsigned base_vertex = 0, base_index = 0;
+    for (U32 type : SHADOW_GEOMETRY_PASSES)
+    {
+        auto* end = gPipeline.endRenderMap(type);
+        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(type); i != end;)
+        {
+            LLDrawInfo* params = *i;
+            LLCullResult::increment_iterator(i, end);
+            if (!params || !params->mCount)
+            {
+                continue;
+            }
+            const LLVertexBuffer* vb = params->mVertexBuffer.get();
+            if (vb != last_vb)
+            {
+                last_vb = vb;
+                last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
+                                QLVulkanPresenter::shadowArena(vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
+                                                               vb->getOffset(LLVertexBuffer::TYPE_VERTEX),
+                                                               vb->getNumVerts(), LLNavShapeVBOManager::glIndices(vb),
+                                                               vb->getNumIndices(), base_vertex, base_index);
+            }
+            bool drawn = false;
+            if (last_in_arena)
+            {
+                // As applyModelMatrix and LLRender::syncMatrices work it: the view, the model applied first, then the
+                // projection.
+                LLMatrix4a modelview = view;
+                if (params->mModelMatrix)
+                {
+                    modelview.setMul(*params->mModelMatrix, modelview);
+                }
+                LLMatrix4a mvp;
+                mvp.setMul(modelview, proj);
+                drawn = QLVulkanPresenter::shadowDraw(mvp.getF32ptr(), base_vertex, base_index + params->mOffset,
+                                                      params->mCount);
+            }
+            if (!drawn)
+            {
+                leftovers.push_back(params);
+            }
+        }
+    }
+
+    gGL.flush();
+    if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
+    {
+        return false;  // nothing drawn: GL draws them all
+    }
+
+    if (!leftovers.empty())
+    {
+        gDeferredShadowProgram.bind(false);
+        gGL.diffuseColor4f(1, 1, 1, 1);
+        gGL.setColorMask(false, false);
+        gGL.loadMatrix(view);
+        gGLLastMatrix = NULL;
+        for (LLDrawInfo* params : leftovers)
+        {
+            gPipeline.mSimplePool->pushUntexturedBatch(*params);
+        }
+        gGL.loadMatrix(view);
+        gGLLastMatrix = NULL;
+    }
+    return true;
+#else
+    (void)proj;
+    (void)depth_clamp;
+    return false;
+#endif
+}
+
+// For the status line.
+std::string ql_vulkan_shadows_info()
+{
+#if QL_VULKAN_SHADOWS
+    if (!ql_vulkan_shadows_wanted())
+    {
+        return "off (QuasarVulkanShadows)";
+    }
+    return QLVulkanPresenter::shadowInfo();
+#else
+    return "not on this platform";
+#endif
+}
+
+
 // Those it alpha tests by their textures, each with its rigged twin at the next type. The blended casters and the
 // grass it draws besides, from PASS_ALPHA and PASS_GRASS.
 static constexpr U32 SHADOW_MASKED_PASSES[] = {
@@ -13360,6 +13511,10 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
 
 
     LLVertexBuffer::unbind();
+
+    // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows).
+    const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp);
+
     for (int j = 0; j < 2; ++j) // 0 -- static, 1 -- rigged
     {
         bool rigged = j == 1;
@@ -13379,9 +13534,12 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         LL_PROFILE_GPU_ZONE("shadow simple");
         gGL.getTextureSlot(0)->unbind();
 
-        for (U32 type : SHADOW_GEOMETRY_PASSES)
+        if (rigged || !vulkan_casters)
         {
-            renderObjects(type, false, false, rigged);
+            for (U32 type : SHADOW_GEOMETRY_PASSES)
+            {
+                renderObjects(type, false, false, rigged);
+            }
         }
 
         renderGLTFObjects(LLRenderPass::PASS_GLTF_PBR, false, rigged);

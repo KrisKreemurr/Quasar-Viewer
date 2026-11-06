@@ -177,6 +177,38 @@ public:
 
     static std::string depthInfo();
 
+    // ---- Shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------------------------------------
+
+    /// A shadow map's unrigged opaque casters, drawn by Vulkan into GL's map in one indirect draw. On the main thread,
+    /// with the window's GL context current, between the map's clear and the rest of its passes:
+    ///   shadowBegin, then for each caster shadowArena (its mesh) and shadowDraw, then shadowEnd with the map's depth
+    ///   texture (DEPTH_COMPONENT32F). Vulkan draws over the map as it is and GL has it back before its next command.
+    /// shadowBegin false: nothing is drawn by Vulkan, GL draws the map. shadowArena or shadowDraw false: that caster is
+    /// GL's to draw. shadowEnd false: none of the map's casters were drawn, and GL draws them all.
+    /// clamp: GL_DEPTH_CLAMP is on; greater: the depth test is GREATER (reverse-Z); remap_depth: GL's clip space holds
+    /// depth from -1 to 1.
+    static bool shadowBegin(unsigned width, unsigned height, bool clamp, bool greater, bool remap_depth);
+
+    /// A mesh's positions (16 bytes a vertex, from vertex_offset in vertex_buffer) and 16-bit indices, found by its
+    /// content stamp or copied now; base_vertex and base_index say where it is.
+    static bool shadowArena(unsigned long long stamp, unsigned vertex_buffer, unsigned vertex_offset,
+                            unsigned vertex_count, unsigned index_buffer, unsigned index_count, unsigned& base_vertex,
+                            unsigned& base_index);
+
+    /// One caster: its model-view-projection matrix (GL's, column-major), and its indices from first_index (into the
+    /// arena: base_index plus the draw's own offset), base_vertex added to each.
+    static bool shadowDraw(const float mvp[16], unsigned base_vertex, unsigned first_index, unsigned index_count);
+
+    static bool shadowEnd(unsigned depth_texture);
+
+    /// Leaves a begun map without drawing it.
+    static void shadowAbandon();
+
+    /// Once a frame, for the status line's counts.
+    static void shadowFrame(unsigned frame);
+
+    static std::string shadowInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;

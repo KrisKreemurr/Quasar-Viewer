@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 // GL_EXT_memory_object, GL_EXT_memory_object_win32, GL_EXT_semaphore, GL_EXT_semaphore_win32: the values from the
@@ -121,6 +122,8 @@ namespace
     typedef void (APIENTRY* QL_PFN_SemaphoreOp)(GLuint, GLuint, const GLuint*, GLuint, const GLuint*, const GLenum*);
     typedef void (APIENTRY* QL_PFN_GetUnsignedBytei_v)(GLenum, GLuint, GLubyte*);
     typedef void (APIENTRY* QL_PFN_TextureStorage2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei);
+    typedef void (APIENTRY* QL_PFN_CopyNamedBufferSubData)(GLuint, GLuint, GLintptr, GLintptr, GLsizeiptr);
+    typedef void (APIENTRY* QL_PFN_NamedBufferStorageMemEXT)(GLuint, GLsizeiptr, GLuint, GLuint64);
     typedef void (APIENTRY* QL_PFN_CopyImageSubData)(GLuint, GLenum, GLint, GLint, GLint, GLint, GLuint, GLenum, GLint,
                                                      GLint, GLint, GLint, GLsizei, GLsizei, GLsizei);
 
@@ -161,6 +164,10 @@ namespace
         QL_PFN_GetUnsignedBytei_v           GetUnsignedBytei_vEXT = nullptr;
         QL_PFN_TextureStorage2D             TextureStorage2D = nullptr;
         QL_PFN_CopyImageSubData             CopyImageSubData = nullptr;
+        QL_PFN_CopyNamedBufferSubData       CopyNamedBufferSubData = nullptr;
+        QL_PFN_NamedBufferStorageMemEXT     NamedBufferStorageMemEXT = nullptr;
+        QL_PFN_CreateObjects                CreateBuffers = nullptr;
+        QL_PFN_DeleteObjects                DeleteBuffers = nullptr;
 
         bool load()
         {
@@ -201,6 +208,10 @@ namespace
             QL_GL_LOAD(GetUnsignedBytei_vEXT, "glGetUnsignedBytei_vEXT");
             QL_GL_LOAD(TextureStorage2D, "glTextureStorage2D");
             QL_GL_LOAD(CopyImageSubData, "glCopyImageSubData");
+            QL_GL_LOAD(CopyNamedBufferSubData, "glCopyNamedBufferSubData");
+            QL_GL_LOAD(NamedBufferStorageMemEXT, "glNamedBufferStorageMemEXT");
+            QL_GL_LOAD(CreateBuffers, "glCreateBuffers");
+            QL_GL_LOAD(DeleteBuffers, "glDeleteBuffers");
 #undef QL_GL_LOAD
             return true;
         }
@@ -332,6 +343,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
     QL_VK_FN(vkGetPhysicalDeviceMemoryProperties);
     QL_VK_FN(vkGetPhysicalDeviceFormatProperties);
+    QL_VK_FN(vkGetPhysicalDeviceFeatures);
     QL_VK_FN(vkEnumerateDeviceExtensionProperties);
     QL_VK_FN(vkCreateDevice);
     QL_VK_FN(vkGetDeviceProcAddr);
@@ -415,6 +427,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdSetViewport);
     QL_VK_FN(vkCmdSetScissor);
     QL_VK_FN(vkCmdCopyBufferToImage);
+    QL_VK_FN(vkCmdDrawIndexedIndirect);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -571,6 +584,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties);
         QL_VK_INSTANCE(vkGetPhysicalDeviceMemoryProperties);
         QL_VK_INSTANCE(vkGetPhysicalDeviceFormatProperties);
+        QL_VK_INSTANCE(vkGetPhysicalDeviceFeatures);
         QL_VK_INSTANCE(vkEnumerateDeviceExtensionProperties);
         QL_VK_INSTANCE(vkCreateDevice);
         QL_VK_INSTANCE(vkGetDeviceProcAddr);
@@ -663,6 +677,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdSetViewport);
         QL_VK_DEVICE(vkCmdSetScissor);
         QL_VK_DEVICE(vkCmdCopyBufferToImage);
+        QL_VK_DEVICE(vkCmdDrawIndexedIndirect);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -1051,6 +1066,9 @@ struct QLVulkanPresenter::Impl
         return fail("no Vulkan device that is GL's and can present to the window");
     }
 
+    bool mHasDepthClamp = false;
+    bool mHasMultiIndirect = false;
+
     bool createDevice()
     {
         const char* wanted[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -1078,11 +1096,23 @@ struct QLVulkanPresenter::Impl
         queue.queueCount       = 1;
         queue.pQueuePriorities = &priority;
 
+        // Quasar: what the shadow casters drawn in Vulkan use where the device has it: depth clamping, as the sun's
+        // cascades clamp in GL, and one indirect draw for a whole map, each draw its own first instance.
+        VkPhysicalDeviceFeatures supported = {};
+        vkGetPhysicalDeviceFeatures(mPhysical, &supported);
+        VkPhysicalDeviceFeatures enabled = {};
+        enabled.depthClamp                = supported.depthClamp;
+        enabled.multiDrawIndirect         = supported.multiDrawIndirect;
+        enabled.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
+        mHasDepthClamp   = enabled.depthClamp == VK_TRUE;
+        mHasMultiIndirect = enabled.multiDrawIndirect == VK_TRUE && enabled.drawIndirectFirstInstance == VK_TRUE;
+
         VkDeviceCreateInfo info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         info.queueCreateInfoCount    = 1;
         info.pQueueCreateInfos       = &queue;
         info.enabledExtensionCount   = (U32)LL_ARRAY_SIZE(wanted);
         info.ppEnabledExtensionNames = wanted;
+        info.pEnabledFeatures        = &enabled;
 
         VkResult result = vkCreateDevice(mPhysical, &info, nullptr, &mDevice);
         if (result != VK_SUCCESS)
@@ -2635,6 +2665,862 @@ struct QLVulkanPresenter::Impl
         return mDepthPassed;
     }
 
+    // ---- step 2 of geometry in Vulkan: shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------
+    //
+    // A shadow map's unrigged, opaque casters, which GL drew one call each, drawn by Vulkan in one indirect draw:
+    //   - Their meshes, positions and indices, are copied by GL (glCopyNamedBufferSubData, on the GPU) into an arena: a
+    //     buffer Vulkan allocates and GL imports, positions in its first part, 16 bytes a vertex as LLVertexBuffer keeps
+    //     them, 16-bit indices in its second. A mesh is copied once and found again by its content stamp, which every
+    //     allocation, map and write of an LLVertexBuffer takes anew; the arena starts over when it fills.
+    //   - Each draw is a model-view-projection matrix and an indirect command, written into memory the CPU maps, a ring
+    //     of slots, one a shadow map; the vertex shader reads the draw's matrix by its instance (qlshadow.vert).
+    //   - The map itself: GL copies its depth (glCopyImageSubData) into a depth image Vulkan allocates and GL imports, of
+    //     the map's size; Vulkan draws over it (load, no clear, so whatever GL had there stays: a kept still map, what GL
+    //     drew before); GL copies it back and draws the rest (rigged, alpha-masked, terrain, trees) on top as before.
+    //     Each side waits for the other on the GPU through two semaphores of their own, never on the CPU.
+    static constexpr U32          SH_SLOTS = 32;  // several frames of maps (sun cascades, spots, probes), so reuse never waits
+    static constexpr U32          SH_MAX_DRAWS = 8192;
+    static constexpr VkDeviceSize SH_MVP_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 64;
+    static constexpr VkDeviceSize SH_CMD_BYTES = (VkDeviceSize)SH_MAX_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
+    static constexpr VkDeviceSize SH_SLOT_BYTES = ((SH_MVP_BYTES + SH_CMD_BYTES) + 255) & ~(VkDeviceSize)255;
+    static constexpr VkDeviceSize SH_ARENA_VERTEX_BYTES = 192ull << 20;
+    static constexpr VkDeviceSize SH_ARENA_INDEX_BYTES = 64ull << 20;
+
+    struct ShArenaEntry
+    {
+        U32 mBaseVertex = 0;
+        U32 mBaseIndex = 0;
+    };
+    struct ShDepth
+    {
+        U32            width = 0, height = 0;
+        VkImage        image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        HANDLE         handle = nullptr;
+        VkImageView    view = VK_NULL_HANDLE;
+        VkFramebuffer  framebuffer = VK_NULL_HANDLE;
+        GLuint         glMemory = 0, glTexture = 0;
+        U32            lastFrame = 0;
+    };
+    struct ShSlot
+    {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence         fence = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        bool            submitted = false;
+    };
+
+    bool        mShTried = false;
+    bool        mShReady = false;
+    std::string mShNote = "off (QuasarVulkanShadows)";
+
+    VkBuffer       mShArena = VK_NULL_HANDLE;
+    VkDeviceMemory mShArenaMemory = VK_NULL_HANDLE;
+    HANDLE         mShArenaHandle = nullptr;
+    GLuint         mShArenaGLMemory = 0, mShArenaGL = 0;
+    VkDeviceSize   mShVertexTop = 0, mShIndexTop = 0;
+    std::unordered_map<U64, ShArenaEntry> mShEntries;
+
+    VkBuffer       mShHost = VK_NULL_HANDLE;
+    VkDeviceMemory mShHostMemory = VK_NULL_HANDLE;
+    U8*            mShHostMapped = nullptr;
+    ShSlot         mShSlots[SH_SLOTS];
+    U32            mShNextSlot = 0;
+
+    VkDescriptorSetLayout mShSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      mShDescriptorPool = VK_NULL_HANDLE;
+    VkPipelineLayout      mShLayout = VK_NULL_HANDLE;
+    VkShaderModule        mShModule = VK_NULL_HANDLE;
+    VkRenderPass          mShPass = VK_NULL_HANDLE;
+    VkPipeline            mShPipelines[4] = {};  // [clamp][greater]
+    std::vector<ShDepth>  mShDepths;
+
+    VkSemaphore mShGLDoneVK = VK_NULL_HANDLE, mShVKDoneVK = VK_NULL_HANDLE;
+    GLuint      mShGLDoneGL = 0, mShVKDoneGL = 0;
+    HANDLE      mShGLDoneHandle = nullptr, mShVKDoneHandle = nullptr;
+
+    // The pass being collected.
+    bool     mShInPass = false;
+    U32      mShSlot = 0;
+    U32      mShDraws = 0;
+    U32      mShWidth = 0, mShHeight = 0;
+    bool     mShClamp = false, mShGreater = false, mShRemapDepth = false;
+
+    // For the status line: this frame's so far, and the last whole frame's.
+    U32      mShFrame = 0;
+    U32      mShPassesNow = 0, mShDrawsNow = 0, mShPassesLast = 0, mShDrawsLast = 0;
+    U64      mShCopiedNow = 0, mShCopiedLast = 0;
+    U32      mShArenaResets = 0;
+
+    bool shFail(const std::string& why)
+    {
+        mShNote = "failed: " + why;
+        LL_WARNS("Vulkan") << "Shadows in Vulkan " << mShNote << LL_ENDL;
+        destroyShadowObjects();
+        mShReady = false;
+        return false;
+    }
+
+    // Everything the shadow casters need, made the first time they are wanted. False, with why in mShNote, where it
+    // cannot be; then nothing is left made and it is not tried again.
+    bool createShadowObjects()
+    {
+        if (mShTried)
+        {
+            return mShReady;
+        }
+        mShTried = true;
+        if (!mActive || !mDevice)
+        {
+            mShNote = "needs Vulkan presentation";
+            return false;
+        }
+        if (!mDepthPassed)
+        {
+            mShNote = "waits for the shadow map self-test to pass";
+            mShTried = false;  // tried again once it has
+            return false;
+        }
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        // The arena: positions, then indices, exported to GL as one buffer object.
+        VkExternalMemoryBufferCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        info.pNext       = &external;
+        info.size        = SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES;
+        info.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &info, nullptr, &mShArena) != VK_SUCCESS)
+        {
+            mShArena = VK_NULL_HANDLE;
+            return shFail("vkCreateBuffer (arena)");
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, mShArena, &req);
+        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (device_type == U32_MAX)
+        {
+            return shFail("no device-local memory for the arena");
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.buffer = mShArena;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = device_type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &mShArenaMemory) != VK_SUCCESS)
+        {
+            mShArenaMemory = VK_NULL_HANDLE;
+            return shFail("vkAllocateMemory (arena, 256 MB)");
+        }
+        vkBindBufferMemory(mDevice, mShArena, mShArenaMemory, 0);
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = mShArenaMemory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return shFail("vkGetMemoryWin32HandleKHR (arena)");
+        }
+        if (!mKMT)
+        {
+            mShArenaHandle = handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &mShArenaGLMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(mShArenaGLMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(mShArenaGLMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateBuffers(1, &mShArenaGL);
+        gl.NamedBufferStorageMemEXT(mShArenaGL, (GLsizeiptr)(SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES),
+                                    mShArenaGLMemory, 0);
+        gl.Finish();
+        logGLErrors("importing the shadow arena");
+
+        // The ring the CPU writes each map's draws into.
+        VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        host_info.size        = SH_SLOT_BYTES * SH_SLOTS;
+        host_info.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        host_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &host_info, nullptr, &mShHost) != VK_SUCCESS)
+        {
+            mShHost = VK_NULL_HANDLE;
+            return shFail("vkCreateBuffer (draws)");
+        }
+        vkGetBufferMemoryRequirements(mDevice, mShHost, &req);
+        const U32 host_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo host_alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        host_alloc.allocationSize  = req.size;
+        host_alloc.memoryTypeIndex = host_type;
+        if (host_type == U32_MAX || vkAllocateMemory(mDevice, &host_alloc, nullptr, &mShHostMemory) != VK_SUCCESS)
+        {
+            mShHostMemory = VK_NULL_HANDLE;
+            return shFail("no host memory for the draws");
+        }
+        vkBindBufferMemory(mDevice, mShHost, mShHostMemory, 0);
+        void* mapped = nullptr;
+        if (vkMapMemory(mDevice, mShHostMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return shFail("vkMapMemory (draws)");
+        }
+        mShHostMapped = static_cast<U8*>(mapped);
+
+        // The descriptor set of each slot: its matrices.
+        VkDescriptorSetLayoutBinding binding = {};
+        binding.binding         = 0;
+        binding.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binding.descriptorCount = 1;
+        binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        set_info.bindingCount = 1;
+        set_info.pBindings    = &binding;
+        if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mShSetLayout) != VK_SUCCESS)
+        {
+            mShSetLayout = VK_NULL_HANDLE;
+            return shFail("vkCreateDescriptorSetLayout (shadows)");
+        }
+        VkDescriptorPoolSize pool_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS };
+        VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool_info.maxSets       = SH_SLOTS;
+        pool_info.poolSizeCount = 1;
+        pool_info.pPoolSizes    = &pool_size;
+        if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &mShDescriptorPool) != VK_SUCCESS)
+        {
+            mShDescriptorPool = VK_NULL_HANDLE;
+            return shFail("vkCreateDescriptorPool (shadows)");
+        }
+        VkPushConstantRange push = { VK_SHADER_STAGE_VERTEX_BIT, 0, 16 };
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layout_info.setLayoutCount         = 1;
+        layout_info.pSetLayouts            = &mShSetLayout;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges    = &push;
+        if (vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &mShLayout) != VK_SUCCESS)
+        {
+            mShLayout = VK_NULL_HANDLE;
+            return shFail("vkCreatePipelineLayout (shadows)");
+        }
+
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        for (U32 i = 0; i < SH_SLOTS; ++i)
+        {
+            ShSlot& slot = mShSlots[i];
+            VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            if (vkAllocateCommandBuffers(mDevice, &cmd_info, &slot.cmd) != VK_SUCCESS ||
+                vkCreateFence(mDevice, &fence_info, nullptr, &slot.fence) != VK_SUCCESS)
+            {
+                return shFail("no command buffers for the shadows");
+            }
+            VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            set_alloc.descriptorPool     = mShDescriptorPool;
+            set_alloc.descriptorSetCount = 1;
+            set_alloc.pSetLayouts        = &mShSetLayout;
+            if (vkAllocateDescriptorSets(mDevice, &set_alloc, &slot.set) != VK_SUCCESS)
+            {
+                return shFail("vkAllocateDescriptorSets (shadows)");
+            }
+            VkDescriptorBufferInfo buffer = { mShHost, SH_SLOT_BYTES * i, SH_MVP_BYTES };
+            VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            write.dstSet          = slot.set;
+            write.dstBinding      = 0;
+            write.descriptorCount = 1;
+            write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo     = &buffer;
+            vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+        }
+
+        // The render pass: a depth attachment loaded and stored, GENERAL throughout as every shared image is kept.
+        VkAttachmentDescription attachment = {};
+        attachment.format         = VK_FORMAT_D32_SFLOAT;
+        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout  = VK_IMAGE_LAYOUT_GENERAL;
+        attachment.finalLayout    = VK_IMAGE_LAYOUT_GENERAL;
+        VkAttachmentReference depth_ref = { 0, VK_IMAGE_LAYOUT_GENERAL };
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.pDepthStencilAttachment = &depth_ref;
+        VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        pass_info.attachmentCount = 1;
+        pass_info.pAttachments    = &attachment;
+        pass_info.subpassCount    = 1;
+        pass_info.pSubpasses      = &subpass;
+        if (vkCreateRenderPass(mDevice, &pass_info, nullptr, &mShPass) != VK_SUCCESS)
+        {
+            mShPass = VK_NULL_HANDLE;
+            return shFail("vkCreateRenderPass (shadows)");
+        }
+        VkShaderModuleCreateInfo module_info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        module_info.codeSize = sizeof(ql_spv_qlshadow_vert);
+        module_info.pCode    = ql_spv_qlshadow_vert;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mShModule) != VK_SUCCESS)
+        {
+            mShModule = VK_NULL_HANDLE;
+            return shFail("vkCreateShaderModule (shadows)");
+        }
+        for (U32 clamp = 0; clamp < 2; ++clamp)
+        {
+            for (U32 greater = 0; greater < 2; ++greater)
+            {
+                if (clamp && !mHasDepthClamp)
+                {
+                    continue;
+                }
+                if (!createShadowPipeline(clamp != 0, greater != 0, mShPipelines[clamp * 2 + greater]))
+                {
+                    return false;
+                }
+            }
+        }
+
+        if (!createSharedSemaphore(mShGLDoneVK, mShGLDoneGL, mShGLDoneHandle) ||
+            !createSharedSemaphore(mShVKDoneVK, mShVKDoneGL, mShVKDoneHandle))
+        {
+            return shFail("its semaphores could not be shared");
+        }
+
+        mShReady = true;
+        mShNote  = llformat("ready%s%s", mHasMultiIndirect ? "" : " (no multi-draw indirect: one call a draw)",
+                            mHasDepthClamp ? "" : " (no depth clamp: the sun stays in GL)");
+        LL_INFOS("Vulkan") << "Shadows in Vulkan " << mShNote << ": a 256 MB arena, " << SH_SLOTS << " slots of "
+                           << SH_MAX_DRAWS << " draws" << LL_ENDL;
+        return true;
+    }
+
+    bool createShadowPipeline(bool clamp, bool greater, VkPipeline& pipeline)
+    {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stage.module = mShModule;
+        stage.pName  = "main";
+        VkVertexInputBindingDescription vertex_binding = { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX };
+        VkVertexInputAttributeDescription position = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+        VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        vertex_input.vertexBindingDescriptionCount   = 1;
+        vertex_input.pVertexBindingDescriptions      = &vertex_binding;
+        vertex_input.vertexAttributeDescriptionCount = 1;
+        vertex_input.pVertexAttributeDescriptions    = &position;
+        VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        viewport_state.viewportCount = 1;
+        viewport_state.scissorCount  = 1;
+        // GL culls back faces, counter-clockwise in front, in window space y up; Vulkan's framebuffer runs y down for the
+        // same clip space (its rows are GL's rows: the self-test), which turns every triangle's winding over.
+        VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        raster.depthClampEnable = clamp ? VK_TRUE : VK_FALSE;
+        raster.polygonMode      = VK_POLYGON_MODE_FILL;
+        raster.cullMode         = VK_CULL_MODE_BACK_BIT;
+        raster.frontFace        = VK_FRONT_FACE_CLOCKWISE;
+        raster.lineWidth        = 1.f;
+        VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        depth.depthTestEnable  = VK_TRUE;
+        depth.depthWriteEnable = VK_TRUE;
+        depth.depthCompareOp   = greater ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_LESS;
+        VkPipelineColorBlendStateCreateInfo blend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        const VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates    = dynamic_states;
+        VkGraphicsPipelineCreateInfo pipeline_info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pipeline_info.stageCount          = 1;
+        pipeline_info.pStages             = &stage;
+        pipeline_info.pVertexInputState   = &vertex_input;
+        pipeline_info.pInputAssemblyState = &assembly;
+        pipeline_info.pViewportState      = &viewport_state;
+        pipeline_info.pRasterizationState = &raster;
+        pipeline_info.pMultisampleState   = &multisample;
+        pipeline_info.pDepthStencilState  = &depth;
+        pipeline_info.pColorBlendState    = &blend;
+        pipeline_info.pDynamicState       = &dynamic;
+        pipeline_info.layout              = mShLayout;
+        pipeline_info.renderPass          = mShPass;
+        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        {
+            pipeline = VK_NULL_HANDLE;
+            return shFail("vkCreateGraphicsPipelines (shadows)");
+        }
+        return true;
+    }
+
+    // The depth image of a map's size, made the first time that size is drawn; the least recently used of more than
+    // four goes.
+    ShDepth* shadowDepth(U32 width, U32 height)
+    {
+        const U32 frame = mShFrame;
+        for (ShDepth& d : mShDepths)
+        {
+            if (d.width == width && d.height == height)
+            {
+                d.lastFrame = frame;
+                return &d;
+            }
+        }
+        if (mShDepths.size() >= 4)
+        {
+            auto oldest = std::min_element(mShDepths.begin(), mShDepths.end(),
+                                           [](const ShDepth& a, const ShDepth& b) { return a.lastFrame < b.lastFrame; });
+            waitShadowSlots();
+            destroyShadowDepth(*oldest);
+            mShDepths.erase(oldest);
+        }
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        ShDepth d;
+        d.width = width;
+        d.height = height;
+        d.lastFrame = frame;
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = VK_FORMAT_D32_SFLOAT;
+        info.extent        = { width, height, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        auto bad = [&](const char* what)
+        {
+            LL_WARNS("Vulkan") << "Shadows in Vulkan: no " << width << "x" << height << " depth image (" << what << ")"
+                               << LL_ENDL;
+            destroyShadowDepth(d);
+            return (ShDepth*)nullptr;
+        };
+        if (vkCreateImage(mDevice, &info, nullptr, &d.image) != VK_SUCCESS)
+        {
+            d.image = VK_NULL_HANDLE;
+            return bad("vkCreateImage");
+        }
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, d.image, &req);
+        const U32 type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.image = d.image;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = type;
+        if (type == U32_MAX || vkAllocateMemory(mDevice, &alloc, nullptr, &d.memory) != VK_SUCCESS)
+        {
+            d.memory = VK_NULL_HANDLE;
+            return bad("vkAllocateMemory");
+        }
+        vkBindImageMemory(mDevice, d.image, d.memory, 0);
+        VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view_info.image            = d.image;
+        view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format           = VK_FORMAT_D32_SFLOAT;
+        view_info.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(mDevice, &view_info, nullptr, &d.view) != VK_SUCCESS)
+        {
+            d.view = VK_NULL_HANDLE;
+            return bad("vkCreateImageView");
+        }
+        VkFramebufferCreateInfo fb_info = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fb_info.renderPass      = mShPass;
+        fb_info.attachmentCount = 1;
+        fb_info.pAttachments    = &d.view;
+        fb_info.width           = width;
+        fb_info.height          = height;
+        fb_info.layers          = 1;
+        if (vkCreateFramebuffer(mDevice, &fb_info, nullptr, &d.framebuffer) != VK_SUCCESS)
+        {
+            d.framebuffer = VK_NULL_HANDLE;
+            return bad("vkCreateFramebuffer");
+        }
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = d.memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return bad("vkGetMemoryWin32HandleKHR");
+        }
+        if (!mKMT)
+        {
+            d.handle = handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &d.glMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(d.glMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(d.glMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateTextures(GL_TEXTURE_2D, 1, &d.glTexture);
+        gl.TextureParameteri(d.glTexture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(d.glTexture, 1, GL_DEPTH_COMPONENT32F, (GLsizei)width, (GLsizei)height, d.glMemory, 0);
+        gl.Finish();
+        logGLErrors("importing a shadow depth image");
+        mShDepths.push_back(d);
+        LL_INFOS("Vulkan") << "Shadows in Vulkan: a " << width << "x" << height << " depth image" << LL_ENDL;
+        return &mShDepths.back();
+    }
+
+    void destroyShadowDepth(ShDepth& d)
+    {
+        if (d.glTexture) gl.DeleteTextures(1, &d.glTexture);
+        if (d.glMemory) gl.DeleteMemoryObjectsEXT(1, &d.glMemory);
+        if (d.framebuffer) vkDestroyFramebuffer(mDevice, d.framebuffer, nullptr);
+        if (d.view) vkDestroyImageView(mDevice, d.view, nullptr);
+        if (d.image) vkDestroyImage(mDevice, d.image, nullptr);
+        if (d.memory) vkFreeMemory(mDevice, d.memory, nullptr);
+        if (d.handle) CloseHandle(d.handle);
+        d = ShDepth();
+    }
+
+    void waitShadowSlots()
+    {
+        for (ShSlot& slot : mShSlots)
+        {
+            if (slot.submitted && slot.fence)
+            {
+                vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+                slot.submitted = false;
+            }
+        }
+    }
+
+    void destroyShadowObjects()
+    {
+        if (!mDevice)
+        {
+            return;
+        }
+        vkDeviceWaitIdle(mDevice);
+        if (gl.Finish)
+        {
+            gl.Finish();
+        }
+        for (ShDepth& d : mShDepths)
+        {
+            destroyShadowDepth(d);
+        }
+        mShDepths.clear();
+        for (ShSlot& slot : mShSlots)
+        {
+            if (slot.fence) vkDestroyFence(mDevice, slot.fence, nullptr);
+            slot = ShSlot();  // the command buffers go with the pool, the sets with theirs
+        }
+        for (VkPipeline& p : mShPipelines)
+        {
+            if (p) vkDestroyPipeline(mDevice, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
+        if (mShModule) vkDestroyShaderModule(mDevice, mShModule, nullptr);
+        if (mShPass) vkDestroyRenderPass(mDevice, mShPass, nullptr);
+        if (mShLayout) vkDestroyPipelineLayout(mDevice, mShLayout, nullptr);
+        if (mShDescriptorPool) vkDestroyDescriptorPool(mDevice, mShDescriptorPool, nullptr);
+        if (mShSetLayout) vkDestroyDescriptorSetLayout(mDevice, mShSetLayout, nullptr);
+        mShModule = VK_NULL_HANDLE;
+        mShPass = VK_NULL_HANDLE;
+        mShLayout = VK_NULL_HANDLE;
+        mShDescriptorPool = VK_NULL_HANDLE;
+        mShSetLayout = VK_NULL_HANDLE;
+        if (mShHostMapped)
+        {
+            vkUnmapMemory(mDevice, mShHostMemory);
+            mShHostMapped = nullptr;
+        }
+        if (mShHost) vkDestroyBuffer(mDevice, mShHost, nullptr);
+        if (mShHostMemory) vkFreeMemory(mDevice, mShHostMemory, nullptr);
+        mShHost = VK_NULL_HANDLE;
+        mShHostMemory = VK_NULL_HANDLE;
+        if (mShArenaGL) gl.DeleteBuffers(1, &mShArenaGL);
+        if (mShArenaGLMemory) gl.DeleteMemoryObjectsEXT(1, &mShArenaGLMemory);
+        if (mShArena) vkDestroyBuffer(mDevice, mShArena, nullptr);
+        if (mShArenaMemory) vkFreeMemory(mDevice, mShArenaMemory, nullptr);
+        if (mShArenaHandle) CloseHandle(mShArenaHandle);
+        mShArenaGL = 0;
+        mShArenaGLMemory = 0;
+        mShArena = VK_NULL_HANDLE;
+        mShArenaMemory = VK_NULL_HANDLE;
+        mShArenaHandle = nullptr;
+        mShEntries.clear();
+        mShVertexTop = mShIndexTop = 0;
+        if (mShGLDoneGL) gl.DeleteSemaphoresEXT(1, &mShGLDoneGL);
+        if (mShVKDoneGL) gl.DeleteSemaphoresEXT(1, &mShVKDoneGL);
+        if (mShGLDoneVK) vkDestroySemaphore(mDevice, mShGLDoneVK, nullptr);
+        if (mShVKDoneVK) vkDestroySemaphore(mDevice, mShVKDoneVK, nullptr);
+        if (mShGLDoneHandle) CloseHandle(mShGLDoneHandle);
+        if (mShVKDoneHandle) CloseHandle(mShVKDoneHandle);
+        mShGLDoneGL = mShVKDoneGL = 0;
+        mShGLDoneVK = mShVKDoneVK = VK_NULL_HANDLE;
+        mShGLDoneHandle = mShVKDoneHandle = nullptr;
+        mShReady = false;
+        mShInPass = false;
+    }
+
+    void shadowFrame(U32 frame)
+    {
+        if (frame != mShFrame)
+        {
+            mShPassesLast = mShPassesNow;
+            mShDrawsLast  = mShDrawsNow;
+            mShCopiedLast = mShCopiedNow;
+            mShPassesNow = mShDrawsNow = 0;
+            mShCopiedNow = 0;
+            mShFrame = frame;
+        }
+    }
+
+    bool shadowBegin(U32 width, U32 height, bool clamp, bool greater, bool remap_depth)
+    {
+        if (mShInPass || !createShadowObjects())
+        {
+            return false;
+        }
+        if (clamp && !mHasDepthClamp)
+        {
+            return false;
+        }
+        // Start the arena over when it is nearly full, before any of this map's draws is in it.
+        if (mShVertexTop > SH_ARENA_VERTEX_BYTES - SH_ARENA_VERTEX_BYTES / 8 ||
+            mShIndexTop > SH_ARENA_INDEX_BYTES - SH_ARENA_INDEX_BYTES / 8)
+        {
+            mShEntries.clear();
+            mShVertexTop = mShIndexTop = 0;
+            ++mShArenaResets;
+        }
+        mShSlot = mShNextSlot;
+        mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
+        ShSlot& slot = mShSlots[mShSlot];
+        if (slot.submitted)
+        {
+            // Thirty-two maps back, several frames: long done, so this does not wait in practice.
+            vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            slot.submitted = false;
+        }
+        mShInPass     = true;
+        mShDraws      = 0;
+        mShWidth      = width;
+        mShHeight     = height;
+        mShClamp      = clamp;
+        mShGreater    = greater;
+        mShRemapDepth = remap_depth;
+        return true;
+    }
+
+    // A mesh in the arena: found by its content stamp, or copied in now. False when it does not fit.
+    bool shadowArena(U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 vertex_count, GLuint index_buffer,
+                     U32 index_count, U32& base_vertex, U32& base_index)
+    {
+        if (!mShInPass)
+        {
+            return false;
+        }
+        const auto found = mShEntries.find(stamp);
+        if (found != mShEntries.end())
+        {
+            base_vertex = found->second.mBaseVertex;
+            base_index  = found->second.mBaseIndex;
+            return true;
+        }
+        const VkDeviceSize vertex_bytes = (VkDeviceSize)vertex_count * 16;
+        const VkDeviceSize index_bytes  = ((VkDeviceSize)index_count * 2 + 3) & ~(VkDeviceSize)3;
+        if (!vertex_buffer || !index_buffer || vertex_count == 0 || index_count == 0 ||
+            mShVertexTop + vertex_bytes > SH_ARENA_VERTEX_BYTES || mShIndexTop + index_bytes > SH_ARENA_INDEX_BYTES)
+        {
+            return false;
+        }
+        gl.CopyNamedBufferSubData(vertex_buffer, mShArenaGL, (GLintptr)vertex_offset, (GLintptr)mShVertexTop,
+                                  (GLsizeiptr)vertex_bytes);
+        gl.CopyNamedBufferSubData(index_buffer, mShArenaGL, 0, (GLintptr)(SH_ARENA_VERTEX_BYTES + mShIndexTop),
+                                  (GLsizeiptr)index_count * 2);
+        ShArenaEntry entry;
+        entry.mBaseVertex = (U32)(mShVertexTop / 16);
+        entry.mBaseIndex  = (U32)(mShIndexTop / 2);
+        mShEntries.emplace(stamp, entry);
+        mShVertexTop += vertex_bytes;
+        mShIndexTop += index_bytes;
+        mShCopiedNow += vertex_bytes + index_bytes;
+        base_vertex = entry.mBaseVertex;
+        base_index  = entry.mBaseIndex;
+        return true;
+    }
+
+    bool shadowDraw(const float mvp[16], U32 base_vertex, U32 first_index, U32 index_count)
+    {
+        if (!mShInPass || mShDraws >= SH_MAX_DRAWS)
+        {
+            return false;
+        }
+        U8* slot = mShHostMapped + SH_SLOT_BYTES * mShSlot;
+        memcpy(slot + (size_t)mShDraws * 64, mvp, 64);
+        VkDrawIndexedIndirectCommand cmd = {};
+        cmd.indexCount    = index_count;
+        cmd.instanceCount = 1;
+        cmd.firstIndex    = first_index;
+        cmd.vertexOffset  = (S32)base_vertex;
+        cmd.firstInstance = mShDraws;
+        memcpy(slot + SH_MVP_BYTES + (size_t)mShDraws * sizeof(cmd), &cmd, sizeof(cmd));
+        ++mShDraws;
+        return true;
+    }
+
+    // The map's casters, drawn over what GL's depth_texture holds; back in it once Vulkan is done.
+    bool shadowEnd(GLuint depth_texture)
+    {
+        if (!mShInPass)
+        {
+            return false;
+        }
+        mShInPass = false;
+        if (mShDraws == 0)
+        {
+            return true;
+        }
+        ShDepth* target = shadowDepth(mShWidth, mShHeight);
+        const VkPipeline pipeline = mShPipelines[(mShClamp ? 2 : 0) + (mShGreater ? 1 : 0)];
+        if (!target || !pipeline || !depth_texture)
+        {
+            return false;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan shadow map");
+        const GLint w = (GLint)mShWidth;
+        const GLint h = (GLint)mShHeight;
+        const GLenum general = GL_LAYOUT_GENERAL_EXT;
+
+        // GL: the map as it stands into Vulkan's image, and both over to Vulkan.
+        gl.CopyImageSubData(depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
+                            1);
+        gl.SignalSemaphoreEXT(mShGLDoneGL, 1, &mShArenaGL, 1, &target->glTexture, &general);
+        gl.Flush();
+
+        ShSlot& slot = mShSlots[mShSlot];
+        vkResetFences(mDevice, 1, &slot.fence);
+        vkResetCommandBuffer(slot.cmd, 0);
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(slot.cmd, &begin);
+        bufferBarrier(slot.cmd, mShArena, 0, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+                      VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+        VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        acquire.srcAccessMask       = 0;
+        acquire.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        acquire.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        acquire.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        acquire.dstQueueFamilyIndex = mQueueFamily;
+        acquire.image               = target->image;
+        acquire.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &acquire);
+
+        VkRenderPassBeginInfo pass_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        pass_begin.renderPass  = mShPass;
+        pass_begin.framebuffer = target->framebuffer;
+        pass_begin.renderArea  = { { 0, 0 }, { mShWidth, mShHeight } };
+        vkCmdBeginRenderPass(slot.cmd, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+        const VkViewport viewport = { 0.f, 0.f, (float)mShWidth, (float)mShHeight, 0.f, 1.f };
+        const VkRect2D scissor = { { 0, 0 }, { mShWidth, mShHeight } };
+        vkCmdSetViewport(slot.cmd, 0, 1, &viewport);
+        vkCmdSetScissor(slot.cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mShLayout, 0, 1, &slot.set, 0, nullptr);
+        const float flags[4] = { mShRemapDepth ? 1.f : 0.f, 0.f, 0.f, 0.f };
+        vkCmdPushConstants(slot.cmd, mShLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(flags), flags);
+        const VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(slot.cmd, 0, 1, &mShArena, &zero);
+        vkCmdBindIndexBuffer(slot.cmd, mShArena, SH_ARENA_VERTEX_BYTES, VK_INDEX_TYPE_UINT16);
+        const VkDeviceSize commands = SH_SLOT_BYTES * mShSlot + SH_MVP_BYTES;
+        if (mHasMultiIndirect)
+        {
+            vkCmdDrawIndexedIndirect(slot.cmd, mShHost, commands, mShDraws, sizeof(VkDrawIndexedIndirectCommand));
+        }
+        else
+        {
+            const VkDrawIndexedIndirectCommand* cmds = reinterpret_cast<const VkDrawIndexedIndirectCommand*>(
+                mShHostMapped + commands);
+            for (U32 i = 0; i < mShDraws; ++i)
+            {
+                vkCmdDrawIndexed(slot.cmd, cmds[i].indexCount, 1, cmds[i].firstIndex, cmds[i].vertexOffset, i);
+            }
+        }
+        vkCmdEndRenderPass(slot.cmd);
+
+        bufferBarrier(slot.cmd, mShArena, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+                      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        VkImageMemoryBarrier release = acquire;
+        release.srcAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        release.dstAccessMask       = 0;
+        release.srcQueueFamilyIndex = mQueueFamily;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &release);
+        vkEndCommandBuffer(slot.cmd);
+
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &mShGLDoneVK;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &slot.cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &mShVKDoneVK;
+        const VkResult result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+        if (result != VK_SUCCESS)
+        {
+            // GL's signal is left untaken: everything is let go, waiting for both first, and not tried again.
+            shFail(llformat("a shadow map could not be submitted (VkResult %d)", (S32)result));
+            return false;
+        }
+        slot.submitted = true;
+
+        // GL: back once Vulkan is done (on the GPU), and the map into GL's own texture.
+        gl.WaitSemaphoreEXT(mShVKDoneGL, 1, &mShArenaGL, 1, &target->glTexture, &general);
+        gl.CopyImageSubData(target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
+                            1);
+        ++mShPassesNow;
+        mShDrawsNow += mShDraws;
+        return true;
+    }
+
+    // Leaves the pass without drawing it (the caller draws it with GL).
+    void shadowAbandon()
+    {
+        mShInPass = false;
+    }
+
+    std::string shadowInfo() const
+    {
+        if (!mShReady)
+        {
+            return mShNote;
+        }
+        return llformat("%u maps, %u draws last frame | arena %.0f/%.0f MB, %.1f MB copied last frame, %u resets",
+                        mShPassesLast, mShDrawsLast, (double)(mShVertexTop + mShIndexTop) / (1 << 20),
+                        (double)(SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES) / (1 << 20),
+                        (double)mShCopiedLast / (1 << 20), mShArenaResets);
+    }
+
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
 
     // GL draws the viewer's 2D interface into a layer of its own (newview's QLUILayer), premultiplied, and hands it over
@@ -3420,6 +4306,7 @@ struct QLVulkanPresenter::Impl
         {
             destroyPassObjects();
             destroyCompositeObjects();
+            destroyShadowObjects();
         }
         if (mGLDoneGL)
         {
@@ -4142,6 +5029,69 @@ std::string QLVulkanPresenter::geometryInfo()
         return "needs Vulkan presentation (QuasarVulkanPresent)";
     }
     return sActive->mGeoNote;
+}
+
+// static
+bool QLVulkanPresenter::shadowBegin(unsigned width, unsigned height, bool clamp, bool greater, bool remap_depth)
+{
+    return sActive && sActive->shadowBegin(width, height, clamp, greater, remap_depth);
+}
+
+// static
+bool QLVulkanPresenter::shadowArena(unsigned long long stamp, unsigned vertex_buffer, unsigned vertex_offset,
+                                    unsigned vertex_count, unsigned index_buffer, unsigned index_count,
+                                    unsigned& base_vertex, unsigned& base_index)
+{
+    U32 bv = 0, bi = 0;
+    if (!sActive || !sActive->shadowArena((U64)stamp, (GLuint)vertex_buffer, vertex_offset, vertex_count,
+                                          (GLuint)index_buffer, index_count, bv, bi))
+    {
+        return false;
+    }
+    base_vertex = bv;
+    base_index  = bi;
+    return true;
+}
+
+// static
+bool QLVulkanPresenter::shadowDraw(const float mvp[16], unsigned base_vertex, unsigned first_index,
+                                   unsigned index_count)
+{
+    return sActive && sActive->shadowDraw(mvp, base_vertex, first_index, index_count);
+}
+
+// static
+bool QLVulkanPresenter::shadowEnd(unsigned depth_texture)
+{
+    return sActive && sActive->shadowEnd((GLuint)depth_texture);
+}
+
+// static
+void QLVulkanPresenter::shadowAbandon()
+{
+    if (sActive)
+    {
+        sActive->shadowAbandon();
+    }
+}
+
+// static
+void QLVulkanPresenter::shadowFrame(unsigned frame)
+{
+    if (sActive)
+    {
+        sActive->shadowFrame(frame);
+    }
+}
+
+// static
+std::string QLVulkanPresenter::shadowInfo()
+{
+    if (!sActive)
+    {
+        return "needs Vulkan presentation (QuasarVulkanPresent)";
+    }
+    return sActive->shadowInfo();
 }
 
 // static
