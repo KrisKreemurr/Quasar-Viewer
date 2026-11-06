@@ -2916,6 +2916,28 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarVulkanMainTargets</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, needs QuasarVulkanTargets; restart): the main view's render targets are given Vulkan's memory too, as the probes' are, so that Vulkan can draw into its G-buffer (QuasarVulkanMainDraws).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarVulkanMainDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, needs QuasarVulkanMainTargets, QuasarVulkanTargets and QuasarVulkanTextures): the main view's simple prims (diffuse texture and tint, not rigged) are drawn into its G-buffer by Vulkan instead of GL, as QuasarVulkanProbeDraws does for reflections. Status: "Quasar Vulkan main draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanProbeDraws</key>
         <map>
             <key>Comment</key>

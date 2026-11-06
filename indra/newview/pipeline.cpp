@@ -828,11 +828,16 @@ void LLPipeline::applyRenderInputs()
         QLVulkanPresenter::targetTest())
     {
         ql_probe_pack_moved = true;
-        LLRenderTarget& gbuffer = mAuxillaryRT.deferredScreen;
-        const U32 name = gbuffer.getNumTextures() ? gbuffer.getTexture(0) : 0;
-        if (name && gQLExternalStorage && !gQLExternalStorage->owns(name))
+        static const bool main_wanted = gSavedSettings.getBOOL("QuasarVulkanMainTargets");
+        const auto in_gl = [](LLRenderTarget& gbuffer)
         {
-            LL_INFOS("Vulkan") << "The probe pack was made in GL's memory: reconciled again for Vulkan's" << LL_ENDL;
+            const U32 name = gbuffer.getNumTextures() ? gbuffer.getTexture(0) : 0;
+            return name && gQLExternalStorage && !gQLExternalStorage->owns(name);
+        };
+        if (in_gl(mAuxillaryRT.deferredScreen) || (main_wanted && in_gl(mMainRT.deferredScreen)))
+        {
+            LL_INFOS("Vulkan") << "The probe" << (main_wanted ? " and main" : "")
+                               << " packs were made in GL's memory: reconciled again for Vulkan's" << LL_ENDL;
             rebuildGLBuffers(mLatchedInputs, RebuildCause::Setting);
         }
     }
@@ -1001,7 +1006,10 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
 {
 #if QL_VULKAN_SHADOWS
     static const bool wanted = gSavedSettings.getBOOL("QuasarVulkanTargets");
-    if (!wanted || !pack || *pack != ALRenderResourcePlan::Pack::Probe)
+    // The main view's pack too, where asked (QuasarVulkanMainTargets, read at start): the main view's draws need it.
+    static const bool main_wanted = gSavedSettings.getBOOL("QuasarVulkanMainTargets");
+    if (!wanted || !pack ||
+        !(*pack == ALRenderResourcePlan::Pack::Probe || (main_wanted && *pack == ALRenderResourcePlan::Pack::Main)))
     {
         return false;
     }
@@ -5517,7 +5525,7 @@ void LLPipeline::renderHighlights()
 U32 LLPipeline::sCurRenderPoolType = 0 ;
 
 // Quasar: a probe face's simple prims drawn by Vulkan (QuasarVulkanProbeDraws), defined with the shadows' Vulkan code.
-static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer);
+static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view);
 static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end();  // what GL must draw after all, or null
 
 void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
@@ -5625,10 +5633,15 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 
         // Quasar: a reflection probe face's simple prims are Vulkan's to draw, where it can (QuasarVulkanProbeDraws):
         // the simple pool then draws only what Vulkan could not take, and Vulkan draws the rest once the pools are done.
-        if (gCubeSnapshot && mRT == &mAuxillaryRT && !mHeroProbeManager.isMirrorPass() &&
-            hasRenderType(LLPipeline::RENDER_TYPE_SIMPLE))
+        // The main view's too (QuasarVulkanMainDraws, needs QuasarVulkanMainTargets): the same draws, into its G-buffer.
         {
-            ql_vulkan_probe_draws_begin(mRT->deferredScreen);
+            static LLCachedControl<bool> ql_main_draws(gSavedSettings, "QuasarVulkanMainDraws", false);
+            const bool probe_face = gCubeSnapshot && mRT == &mAuxillaryRT && !mHeroProbeManager.isMirrorPass();
+            const bool main_view  = !gCubeSnapshot && mRT == &mMainRT && ql_main_draws();
+            if ((probe_face || main_view) && hasRenderType(LLPipeline::RENDER_TYPE_SIMPLE))
+            {
+                ql_vulkan_probe_draws_begin(mRT->deferredScreen, main_view);
+            }
         }
 
         pool_set_t::iterator iter1 = mPools.begin();
@@ -13460,6 +13473,9 @@ static bool sQLProbeDrawsOpen = false;
 // Since start: faces offered, faces Vulkan took, and why draws stayed GL's. For the status line.
 static U64 sQLProbeFacesOffered = 0, sQLProbeFacesTaken = 0, sQLProbeHandOversFailed = 0;
 static U64 sQLProbeNoTexture = 0, sQLProbeBufferRefused = 0, sQLProbeDrawRefused = 0, sQLProbeTakenDraws = 0;
+// The main view's (QuasarVulkanMainDraws): frames offered and taken, and draws Vulkan took and GL kept, since start.
+static U64 sQLMainOffered = 0, sQLMainTaken = 0, sQLMainDraws = 0, sQLMainKept = 0;
+static U64 sQLMainLastDraws = 0, sQLMainLastKept = 0;  // the last main view's
 
 #if QL_VULKAN_SHADOWS
 // The inverse transpose of a model-view's upper 3x3, as the normal matrix, column-major in a 4x4.
@@ -13490,18 +13506,18 @@ static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
 }
 #endif
 
-static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
+static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 {
     sQLProbeDrawsOpen = false;
     gQLVulkanSimpleLeftovers = nullptr;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
-    if (!wanted())
+    if (!main_view && !wanted())
     {
         return false;
     }
-    ++sQLProbeFacesOffered;
+    ++(main_view ? sQLMainOffered : sQLProbeFacesOffered);
     U32 colors[4] = {};
     const U32 color_count = llmin(gbuffer.getNumTextures(), 4u);
     for (U32 i = 0; i < color_count; ++i)
@@ -13515,7 +13531,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
         return false;
     }
     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan probe draws");
-    ++sQLProbeFacesTaken;
+    ++(main_view ? sQLMainTaken : sQLProbeFacesTaken);
+    U64 main_draws = 0, main_kept = 0;
     const LLMatrix4a view = LLViewerCamera::getCurrent().getModelview();
     const LLMatrix4a proj = gGL.getProjectionMatrix();
     sQLProbeLeftovers.clear();
@@ -13576,8 +13593,22 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
             }
         }
         (drawn ? sQLProbeTaken : sQLProbeLeftovers).push_back(params);
-        ++(drawn ? sQLProbeTakenDraws : !texture ? sQLProbeNoTexture : !last_in_arena ? sQLProbeBufferRefused
-                                                                                       : sQLProbeDrawRefused);
+        if (main_view)
+        {
+            ++(drawn ? main_draws : main_kept);
+        }
+        else
+        {
+            ++(drawn ? sQLProbeTakenDraws : !texture ? sQLProbeNoTexture : !last_in_arena ? sQLProbeBufferRefused
+                                                                                           : sQLProbeDrawRefused);
+        }
+    }
+    if (main_view)
+    {
+        sQLMainDraws += main_draws;
+        sQLMainKept += main_kept;
+        sQLMainLastDraws = main_draws;
+        sQLMainLastKept  = main_kept;
     }
     gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
     sQLProbeDrawsOpen = true;
@@ -13605,6 +13636,37 @@ static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end()
     }
 #endif
     return nullptr;
+}
+
+std::string ql_vulkan_main_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanMainDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanMainDraws)";
+    }
+    if (!sQLMainTaken)
+    {
+        return llformat("none taken (%llu frames offered): needs QuasarVulkanMainTargets, QuasarVulkanTargets and "
+                        "QuasarVulkanTextures, restart | %s",
+                        (unsigned long long)sQLMainOffered, QLVulkanPresenter::gbufferInfo().c_str());
+    }
+    const std::string info = llformat("last frame %llu Vulkan, %llu GL | frames %llu offered %llu taken | since start "
+                                      "%llu Vulkan, %llu GL",
+                                      (unsigned long long)sQLMainLastDraws, (unsigned long long)sQLMainLastKept,
+                                      (unsigned long long)sQLMainOffered, (unsigned long long)sQLMainTaken,
+                                      (unsigned long long)sQLMainDraws, (unsigned long long)sQLMainKept);
+    static LLFrameTimer logged;
+    if (logged.getElapsedTimeF32() > 30.f)
+    {
+        logged.reset();
+        LL_INFOS("Vulkan") << "Main view draws: " << info << LL_ENDL;
+    }
+    return info;
+#else
+    return "not on this platform";
+#endif
 }
 
 std::string ql_vulkan_probe_draws_info()

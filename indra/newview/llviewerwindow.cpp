@@ -202,6 +202,7 @@ std::string ql_parallel_pose_info();     // llviewerobjectlist.cpp (QuasarParall
 std::string ql_vulkan_shadows_info();    // pipeline.cpp (QuasarVulkanShadows)
 std::string ql_shadow_gl_draws_info();  // pipeline.cpp: what the shadow passes still draw in GL
 std::string ql_vulkan_probe_draws_info();  // pipeline.cpp (QuasarVulkanProbeDraws)
+std::string ql_vulkan_main_draws_info();   // pipeline.cpp (QuasarVulkanMainDraws)
 #include "qldrawstats.h"
 #include "qlframewarp.h"
 #include "llappviewer.h"
@@ -702,6 +703,8 @@ public:
             addText(xpos, ypos, "Quasar Vulkan textures: " + QLVulkanPost::textureLine());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan probe draws: " + ql_vulkan_probe_draws_info());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan main draws: " + ql_vulkan_main_draws_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan shadows: " + ql_vulkan_shadows_info());
             ypos += y_inc;
