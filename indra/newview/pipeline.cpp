@@ -13713,6 +13713,40 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
 }
 
 // For the status line.
+// The GL draws the shadow passes still make, by part of drawShadow: what is left to move into Vulkan. Counted from
+// LLRender::sDrawCalls around each part, this frame's and the last whole frame's, sun and spot maps together.
+enum EQLShadowPart : U32
+{
+    QL_SHADOW_OPAQUE, QL_SHADOW_GLTF, QL_SHADOW_OCCLUSION, QL_SHADOW_GEOM, QL_SHADOW_MASKED, QL_SHADOW_BLEND,
+    QL_SHADOW_GRASS, QL_SHADOW_GLTF_MASK, QL_SHADOW_PARTS
+};
+static U32 sQLShadowPartNow[QL_SHADOW_PARTS] = {}, sQLShadowPartLast[QL_SHADOW_PARTS] = {};
+static U32 sQLShadowPartFrame = 0;
+static void ql_shadow_part(EQLShadowPart part, U32 draws_before)
+{
+    const U32 frame = LLFrameTimer::getFrameCount();
+    if (frame != sQLShadowPartFrame)
+    {
+        sQLShadowPartFrame = frame;
+        memcpy(sQLShadowPartLast, sQLShadowPartNow, sizeof(sQLShadowPartNow));
+        memset(sQLShadowPartNow, 0, sizeof(sQLShadowPartNow));
+    }
+    sQLShadowPartNow[part] += LLRender::sDrawCalls - draws_before;
+}
+
+std::string ql_shadow_gl_draws_info()
+{
+    const U32* d = sQLShadowPartLast;
+    U32 total = 0;
+    for (U32 i = 0; i < QL_SHADOW_PARTS; ++i)
+    {
+        total += d[i];
+    }
+    return llformat("%u | opaque %u, gltf %u, occlusion %u, geom %u, masked %u, blend %u, grass %u, gltf mask %u", total,
+                    d[QL_SHADOW_OPAQUE], d[QL_SHADOW_GLTF], d[QL_SHADOW_OCCLUSION], d[QL_SHADOW_GEOM],
+                    d[QL_SHADOW_MASKED], d[QL_SHADOW_BLEND], d[QL_SHADOW_GRASS], d[QL_SHADOW_GLTF_MASK]);
+}
+
 std::string ql_vulkan_shadows_info()
 {
 #if QL_VULKAN_SHADOWS
@@ -13874,6 +13908,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow simple");
         LL_PROFILE_GPU_ZONE("shadow simple");
         gGL.getTextureSlot(0)->unbind();
+        const U32 opaque_draws = LLRender::sDrawCalls;
 
         if (rigged && vulkan_casters && vulkan_rigged)
         {
@@ -13912,20 +13947,27 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
             gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
             gGLLastMatrix = NULL;
         }
+        ql_shadow_part(QL_SHADOW_OPAQUE, opaque_draws);
 
+        const U32 gltf_draws = LLRender::sDrawCalls;
         renderGLTFObjects(LLRenderPass::PASS_GLTF_PBR, false, rigged);
+        ql_shadow_part(QL_SHADOW_GLTF, gltf_draws);
 
     }
 
     if (LLPipeline::sUseOcclusion > 1)
     { // do occlusion culling against non-masked only to take advantage of hierarchical Z
+        const U32 occlusion_draws = LLRender::sDrawCalls;
         doOcclusion(shadow_cam);
+        ql_shadow_part(QL_SHADOW_OCCLUSION, occlusion_draws);
     }
 
 
     {
         LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow geom");
+        const U32 geom_draws = LLRender::sDrawCalls;
         renderGeomShadow(shadow_cam);
+        ql_shadow_part(QL_SHADOW_GEOM, geom_draws);
     }
 
     {
@@ -13947,13 +13989,17 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 // Masked: opaque wherever it draws, so solid where it casts. The blended pass below
                 // shares the program and stipples.
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_STIPPLE, 0.f);
+                const U32 masked_draws = LLRender::sDrawCalls;
                 masked_objects(mAlphaMaskPool, LLRenderPass::PASS_ALPHA_MASK, true, rigged);
+                ql_shadow_part(QL_SHADOW_MASKED, masked_draws);
             }
 
             {
                 LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow alpha blend");
                 LL_PROFILE_GPU_ZONE("shadow alpha blend");
+                const U32 blend_draws = LLRender::sDrawCalls;
                 renderAlphaObjects(rigged);
+                ql_shadow_part(QL_SHADOW_BLEND, blend_draws);
             }
 
             {
@@ -13963,7 +14009,9 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::SUN_UP_FACTOR, sun_up);
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_TARGET_WIDTH, (float)target_width);
                 LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_STIPPLE, 0.f); // masked
+                const U32 fullbright_draws = LLRender::sDrawCalls;
                 masked_objects(mFullbrightAlphaMaskPool, LLRenderPass::PASS_FULLBRIGHT_ALPHA_MASK, true, rigged);
+                ql_shadow_part(QL_SHADOW_MASKED, fullbright_draws);
             }
 
             {
@@ -13976,12 +14024,15 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
 
                 if (i == 0)
                 {
+                    const U32 grass_draws = LLRender::sDrawCalls;
                     renderObjects(LLRenderPass::PASS_GRASS, true);
+                    ql_shadow_part(QL_SHADOW_GRASS, grass_draws);
                 }
 
                 {
                     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow alpha material");
                     LL_PROFILE_GPU_ZONE("shadow alpha material");
+                    const U32 material_draws = LLRender::sDrawCalls;
                     masked_objects(mAlphaMaskPool, LLRenderPass::PASS_NORMSPEC_MASK, false, rigged);
                     masked_objects(mAlphaMaskPool, LLRenderPass::PASS_MATERIAL_ALPHA_MASK, false, rigged);
                     masked_objects(mAlphaMaskPool, LLRenderPass::PASS_SPECMAP_MASK, false, rigged);
@@ -13998,6 +14049,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                         mAlphaMaskPool->pushMaskBatchesIndexed(LLRenderPass::PASS_SPECMAP_MASK + off, rigged);
                         mAlphaMaskPool->pushMaskBatchesIndexed(LLRenderPass::PASS_NORMMAP_MASK + off, rigged);
                     }
+                    ql_shadow_part(QL_SHADOW_MASKED, material_draws);
                 }
             }
         }
@@ -14005,6 +14057,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         for (int i = 0; i < 2; ++i)
         {
             bool rigged = i == 1;
+            const U32 gltf_mask_draws = LLRender::sDrawCalls;
             gDeferredShadowGLTFAlphaMaskProgram.bind(rigged);
             LLGLSLShader::sCurBoundShaderPtr->uniform1i(LLShaderMgr::SUN_UP_FACTOR, sun_up);
             LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::DEFERRED_SHADOW_TARGET_WIDTH, (float)target_width);
@@ -14053,6 +14106,7 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
 
             gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
             gGLLastMatrix = NULL;
+            ql_shadow_part(QL_SHADOW_GLTF_MASK, gltf_mask_draws);
         }
     }
 

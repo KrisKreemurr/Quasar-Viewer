@@ -509,7 +509,10 @@ struct QLVulkanPresenter::Impl
     FGImage mFG[FG_COUNT];
     U32     mFGWidth = 0;
     U32     mFGHeight = 0;
-    GLuint  mGLReadFramebuffer = 0;  // the viewer's depth and motion textures, attached in turn to be copied from
+    GLuint  mGLReadFramebuffer = 0;  // the viewer's depth texture, kept attached while it is the same texture
+    GLuint  mGLMotionFramebuffer = 0;  // and its motion texture
+    GLuint  mGLReadDepth = 0, mGLReadMotion = 0;  // what each has attached
+    U32     mGLReadAge = 0;  // frames since they were attached
 
     bool                              mFGWanted = false;        // QuasarDLSSFrameGen
     bool                              mFGLoaded = false;        // the DLSS-G plugin and its functions
@@ -1545,6 +1548,12 @@ struct QLVulkanPresenter::Impl
             gl.DeleteFramebuffers(1, &mGLReadFramebuffer);
             mGLReadFramebuffer = 0;
         }
+        if (mGLMotionFramebuffer)
+        {
+            gl.DeleteFramebuffers(1, &mGLMotionFramebuffer);
+            mGLMotionFramebuffer = 0;
+        }
+        mGLReadDepth = mGLReadMotion = 0;
         mFGWidth = mFGHeight = 0;
     }
 
@@ -1558,6 +1567,10 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         gl.CreateFramebuffers(1, &mGLReadFramebuffer);
+        gl.CreateFramebuffers(1, &mGLMotionFramebuffer);
+        gl.NamedFramebufferReadBuffer(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0);
+        gl.NamedFramebufferReadBuffer(mGLMotionFramebuffer, GL_COLOR_ATTACHMENT0);
+        mGLReadDepth = mGLReadMotion = 0;
         mFGWidth  = width;
         mFGHeight = height;
         LL_INFOS("Vulkan") << "DLSS Frame Generation inputs " << width << "x" << height << " (depth R32F, motion RG16F, "
@@ -5014,21 +5027,42 @@ struct QLVulkanPresenter::Impl
             }
         }
 
-        glWaitForVulkan();
+        {
+            // The frame's one wait for Vulkan's last read of the shared images (copyBackBuffer needs none after).
+            LL_PROFILE_ZONE_NAMED("vulkan present - fg gl wait");
+            glWaitForVulkan();
+        }
+        LL_PROFILE_ZONE_NAMED_COLOR("vulkan present - fg blits", 0xA040FF);
         const GLCopyState state = beginGLCopy();
         const GLint w = (GLint)width;
         const GLint h = (GLint)height;
         gl.NamedFramebufferReadBuffer(0, GL_BACK);
         gl.BlitNamedFramebuffer(0, mFG[FG_HUDLESS].glFramebuffer, 0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT,
                                 GL_NEAREST);
-        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, depth_texture, 0);
-        gl.NamedFramebufferReadBuffer(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0);
+        // The viewer's textures stay attached from frame to frame: attached again only when the viewer remade them, so
+        // the driver does not check a framebuffer anew every frame. (A texture attached to a framebuffer that is not
+        // bound lives on until it is let go of here.)
+        // Once a second regardless: a texture the viewer deleted can hand its name to a new one, which the name alone
+        // would not tell.
+        if (++mGLReadAge >= 60)
+        {
+            mGLReadAge = 0;
+            mGLReadDepth = mGLReadMotion = 0;
+        }
+        if (mGLReadDepth != depth_texture)
+        {
+            gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, depth_texture, 0);
+            mGLReadDepth = depth_texture;
+        }
+        if (mGLReadMotion != motion_texture)
+        {
+            gl.NamedFramebufferTexture(mGLMotionFramebuffer, GL_COLOR_ATTACHMENT0, motion_texture, 0);
+            mGLReadMotion = motion_texture;
+        }
         gl.BlitNamedFramebuffer(mGLReadFramebuffer, mFG[FG_DEPTH].glFramebuffer, 0, 0, w, h, 0, h, w, 0,
                                 GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, motion_texture, 0);
-        gl.BlitNamedFramebuffer(mGLReadFramebuffer, mFG[FG_MOTION].glFramebuffer, 0, 0, w, h, 0, h, w, 0,
+        gl.BlitNamedFramebuffer(mGLMotionFramebuffer, mFG[FG_MOTION].glFramebuffer, 0, 0, w, h, 0, h, w, 0,
                                 GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        gl.NamedFramebufferTexture(mGLReadFramebuffer, GL_COLOR_ATTACHMENT0, 0, 0);
         endGLCopy(state);
         if (!mFGInputsLogged)
         {
