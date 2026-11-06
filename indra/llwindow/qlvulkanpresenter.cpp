@@ -2805,12 +2805,15 @@ struct QLVulkanPresenter::Impl
 
     size_t extLiveCount() const
     {
-        std::lock_guard<std::mutex> lock(mExtMutex);
         size_t blocks = 0;
-        for (const TexBlock& b : mTexBlocks)
         {
-            blocks += b.memory ? 1 : 0;
+            std::lock_guard<std::mutex> tex_lock(mTexMutex);
+            for (const TexBlock& b : mTexBlocks)
+            {
+                blocks += b.memory ? 1 : 0;
+            }
         }
+        std::lock_guard<std::mutex> lock(mExtMutex);
         return mExtTextures.size() + mExtFreeing.size() + blocks;
     }
     bool        mExtFormatOK[EXT_FORMAT_COUNT] = {};
@@ -2962,6 +2965,7 @@ struct QLVulkanPresenter::Impl
 
     void extFree(ExtTexture& ext)
     {
+        std::unique_lock<std::mutex> tex_lock(mTexMutex);
         if (ext.block >= 0 && ext.block < (S32)mTexBlocks.size())
         {
             // A fetched texture: its image goes, its range goes back to its block, and a block left empty goes too
@@ -2985,6 +2989,7 @@ struct QLVulkanPresenter::Impl
             ext = ExtTexture();
             return;
         }
+        tex_lock.unlock();
         if (ext.glMemory) gl.DeleteMemoryObjectsEXT(1, &ext.glMemory);
         if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
         if (ext.memory) vkFreeMemory(mDevice, ext.memory, nullptr);
@@ -3618,6 +3623,9 @@ struct QLVulkanPresenter::Impl
     // each question waits for a threaded driver).
     U8   mTexFormatState[TEX_FORMAT_COUNT] = {};
     U32  mTexChecksLeft[TEX_FORMAT_COUNT] = {};
+    // The blocks, the formats' state and the counts: the main thread and the LLImageGL thread allocate textures, the
+    // main thread frees them. Taken before mExtMutex where both are held (texAllocate), never after it.
+    mutable std::mutex mTexMutex;
     std::vector<TexBlock> mTexBlocks;
     U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0;
     U64  mTexBytes = 0;
@@ -3797,6 +3805,7 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
+        std::lock_guard<std::mutex> tex_lock(mTexMutex);
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             if (mExtTextures.count(texture))
@@ -3912,24 +3921,32 @@ struct QLVulkanPresenter::Impl
             return "not in Vulkan's memory (QuasarVulkanTargets and QuasarVulkanTextures, restart; " + mTexNote + ")";
         }
         U32 textures = 0;
-        size_t blocks = 0;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             for (const auto& entry : mExtTextures)
             {
                 textures += entry.second.block >= 0 ? 1 : 0;
             }
+        }
+        size_t blocks = 0;
+        U64 bytes = 0;
+        U32 declined = 0, refused = 0;
+        {
+            std::lock_guard<std::mutex> tex_lock(mTexMutex);
             for (const TexBlock& b : mTexBlocks)
             {
                 blocks += b.memory ? 1 : 0;
             }
+            bytes    = mTexBytes;
+            declined = mTexDeclined;
+            refused  = mTexRefused;
         }
         const std::string info = llformat(
-            "%u in Vulkan's memory (%.0f MB, %u blocks) | made since start: %u on the main thread, %u off it (GL's) | "
-            "%u GL's by format or room, %u refused",
-            textures, (double)mTexBytes / (1 << 20), (U32)blocks,
+            "%u in Vulkan's memory (%.0f MB, %u blocks) | made since start: %u on the main thread, %u on the texture "
+            "thread | %u GL's by format or room, %u refused",
+            textures, (double)bytes / (1 << 20), (U32)blocks,
             gQLExternalTexturesOffered.load(std::memory_order_relaxed),
-            gQLExternalTexturesOffThread.load(std::memory_order_relaxed), mTexDeclined, mTexRefused);
+            gQLExternalTexturesOffThread.load(std::memory_order_relaxed), declined, refused);
         static U64 logged_at = 0;
         const U64 now = (U64)std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -3947,21 +3964,32 @@ struct QLVulkanPresenter::Impl
         {
             return "targets: " + mExtNote;
         }
-        std::lock_guard<std::mutex> lock(mExtMutex);
         U32 targets = 0, textures = 0;
-        for (const auto& entry : mExtTextures)
         {
-            (entry.second.block >= 0 ? textures : targets) += 1;
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            for (const auto& entry : mExtTextures)
+            {
+                (entry.second.block >= 0 ? textures : targets) += 1;
+            }
         }
         size_t blocks = 0;
-        for (const TexBlock& b : mTexBlocks)
+        U64 tex_bytes = 0;
+        U32 tex_declined = 0, tex_refused = 0;
         {
-            blocks += b.memory ? 1 : 0;
+            // Never with mExtMutex held: texAllocate takes mTexMutex, then mExtMutex.
+            std::lock_guard<std::mutex> tex_lock(mTexMutex);
+            for (const TexBlock& b : mTexBlocks)
+            {
+                blocks += b.memory ? 1 : 0;
+            }
+            tex_bytes    = mTexBytes;
+            tex_declined = mTexDeclined;
+            tex_refused  = mTexRefused;
         }
         return llformat("targets: %s, %u in Vulkan's memory (%.0f MB) | textures: %u (%.0f MB in %u blocks), %u GL's "
                         "(format or room), %u refused | %s",
                         mExtNote.c_str(), targets, (double)mExtBytes / (1 << 20), textures,
-                        (double)mTexBytes / (1 << 20), (U32)blocks, mTexDeclined, mTexRefused, mTexNote.c_str());
+                        (double)tex_bytes / (1 << 20), (U32)blocks, tex_declined, tex_refused, mTexNote.c_str());
     }
 
     // ---- step 2 of geometry in Vulkan: shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------

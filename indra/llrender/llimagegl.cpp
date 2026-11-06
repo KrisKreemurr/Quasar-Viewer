@@ -3866,8 +3866,9 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
             .fetch_add(1, std::memory_order_relaxed);
     }
     const U32 bound = gGL.getCurrentTexUnitIndex() == 0 ? gGL.getTextureSlot(0)->getCurrTexture() : 0;
+    // Either thread: the LLImageGL thread's gGL is its own (thread_local), so its slot 0 holds the name it bound, and
+    // the memory objects the storage comes from are shared between the contexts of the share group.
     const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && bound &&
-                          on_main_thread() &&
                           gQLExternalStorage->allocateTexture(bound, getStorageInternalFormat(), width, height,
                                                               mMipLevels);
     {

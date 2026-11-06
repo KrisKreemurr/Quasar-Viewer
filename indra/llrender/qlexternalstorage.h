@@ -27,7 +27,8 @@ public:
     virtual bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height, int levels) = 0;
 
     /// A fetched texture's storage (@a levels levels, uploaded into later), placed among others in memory the provider
-    /// shares out (QuasarVulkanTextures). False: GL allocates as before. On the main thread.
+    /// shares out (QuasarVulkanTextures). False: GL allocates as before. On the main thread or the LLImageGL thread,
+    /// with that thread's context current.
     virtual bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) = 0;
 
     /// GL has deleted these names: the provider lets go of what it gave them. Any thread; the provider frees on its own.
@@ -42,8 +43,8 @@ extern QLExternalStorage* gQLExternalStorage;
 // Whether fetched textures are offered to the provider too (LLImageGL::allocateTextureStorage, on the main thread).
 extern bool gQLExternalTexturesWanted;
 
-// Fetched textures given storage while gQLExternalTexturesWanted: on the main thread (offered), off it (GL's: the
-// LLImageGL thread's uploads). For the status line.
+// Fetched textures given storage while gQLExternalTexturesWanted, on the main thread and off it (the LLImageGL
+// thread's uploads). For the status line.
 extern std::atomic<unsigned> gQLExternalTexturesOffered;
 extern std::atomic<unsigned> gQLExternalTexturesOffThread;
 
