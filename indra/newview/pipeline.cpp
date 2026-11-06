@@ -13950,10 +13950,12 @@ static bool ql_vulkan_shadows_wanted()
 // draws those Vulkan could not take, left in `leftovers` and `rigged_leftovers`, with GL.
 static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, std::vector<LLDrawInfo*>& leftovers,
                                      bool& rigged, std::vector<LLDrawInfo*>& rigged_leftovers,
-                                     QLMaskLeftovers& masked_leftovers)
+                                     QLMaskLeftovers& masked_leftovers, std::vector<LLDrawInfo*> gltf_leftovers[2])
 {
     rigged = false;
     rigged_leftovers.clear();
+    gltf_leftovers[0].clear();
+    gltf_leftovers[1].clear();
     masked_leftovers.mTaken = false;
     for (auto& lists : masked_leftovers.mLists)
     {
@@ -14029,6 +14031,52 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         }
     }
 
+    // The opaque PBR casters (PASS_GLTF_PBR), as pushUntexturedGLTFBatches draws them: depth alone, so the same draw.
+    // A double-sided material turns culling off for its draw (pushUntexturedGLTFBatch): GL's, with the casters Vulkan
+    // could not take, in gltf_leftovers.
+    {
+        auto* end = gPipeline.endRenderMap(LLRenderPass::PASS_GLTF_PBR);
+        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_GLTF_PBR); i != end;)
+        {
+            LLDrawInfo* params = *i;
+            LLCullResult::increment_iterator(i, end);
+            if (!params || !params->mCount)
+            {
+                continue;
+            }
+            bool drawn = false;
+            if (params->mGLTFMaterial.notNull() && !params->mGLTFMaterial->mDoubleSided)
+            {
+                const LLVertexBuffer* vb = params->mVertexBuffer.get();
+                if (vb != last_vb)
+                {
+                    last_vb = vb;
+                    last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
+                                    QLVulkanPresenter::shadowArena(vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
+                                                                   vb->getOffset(LLVertexBuffer::TYPE_VERTEX),
+                                                                   vb->getNumVerts(), LLNavShapeVBOManager::glIndices(vb),
+                                                                   vb->getNumIndices(), base_vertex, base_index);
+                }
+                if (last_in_arena)
+                {
+                    LLMatrix4a modelview = view;
+                    if (params->mModelMatrix)
+                    {
+                        modelview.setMul(*params->mModelMatrix, modelview);
+                    }
+                    LLMatrix4a mvp;
+                    mvp.setMul(modelview, proj);
+                    drawn = QLVulkanPresenter::shadowDraw(mvp.getF32ptr(), base_vertex, base_index + params->mOffset,
+                                                          params->mCount);
+                }
+            }
+            if (!drawn)
+            {
+                gltf_leftovers[0].push_back(params);
+            }
+        }
+    }
+
     // The rigged casters, after every unrigged one: each mesh with its weights into the rigged arena, each draw with its
     // avatar's palette for the skin, as LLRenderPass::uploadMatrixPalette finds it.
     static LLCachedControl<bool> rigged_enabled(gSavedSettings, "QuasarVulkanShadowsRigged", true);
@@ -14041,15 +14089,31 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         U64 last_skin = 0;
         unsigned palette = ~0u;
         bool skip_skin = true;
-        for (U32 type : SHADOW_GEOMETRY_PASSES)
+        // The opaque PBR casters' rigged pass too (PASS_GLTF_PBR + 1), single-sided ones, as for the unrigged.
+        U32 rigged_passes[LL_ARRAY_SIZE(SHADOW_GEOMETRY_PASSES) + 1];
+        std::copy(std::begin(SHADOW_GEOMETRY_PASSES), std::end(SHADOW_GEOMETRY_PASSES), rigged_passes);
+        rigged_passes[LL_ARRAY_SIZE(SHADOW_GEOMETRY_PASSES)] = LLRenderPass::PASS_GLTF_PBR;
+        for (U32 type : rigged_passes)
         {
+            const bool gltf = type == LLRenderPass::PASS_GLTF_PBR;
+            std::vector<LLDrawInfo*>& kept = gltf ? gltf_leftovers[1] : rigged_leftovers;
             const U32 rigged_type = type + 1;
             auto* end = gPipeline.endRenderMap(rigged_type);
             for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(rigged_type); i != end;)
             {
                 LLDrawInfo* params = *i;
                 LLCullResult::increment_iterator(i, end);
-                if (!params || !params->mCount || !params->mAvatar || !params->mSkinInfo)
+                if (!params || !params->mCount)
+                {
+                    continue;
+                }
+                if (gltf && (!params->mAvatar || !params->mSkinInfo || params->mGLTFMaterial.isNull() ||
+                             params->mGLTFMaterial->mDoubleSided))
+                {
+                    kept.push_back(params);  // GL's, as pushUntexturedRiggedGLTFBatches would draw it
+                    continue;
+                }
+                if (!params->mAvatar || !params->mSkinInfo)
                 {
                     continue;
                 }
@@ -14098,7 +14162,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                 }
                 if (!drawn)
                 {
-                    rigged_leftovers.push_back(params);
+                    kept.push_back(params);
                 }
             }
         }
@@ -14115,6 +14179,36 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan masked casters");
         // Whether a texture matrix applies, as pushBatch decides it.
         const bool texture_matrices = !gCubeSnapshot || gPipeline.mHeroProbeManager.isMirrorPass();
+        // A texture's tile in the alpha atlas: RGB or RGBA (an alpha-only or two-channel texture reads through a swizzle
+        // a blit does not take), uncompressed, 2D, blitted in where it is not there yet.
+        const auto tile_for = [](const LLImageGL* image, unsigned& tile)
+        {
+            if (!image->getHasGLTexture() || image->getTexTarget() != GL_TEXTURE_2D || image->getComponents() < 3 ||
+                image->isAlphaOnly())
+            {
+                return false;
+            }
+            const S32 format = image->getStorageInternalFormat();
+            const S32 width  = image->getWidth();
+            const S32 height = image->getHeight();
+            if (!(format == GL_RGBA8 || format == GL_SRGB8_ALPHA8 || format == GL_RGB8 || format == GL_SRGB8) ||
+                width <= 0 || height <= 0)
+            {
+                return false;
+            }
+            unsigned levels = 1;
+            if (image->getUseMipMaps())
+            {
+                for (S32 size = llmax(width, height); size > 1; size >>= 1)
+                {
+                    ++levels;
+                }
+            }
+            // An RGB texture's alpha is 1 everywhere (and SRGB8 cannot be blitted from).
+            const bool has_alpha = format == GL_RGBA8 || format == GL_SRGB8_ALPHA8;
+            return QLVulkanPresenter::shadowMaskTexture(image->getTexName(), image->getContentStamp(), (unsigned)width,
+                                                        (unsigned)height, levels, has_alpha, tile);
+        };
         for (U32 r = 0; r < 2; ++r)
         {
             const bool rig = r == 1;
@@ -14145,7 +14239,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                         continue;
                     }
                     auto gl_draws = [&]() { masked_leftovers.mLists[p][r].push_back(params); };
-                    if ((pass.mBatchTextures && params->mTextureList.size() > 1) || params->mTexture.isNull())
+                    const bool batched = pass.mBatchTextures && params->mTextureList.size() > 1;
+                    if (!batched && params->mTexture.isNull())
                     {
                         gl_draws();
                         continue;
@@ -14183,43 +14278,42 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     }
 
                     // The texture: RGB or RGBA (an alpha-only or two-channel texture reads through a swizzle a blit
-                    // does not take), uncompressed, 2D.
-                    const LLImageGL* image = params->mTexture->getGLTexture();
-                    const U64 image_stamp = image ? image->getContentStamp() : 0;
-                    if (image != last_image || image_stamp != last_stamp)
+                    // does not take), uncompressed, 2D. A batch of several (the indexed lookup's) takes a tile for each,
+                    // found by the index its vertices carry.
+                    unsigned batch_tiles[16];
+                    unsigned batch_count = 0;
+                    if (batched)
                     {
-                        last_image = image;
-                        last_stamp = image_stamp;
-                        last_tiled = false;
-                        if (image && image->getHasGLTexture() && image->getTexTarget() == GL_TEXTURE_2D &&
-                            image->getComponents() >= 3 && !image->isAlphaOnly())
+                        bool tiled = params->mTextureList.size() <= LL_ARRAY_SIZE(batch_tiles);
+                        for (size_t t = 0; tiled && t < params->mTextureList.size(); ++t)
                         {
-                            const S32 format = image->getStorageInternalFormat();
-                            const S32 width  = image->getWidth();
-                            const S32 height = image->getHeight();
-                            if ((format == GL_RGBA8 || format == GL_SRGB8_ALPHA8 || format == GL_RGB8 ||
-                                 format == GL_SRGB8) && width > 0 && height > 0)
-                            {
-                                unsigned levels = 1;
-                                if (image->getUseMipMaps())
-                                {
-                                    for (S32 size = llmax(width, height); size > 1; size >>= 1)
-                                    {
-                                        ++levels;
-                                    }
-                                }
-                                // An RGB texture's alpha is 1 everywhere (and SRGB8 cannot be blitted from).
-                                const bool has_alpha = format == GL_RGBA8 || format == GL_SRGB8_ALPHA8;
-                                last_tiled = QLVulkanPresenter::shadowMaskTexture(image->getTexName(), image_stamp,
-                                                                                  (unsigned)width, (unsigned)height,
-                                                                                  levels, has_alpha, tile);
-                            }
+                            const LLViewerTexture* texture = params->mTextureList[t].get();
+                            const LLImageGL* batch_image = texture ? texture->getGLTexture() : nullptr;
+                            tiled = batch_image && tile_for(batch_image, batch_tiles[t]);
                         }
+                        if (!tiled)
+                        {
+                            gl_draws();
+                            continue;
+                        }
+                        batch_count = (unsigned)params->mTextureList.size();
+                        last_image  = nullptr;  // the tile below is not this draw's
                     }
-                    if (!last_tiled)
+                    else
                     {
-                        gl_draws();
-                        continue;
+                        const LLImageGL* image = params->mTexture->getGLTexture();
+                        const U64 image_stamp = image ? image->getContentStamp() : 0;
+                        if (image != last_image || image_stamp != last_stamp)
+                        {
+                            last_image = image;
+                            last_stamp = image_stamp;
+                            last_tiled = image && tile_for(image, tile);
+                        }
+                        if (!last_tiled)
+                        {
+                            gl_draws();
+                            continue;
+                        }
                     }
 
                     const LLVertexBuffer* vb = params->mVertexBuffer.get();
@@ -14259,7 +14353,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                                                     : nullptr;
                     if (!QLVulkanPresenter::shadowDrawMasked(mvp.getF32ptr(), rig ? palette : ~0u, tile, texture_matrix,
                                                              params->mAlphaMaskCutoff, pass.mTest, base_vertex,
-                                                             base_index + params->mOffset, params->mCount))
+                                                             base_index + params->mOffset, params->mCount,
+                                                             batch_count ? batch_tiles : nullptr, batch_count))
                     {
                         gl_draws();
                     }
@@ -14446,10 +14541,11 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
     // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows); the few it could not
     // take are drawn with GL in the unrigged pass below.
     static std::vector<LLDrawInfo*> vulkan_leftovers, vulkan_rigged_leftovers;
+    static std::vector<LLDrawInfo*> vulkan_gltf_leftovers[2];  // unrigged, rigged
     static QLMaskLeftovers vulkan_masked;
     bool vulkan_rigged = false;
     const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers, vulkan_rigged,
-                                                         vulkan_rigged_leftovers, vulkan_masked);
+                                                         vulkan_rigged_leftovers, vulkan_masked, vulkan_gltf_leftovers);
     // A masked pass: what Vulkan left of it where Vulkan drew the map's masked casters, as pushMaskBatches and
     // pushRiggedMaskBatches draw them; otherwise the pass as before.
     auto masked_objects = [&](LLRenderPass* pool, U32 type, bool batch_textures, bool rigged)
@@ -14545,7 +14641,33 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         ql_shadow_part(QL_SHADOW_OPAQUE, opaque_draws);
 
         const U32 gltf_draws = LLRender::sDrawCalls;
-        renderGLTFObjects(LLRenderPass::PASS_GLTF_PBR, false, rigged);
+        if (vulkan_casters && (!rigged || vulkan_rigged))
+        {
+            // What Vulkan left of the opaque PBR casters (double-sided, or not taken), as pushUntexturedGLTFBatches
+            // and pushUntexturedRiggedGLTFBatches draw them.
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
+            const LLVOAvatar* last_avatar = nullptr;
+            U64 last_mesh = 0;
+            bool skip_last = false;
+            for (LLDrawInfo* params : vulkan_gltf_leftovers[rigged ? 1 : 0])
+            {
+                if (rigged)
+                {
+                    LLRenderPass::pushUntexturedRiggedGLTFBatch(*params, last_avatar, last_mesh, skip_last);
+                }
+                else
+                {
+                    LLRenderPass::pushUntexturedGLTFBatch(*params);
+                }
+            }
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
+        }
+        else
+        {
+            renderGLTFObjects(LLRenderPass::PASS_GLTF_PBR, false, rigged);
+        }
         ql_shadow_part(QL_SHADOW_GLTF, gltf_draws);
 
     }

@@ -4113,11 +4113,18 @@ struct QLVulkanPresenter::Impl
     static constexpr VkDeviceSize SH_CMD_BYTES = (VkDeviceSize)SH_MAX_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
     static constexpr VkDeviceSize SH_PALBASE_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 4;
     static constexpr VkDeviceSize SH_MASK_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 48;  // three vec4s a draw (qlshadowmask.vert)
+    // A masked draw of several textures (a batch GL draws through the indexed lookup): each texture's tile, by the index
+    // each vertex carries (position.w's bits), SH_TABLE_ENTRIES a draw (qlshadowmask.vert's Tiles).
+    static constexpr U32          SH_TABLE_ENTRIES = 16;
+    static constexpr VkDeviceSize SH_TABLE_BYTES = (VkDeviceSize)SH_MAX_DRAWS * SH_TABLE_ENTRIES * 4;
     static constexpr VkDeviceSize SH_SLOT_BYTES =
-        ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES + SH_MASK_BYTES) + 255) & ~(VkDeviceSize)255;
+        ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES + SH_MASK_BYTES + SH_TABLE_BYTES) + 255) & ~(VkDeviceSize)255;
     static_assert((SH_MVP_BYTES + SH_CMD_BYTES) % 256 == 0, "each slot's palette bases start on a storage offset");
     static_assert((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES) % 256 == 0, "each slot's masks start on a storage offset");
     static constexpr VkDeviceSize SH_MASK_START = SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES;
+    static constexpr VkDeviceSize SH_TABLE_START = SH_MASK_START + SH_MASK_BYTES;
+    static_assert(SH_TABLE_ENTRIES == 16, "qlshadowmask.vert's Tiles: 16 a draw");
+    static_assert(SH_TABLE_START % 256 == 0, "each slot's tile tables start on a storage offset");
     // The unrigged arena: positions, then indices. The rigged one: positions, weights beside them, then indices.
     static constexpr VkDeviceSize SH_ARENA_VERTEX_BYTES = 192ull << 20;
     static constexpr VkDeviceSize SH_ARENA_INDEX_BYTES = 64ull << 20;
@@ -4133,6 +4140,7 @@ struct QLVulkanPresenter::Impl
     static constexpr U32          SH_TILE = 128;
     static constexpr U32          SH_TILES_ACROSS = SH_ATLAS_SIZE / SH_TILE;
     static constexpr U32          SH_TILES = SH_TILES_ACROSS * SH_TILES_ACROSS;
+    static_assert(SH_TILE == 128 && SH_TILES_ACROSS == 32, "qlshadowmask.vert's SH_TILE and SH_TILES_ACROSS");
     // The kinds of draw, in the order a map's draws are written.
     enum : U32 { SH_KIND_STATIC = 0, SH_KIND_RIGGED, SH_KIND_MASKED, SH_KIND_MASKED_RIGGED, SH_KINDS };
     // A palette as LLVOAvatar packs it for GL: the origin, then three columns a joint, each a vec4; a slot of the ring
@@ -4399,8 +4407,9 @@ struct QLVulkanPresenter::Impl
 
         // The descriptor set of each slot: the slot's matrices, its palette bases, the palettes' ring, the slot's masks,
         // and the alpha atlas (written once the masked casters' objects are made).
-        VkDescriptorSetLayoutBinding bindings[5] = {};
-        for (U32 b = 0; b < 5; ++b)
+        // And binding 5: the slot's tile tables (masked draws of several textures).
+        VkDescriptorSetLayoutBinding bindings[6] = {};
+        for (U32 b = 0; b < 6; ++b)
         {
             bindings[b].binding         = b;
             bindings[b].descriptorType  = b == 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -4408,14 +4417,14 @@ struct QLVulkanPresenter::Impl
             bindings[b].stageFlags      = b == 4 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
         }
         VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        set_info.bindingCount = 5;
+        set_info.bindingCount = 6;
         set_info.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mShSetLayout) != VK_SUCCESS)
         {
             mShSetLayout = VK_NULL_HANDLE;
             return shFail("vkCreateDescriptorSetLayout (shadows)");
         }
-        const VkDescriptorPoolSize pool_sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS * 4 },
+        const VkDescriptorPoolSize pool_sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS * 5 },
                                                      { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SH_SLOTS } };
         VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pool_info.maxSets       = SH_SLOTS;
@@ -4459,23 +4468,25 @@ struct QLVulkanPresenter::Impl
             {
                 return shFail("vkAllocateDescriptorSets (shadows)");
             }
-            const VkDescriptorBufferInfo buffers[4] = {
+            const VkDescriptorBufferInfo buffers[5] = {
                 { mShHost, SH_SLOT_BYTES * i, SH_MVP_BYTES },
                 { mShHost, SH_SLOT_BYTES * i + SH_MVP_BYTES + SH_CMD_BYTES, SH_PALBASE_BYTES },
                 { mShPalettes, 0, SH_PALETTE_SEGMENT_BYTES * SH_PALETTE_SEGMENTS },
                 { mShHost, SH_SLOT_BYTES * i + SH_MASK_START, SH_MASK_BYTES },
+                { mShHost, SH_SLOT_BYTES * i + SH_TABLE_START, SH_TABLE_BYTES },
             };
-            VkWriteDescriptorSet writes[4] = {};
-            for (U32 b = 0; b < 4; ++b)
+            VkWriteDescriptorSet writes[5] = {};
+            for (U32 b = 0; b < 5; ++b)
             {
+                const U32 binding = b < 4 ? b : 5;  // 4 is the atlas
                 writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[b].dstSet          = slot.set;
-                writes[b].dstBinding      = b;
+                writes[b].dstBinding      = binding;
                 writes[b].descriptorCount = 1;
                 writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[b].pBufferInfo     = &buffers[b];
             }
-            vkUpdateDescriptorSets(mDevice, 4, writes, 0, nullptr);
+            vkUpdateDescriptorSets(mDevice, 5, writes, 0, nullptr);
         }
 
         // The render pass: a depth attachment loaded and stored, GENERAL throughout as every shared image is kept.
@@ -4564,7 +4575,7 @@ struct QLVulkanPresenter::Impl
         // Positions at binding 0; for a rigged caster, its weights at binding 1 (the arena's second part, bound there);
         // for a masked one, its texture coordinates and colours at the next two (locations 2 and 3).
         VkVertexInputBindingDescription vertex_bindings[4] = {};
-        VkVertexInputAttributeDescription attributes[4] = {};
+        VkVertexInputAttributeDescription attributes[5] = {};
         U32 streams = 0;
         auto stream = [&](U32 location, U32 stride, VkFormat format)
         {
@@ -4577,15 +4588,23 @@ struct QLVulkanPresenter::Impl
         {
             stream(1, 16, VK_FORMAT_R32G32B32A32_SFLOAT);
         }
+        U32 attribute_count = streams;
         if (masked)
         {
             stream(2, 8, VK_FORMAT_R32G32_SFLOAT);
             stream(3, 4, VK_FORMAT_R8G8B8A8_UNORM);
+            attribute_count = streams;
+            // The texture index a batched face's vertices carry in position.w, its bits an integer (LLFace).
+            attributes[attribute_count++] = { 5, 0, VK_FORMAT_R32_SINT, 12 };
+        }
+        else
+        {
+            attribute_count = streams;
         }
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
         vertex_input.vertexBindingDescriptionCount   = streams;
         vertex_input.pVertexBindingDescriptions      = vertex_bindings;
-        vertex_input.vertexAttributeDescriptionCount = streams;
+        vertex_input.vertexAttributeDescriptionCount = attribute_count;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -5620,12 +5639,38 @@ struct QLVulkanPresenter::Impl
     // unrigged), its texture's tile (shadowMaskTexture), its texture matrix (null: none), its cutoff and its test (as
     // qlshadowmask.frag numbers them), its mesh in the masked arena of its kind.
     bool shadowDrawMasked(const float mvp[16], U32 palette_base, U32 tile, const float* texture_matrix, float cutoff,
-                          U32 test, U32 base_vertex, U32 first_index, U32 index_count)
+                          U32 test, U32 base_vertex, U32 first_index, U32 index_count, const U32* tiles = nullptr,
+                          U32 tile_count = 0)
     {
         const bool rigged = palette_base != U32_MAX;
+        if (tile_count > SH_TABLE_ENTRIES)
+        {
+            return false;
+        }
+        for (U32 i = 0; i < tile_count; ++i)
+        {
+            if (tiles[i] >= SH_TILES)
+            {
+                return false;
+            }
+        }
+        if (tile_count)
+        {
+            tile = tiles[0];
+        }
         if (!mShMaskReady || tile >= SH_TILES || !enterKind(rigged ? SH_KIND_MASKED_RIGGED : SH_KIND_MASKED))
         {
             return false;
+        }
+        if (tile_count)
+        {
+            U32 table[SH_TABLE_ENTRIES];
+            for (U32 i = 0; i < SH_TABLE_ENTRIES; ++i)
+            {
+                table[i] = tiles[i < tile_count ? i : 0];
+            }
+            memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_TABLE_START + (size_t)mShDraws * sizeof(table), table,
+                   sizeof(table));
         }
         // The texture matrix's rows for x and y over (u, v, 1), as GL's texture_matrix0 * vec4(uv, 0, 1) takes them
         // (column major: element [column * 4 + row]).
@@ -5634,7 +5679,7 @@ struct QLVulkanPresenter::Impl
         const float mask[12] = { m[0], m[4], m[12], cutoff,
                                  m[1], m[5], m[13], (float)test,
                                  (float)((tile % SH_TILES_ACROSS) * SH_TILE), (float)((tile / SH_TILES_ACROSS) * SH_TILE),
-                                 (float)SH_TILE, 0.f };
+                                 (float)SH_TILE, tile_count ? 1.f : 0.f };  // w: the draw's tiles are in its table
         memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_MASK_START + (size_t)mShDraws * sizeof(mask), mask,
                sizeof(mask));
         writeShadowDraw(mvp, base_vertex, first_index, index_count, rigged ? palette_base : 0);
@@ -8931,10 +8976,11 @@ bool QLVulkanPresenter::shadowMaskTexture(unsigned texture, unsigned long long s
 // static
 bool QLVulkanPresenter::shadowDrawMasked(const float mvp[16], unsigned palette, unsigned tile,
                                          const float* texture_matrix, float cutoff, unsigned test,
-                                         unsigned base_vertex, unsigned first_index, unsigned index_count)
+                                         unsigned base_vertex, unsigned first_index, unsigned index_count,
+                                         const unsigned* tiles, unsigned tile_count)
 {
     return sActive && sActive->shadowDrawMasked(mvp, palette, tile, texture_matrix, cutoff, test, base_vertex,
-                                                first_index, index_count);
+                                                first_index, index_count, tiles, tile_count);
 }
 
 // static
