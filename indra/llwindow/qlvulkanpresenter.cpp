@@ -3650,11 +3650,24 @@ struct QLVulkanPresenter::Impl
         const GLint h = (GLint)mShHeight;
         const GLenum general = GL_LAYOUT_GENERAL_EXT;
 
-        // GL: the map as it stands into Vulkan's image, and both over to Vulkan.
-        gl.CopyImageSubData(depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
-                            1);
-        gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
-        gl.Flush();
+        // GL: the map as it stands into Vulkan's image, and both over to Vulkan. Each step its own zone, to find
+        // which, if any, waits for a threaded driver's thread.
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl copy in");
+            gl.CopyImageSubData(depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                w, h, 1);
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl signal");
+            gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl flush");
+            gl.Flush();
+        }
+        // To the function's end (its own variable, beside the map's zone): its self time is the recording, the steps
+        // after have zones of their own.
+        LL_PROFILE_ZONE_NAMED_COLOR("vulkan shadow - vk record", 0x40A0FF);
 
         ShSlot& slot = mShSlots[mShSlot];
         vkResetFences(mDevice, 1, &slot.fence);
@@ -3759,7 +3772,11 @@ struct QLVulkanPresenter::Impl
         submit.pCommandBuffers      = &slot.cmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores    = &mShVKDoneVK;
-        const VkResult result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+        VkResult result = VK_SUCCESS;
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - vk submit");
+            result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+        }
         if (result != VK_SUCCESS)
         {
             // GL's signal is left untaken: everything is let go, waiting for both first, and not tried again.
@@ -3774,9 +3791,15 @@ struct QLVulkanPresenter::Impl
         }
 
         // GL: back once Vulkan is done (on the GPU), and the map into GL's own texture.
-        gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
-        gl.CopyImageSubData(target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
-                            1);
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl wait");
+            gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl copy out");
+            gl.CopyImageSubData(target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                w, h, 1);
+        }
         ++mShPassesNow;
         mShDrawsNow += mShDraws;
         mShRiggedNow += rigged_draws;
