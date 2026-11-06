@@ -2916,6 +2916,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarVulkanProbeDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, needs QuasarVulkanTargets and QuasarVulkanTextures): reflection probe faces' simple prims (diffuse texture and tint, not rigged) are drawn into the probes' G-buffer by Vulkan instead of GL. The first of the scene's own draws to leave GL; mistakes show in reflections only. Status: "Quasar Vulkan probe draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanTextures</key>
         <map>
             <key>Comment</key>

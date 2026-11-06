@@ -184,6 +184,28 @@ public:
     static std::string targetInfo();
     static std::string textureInfo();  // fetched textures in Vulkan's memory (QuasarVulkanTextures)
 
+    // ---- Simple prims drawn into a probe face's G-buffer by Vulkan (QuasarVulkanProbeDraws) ----------------------
+
+    /// A probe face's G-buffer pass: gbufferBegin with its colour attachments' and depth's GL names (each must be in
+    /// Vulkan's memory: QuasarVulkanTargets), then for each draw gbufferArena (its mesh: positions and normals 16 bytes
+    /// a vertex, texture coordinates 8, colours 4, 16-bit indices) and gbufferDraw (its model-view-projection, its
+    /// normal matrix as a column-major 4x4 whose first three columns are the 3x3, its diffuse texture's GL name, which
+    /// must be in Vulkan's memory: QuasarVulkanTextures), then gbufferEnd once GL has drawn the rest of the G-buffer
+    /// and before it reads it: Vulkan draws over it, and GL waits for that on the GPU. False from gbufferBegin: the face
+    /// is GL's; from gbufferArena or gbufferDraw: that draw is GL's; from gbufferEnd: the draws were lost (GL draws
+    /// none of them: they were left to Vulkan).
+    static void gbufferFrame(unsigned frame);
+    static bool gbufferBegin(const unsigned* colors, unsigned color_count, unsigned depth, unsigned width,
+                             unsigned height, bool greater, bool remap_depth);
+    static bool gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
+                             unsigned normal_offset, unsigned uv_offset, unsigned color_offset, unsigned vertex_count,
+                             unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index);
+    static bool gbufferDraw(const float mvp[16], const float normal_matrix[16], unsigned texture,
+                            unsigned base_vertex, unsigned first_index, unsigned index_count);
+    static bool gbufferEnd();
+    static void gbufferAbandon();
+    static std::string gbufferInfo();
+
     // ---- Shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------------------------------------
 
     /// A shadow map's unrigged opaque casters, drawn by Vulkan into GL's map in one indirect draw. On the main thread,
