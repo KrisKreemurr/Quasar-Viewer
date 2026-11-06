@@ -10,7 +10,8 @@
 //     by filterSpecularRoughness and packed by packORM; the normal with the geometric normal (encodeNormalGeo) and
 //     GBUFFER_FLAG_HAS_PBR; emissive colour times the emissive map. Base colour and emissive are decoded by their views
 //     where the image is sRGB, as GL's colour samplers decode them; the normal and ORM maps are read undecoded, as GL's
-//     data samplers read them, so where their view decodes, the value is encoded back.
+//     data samplers read them: where their view decodes, each texel is encoded back before it is filtered (trilinear,
+//     by hand: sampleRaw), since the view's own filtering would blend decoded values.
 
 layout(set = 1, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 1) uniform sampler2D bumpMap;
@@ -106,6 +107,42 @@ vec3 linear_to_srgb(vec3 cl)
     return mix(high_range, low_range, lt);
 }
 
+vec4 rawTexel(sampler2D s, ivec2 p, ivec2 size, int level)
+{
+    p = ((p % size) + size) % size;  // repeat, as GL's AnisoWrap
+    vec4 c = texelFetch(s, p, level);
+    return vec4(linear_to_srgb(c.rgb), c.a);
+}
+
+vec4 rawBilinear(sampler2D s, vec2 uv, int level)
+{
+    ivec2 size = textureSize(s, level);
+    vec2 p = uv * vec2(size) - 0.5;
+    ivec2 i0 = ivec2(floor(p));
+    vec2 f = p - floor(p);
+    vec4 a = rawTexel(s, i0, size, level);
+    vec4 b = rawTexel(s, i0 + ivec2(1, 0), size, level);
+    vec4 c = rawTexel(s, i0 + ivec2(0, 1), size, level);
+    vec4 e = rawTexel(s, i0 + ivec2(1, 1), size, level);
+    return mix(mix(a, b, f.x), mix(c, e, f.x), f.y);
+}
+
+// A texel of a data map through a view that decodes sRGB: as GL's undecoded sampler filters it, near enough (trilinear
+// over the raw values, at the level the hardware would pick; GL's anisotropy is not followed).
+vec4 sampleRaw(sampler2D s, vec2 uv)
+{
+    float lod = textureQueryLod(s, uv).x;
+    int top = textureQueryLevels(s) - 1;
+    int l0 = clamp(int(floor(lod)), 0, top);
+    int l1 = min(l0 + 1, top);
+    vec4 near = rawBilinear(s, uv, l0);
+    if (l1 == l0)
+    {
+        return near;
+    }
+    return mix(near, rawBilinear(s, uv, l1), clamp(lod - float(l0), 0.0, 1.0));
+}
+
 void main()
 {
     Draw d = draws[draw_index];
@@ -123,22 +160,16 @@ void main()
     vec4 basecolor = texture(diffuseMap, base_color_texcoord) * vertex_color;
     vec3 col = basecolor.rgb;
 
-    vec3 normal_texel = texture(bumpMap, normal_texcoord).xyz;
-    if ((srgb_bits & 2u) != 0u)
-    {
-        normal_texel = linear_to_srgb(normal_texel);
-    }
+    vec3 normal_texel = (srgb_bits & 2u) != 0u ? sampleRaw(bumpMap, normal_texcoord).xyz
+                                                 : texture(bumpMap, normal_texcoord).xyz;
     vec3 vNt = normal_texel * 2.0 - 1.0;
     vec3 vN = vary_normal;
     vec3 vT = vary_tangent;
     vec3 vB = vary_sign * cross(vN, vT);
     vec3 tnorm = normalize(vNt.x * vT + vNt.y * vB + vNt.z * vN);
 
-    vec3 spec = texture(specularMap, metallic_roughness_texcoord).rgb;
-    if ((srgb_bits & 4u) != 0u)
-    {
-        spec = linear_to_srgb(spec);
-    }
+    vec3 spec = (srgb_bits & 4u) != 0u ? sampleRaw(specularMap, metallic_roughness_texcoord).rgb
+                                         : texture(specularMap, metallic_roughness_texcoord).rgb;
     spec.g *= d.pbr.y;  // roughness
     spec.b *= d.pbr.x;  // metallic
     spec.g = filterSpecularRoughness(spec.g, tnorm);

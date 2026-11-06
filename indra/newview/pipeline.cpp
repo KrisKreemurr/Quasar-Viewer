@@ -13540,14 +13540,16 @@ static U32 ql_sampled_levels(const LLImageGL* image)
     return image->getUseMipMaps() ? (U32)llmax(1, image->getMaxDiscardLevel() - image->getDiscardLevel() + 1) : 1u;
 }
 
-// A material slot's texture for Vulkan: 0 for GL's default there (none, white, or the flat normal), its GL name
-// otherwise; false where the slot names a texture with no GL texture yet (GL's then).
-static bool ql_slot_texture(LLViewerTexture* texture, U32& name, U32& levels)
+// A material slot's texture for Vulkan: 0 for GL's default there (none, or the slot's own default: the flat normal in
+// the normal slot, white in the others), its GL name otherwise; false where the slot names a texture with no GL
+// texture yet (GL's then).
+static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& name, U32& levels)
 {
     name   = 0;
     levels = 1;
-    if (!texture || texture == LLViewerFetchedTexture::sWhiteImagep.get() ||
-        texture == LLViewerFetchedTexture::sFlatNormalImagep.get())
+    const LLViewerTexture* slot_default = normal_slot ? LLViewerFetchedTexture::sFlatNormalImagep.get()
+                                                      : LLViewerFetchedTexture::sWhiteImagep.get();
+    if (!texture || texture == slot_default)
     {
         return true;
     }
@@ -13713,12 +13715,12 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                     normal = nullptr;  // the flat normal, as bind takes it
                 }
                 bool textured =
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), d.textures[0],
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), false, d.textures[0],
                                     d.levels[0]) &&
-                    ql_slot_texture(normal, d.textures[1], d.levels[1]) &&
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS),
+                    ql_slot_texture(normal, true, d.textures[1], d.levels[1]) &&
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS), false,
                                     d.textures[2], d.levels[2]) &&
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), d.textures[3],
+                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), false, d.textures[3],
                                     d.levels[3]);
                 if (textured)
                 {

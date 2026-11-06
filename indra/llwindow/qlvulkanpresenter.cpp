@@ -6248,7 +6248,7 @@ struct QLVulkanPresenter::Impl
         draws_binding.binding         = 0;
         draws_binding.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         draws_binding.descriptorCount = 1;
-        draws_binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        draws_binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // both read it
         VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         set_info.bindingCount = 1;
         set_info.pBindings    = &draws_binding;
@@ -6665,21 +6665,33 @@ struct QLVulkanPresenter::Impl
             image = d.image;
             return d.view;
         }
-        VkFormat format = VK_FORMAT_UNDEFINED;
+        // The image, its format and its view in one look: another thread may delete the name and GL hand it out again.
+        std::lock_guard<std::mutex> lock(mExtMutex);
+        const auto found = mExtTextures.find(texture);
+        if (found == mExtTextures.end() || found->second.block < 0 || found->second.vk == VK_FORMAT_R8_UNORM ||
+            found->second.vk == VK_FORMAT_R8G8_UNORM)
         {
-            std::lock_guard<std::mutex> lock(mExtMutex);
-            const auto found = mExtTextures.find(texture);
-            if (found == mExtTextures.end() || found->second.block < 0 || found->second.vk == VK_FORMAT_R8_UNORM ||
-                found->second.vk == VK_FORMAT_R8G8_UNORM)
+            return VK_NULL_HANDLE;
+        }
+        ExtTexture& ext = found->second;
+        if (!ext.view)
+        {
+            VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            view_info.image            = ext.image;
+            view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format           = ext.vk;
+            // A name's levels GL samples are fixed for its life: a new discard level makes a new name.
+            view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, llclamp(levels, 1u, llmax(1u, ext.levels)), 0, 1 };
+            if (vkCreateImageView(mDevice, &view_info, nullptr, &ext.view) != VK_SUCCESS)
             {
+                ext.view = VK_NULL_HANDLE;
                 return VK_NULL_HANDLE;
             }
-            image = found->second.image;
         }
-        const VkImageView view = extView(texture, VK_IMAGE_ASPECT_COLOR_BIT, &format, levels);
-        srgb = format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_BC1_RGBA_SRGB_BLOCK ||
-               format == VK_FORMAT_BC2_SRGB_BLOCK || format == VK_FORMAT_BC3_SRGB_BLOCK;
-        return view;
+        image = ext.image;
+        srgb  = ext.vk == VK_FORMAT_R8G8B8A8_SRGB || ext.vk == VK_FORMAT_BC1_RGBA_SRGB_BLOCK ||
+                ext.vk == VK_FORMAT_BC2_SRGB_BLOCK || ext.vk == VK_FORMAT_BC3_SRGB_BLOCK;
+        return ext.view;
     }
 
     // The descriptor set of a draw's four textures, made the first time they are drawn with together, kept until one
