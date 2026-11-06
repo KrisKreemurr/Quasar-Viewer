@@ -13426,6 +13426,9 @@ static std::vector<LLDrawInfo*> sQLProbeLeftovers;
 static std::vector<LLDrawInfo*> sQLProbeTaken;  // what Vulkan took: GL's to draw after all if the hand-over fails
 std::vector<LLDrawInfo*>* gQLVulkanSimpleLeftovers = nullptr;  // lldrawpoolsimple.cpp
 static bool sQLProbeDrawsOpen = false;
+// Since start: faces offered, faces Vulkan took, and why draws stayed GL's. For the status line.
+static U64 sQLProbeFacesOffered = 0, sQLProbeFacesTaken = 0, sQLProbeHandOversFailed = 0;
+static U64 sQLProbeNoTexture = 0, sQLProbeBufferRefused = 0, sQLProbeDrawRefused = 0, sQLProbeTakenDraws = 0;
 
 #if QL_VULKAN_SHADOWS
 // The inverse transpose of a model-view's upper 3x3, as the normal matrix, column-major in a 4x4.
@@ -13467,6 +13470,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
     {
         return false;
     }
+    ++sQLProbeFacesOffered;
     U32 colors[4] = {};
     const U32 color_count = llmin(gbuffer.getNumTextures(), 4u);
     for (U32 i = 0; i < color_count; ++i)
@@ -13480,6 +13484,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
         return false;
     }
     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan probe draws");
+    ++sQLProbeFacesTaken;
     const LLMatrix4a view = LLViewerCamera::getCurrent().getModelview();
     const LLMatrix4a proj = gGL.getProjectionMatrix();
     sQLProbeLeftovers.clear();
@@ -13540,6 +13545,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
             }
         }
         (drawn ? sQLProbeTaken : sQLProbeLeftovers).push_back(params);
+        ++(drawn ? sQLProbeTakenDraws : !texture ? sQLProbeNoTexture : !last_in_arena ? sQLProbeBufferRefused
+                                                                                       : sQLProbeDrawRefused);
     }
     gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
     sQLProbeDrawsOpen = true;
@@ -13562,6 +13569,7 @@ static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end()
     gGL.flush();
     if (!QLVulkanPresenter::gbufferEnd() && !sQLProbeTaken.empty())
     {
+        ++sQLProbeHandOversFailed;
         return &sQLProbeTaken;  // GL draws them (renderGeomDeferred); cleared at the next begin
     }
 #endif
@@ -13573,7 +13581,25 @@ std::string ql_vulkan_probe_draws_info()
 #if QL_VULKAN_SHADOWS
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());  // the counts move on with frames that draw no face
-    return wanted() ? QLVulkanPresenter::gbufferInfo() : std::string("off (QuasarVulkanProbeDraws)");
+    if (!wanted())
+    {
+        return "off (QuasarVulkanProbeDraws)";
+    }
+    // Totals since start first: the status line is cut at the screen's edge.
+    std::string info = llformat("faces %llu offered %llu taken %llu failed; draws %llu Vulkan, GL kept %llu no-tex %llu buffer "
+                    "%llu refused | ",
+                    (unsigned long long)sQLProbeFacesOffered, (unsigned long long)sQLProbeFacesTaken,
+                    (unsigned long long)sQLProbeHandOversFailed, (unsigned long long)sQLProbeTakenDraws,
+                    (unsigned long long)sQLProbeNoTexture, (unsigned long long)sQLProbeBufferRefused,
+                    (unsigned long long)sQLProbeDrawRefused) +
+           QLVulkanPresenter::gbufferInfo();
+    static LLFrameTimer logged;
+    if (logged.getElapsedTimeF32() > 30.f)
+    {
+        logged.reset();
+        LL_INFOS("Vulkan") << "Probe draws: " << info << LL_ENDL;
+    }
+    return info;
 #else
     return "not on this platform";
 #endif

@@ -34,6 +34,7 @@
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
+#include <set>
 #include <vulkan/vulkan.h>
 
 #if QL_HAS_STREAMLINE
@@ -6106,6 +6107,18 @@ struct QLVulkanPresenter::Impl
     U32              mGbFrame = 0;
     U32              mGbPassesNow = 0, mGbPassesLast = 0, mGbDrawsNow = 0, mGbDrawsLast = 0;
     U32              mGbTexturesNow = 0, mGbTexturesLast = 0;
+    // Why the last face Vulkan was offered stayed GL's, for the status line and the log (once a reason).
+    std::string      mGbWhy;
+    std::set<std::string> mGbWhyLogged;
+
+    void gbWhy(const std::string& why)
+    {
+        mGbWhy = why;
+        if (mGbWhyLogged.insert(why).second)
+        {
+            LL_INFOS("Vulkan") << "Probe draws in Vulkan: a face stays GL's: " << why << LL_ENDL;
+        }
+    }
 
     bool gbFail(const std::string& why)
     {
@@ -6485,6 +6498,7 @@ struct QLVulkanPresenter::Impl
     {
         if (color_count == 0 || color_count > 4 || !depth)
         {
+            gbWhy(llformat("the G-buffer has %u colour attachments and depth %u", color_count, depth));
             return -1;
         }
         for (size_t i = 0; i < mGbTargets.size(); ++i)
@@ -6527,6 +6541,8 @@ struct QLVulkanPresenter::Impl
             }
             if (!image)
             {
+                gbWhy(llformat("its %s (GL name %u) is not in Vulkan's memory", is_depth ? "depth" : "colour attachment",
+                               name));
                 destroyGbTarget(t);
                 return -1;
             }
@@ -6538,6 +6554,7 @@ struct QLVulkanPresenter::Impl
             view_info.subresourceRange = { aspect, 0, 1, 0, 1 };
             if (vkCreateImageView(mDevice, &view_info, nullptr, &t.views[i]) != VK_SUCCESS)
             {
+                gbWhy("vkCreateImageView failed for an attachment");
                 t.views[i] = VK_NULL_HANDLE;
                 destroyGbTarget(t);
                 return -1;
@@ -6570,6 +6587,7 @@ struct QLVulkanPresenter::Impl
         pass_info.pSubpasses      = &subpass;
         if (vkCreateRenderPass(mDevice, &pass_info, nullptr, &t.pass) != VK_SUCCESS)
         {
+            gbWhy("vkCreateRenderPass failed");
             t.pass = VK_NULL_HANDLE;
             destroyGbTarget(t);
             return -1;
@@ -6583,6 +6601,7 @@ struct QLVulkanPresenter::Impl
         fb_info.layers          = 1;
         if (vkCreateFramebuffer(mDevice, &fb_info, nullptr, &t.framebuffer) != VK_SUCCESS)
         {
+            gbWhy("vkCreateFramebuffer failed");
             t.framebuffer = VK_NULL_HANDLE;
             destroyGbTarget(t);
             return -1;
@@ -6591,6 +6610,7 @@ struct QLVulkanPresenter::Impl
         {
             if (!createGbPipeline(t, greater != 0, t.pipelines[greater]))
             {
+                gbWhy("its pipeline failed");
                 destroyGbTarget(t);
                 return -1;
             }
@@ -6698,8 +6718,14 @@ struct QLVulkanPresenter::Impl
         {
             mGbAnisotropy = anisotropy;  // the sampler's; a later change of GL's level is not followed (a restart is)
         }
-        if (mGbInPass || !createGbObjects())
+        if (mGbInPass)
         {
+            gbWhy("a face began inside another");
+            return false;
+        }
+        if (!createGbObjects())
+        {
+            gbWhy(mGbNote);
             return false;
         }
         GbSlot& slot = mGbSlots[mGbNextSlot];
@@ -6707,6 +6733,7 @@ struct QLVulkanPresenter::Impl
         {
             if (vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS)
             {
+                gbWhy("all 16 submission slots still busy");
                 return false;  // never waited for: the face stays GL's
             }
             slot.submitted = false;
@@ -6961,11 +6988,12 @@ struct QLVulkanPresenter::Impl
     {
         if (!mGbReady)
         {
-            return mGbNote;
+            return mGbNote + (mGbWhy.empty() || mGbWhy == mGbNote ? std::string() : " | " + mGbWhy);
         }
         return llformat("%u draws (%u textures) in %u faces last frame | arena %.0f/%.0f MB, %u resets, %u G-buffers",
                         mGbDrawsLast, mGbTexturesLast, mGbPassesLast, (double)mGbArena.used() / (1 << 20),
-                        (double)mGbArena.totalBytes() / (1 << 20), mGbArena.resets, (U32)mGbTargets.size());
+                        (double)mGbArena.totalBytes() / (1 << 20), mGbArena.resets, (U32)mGbTargets.size()) +
+               (mGbWhy.empty() ? std::string() : " | last kept by GL: " + mGbWhy);
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
