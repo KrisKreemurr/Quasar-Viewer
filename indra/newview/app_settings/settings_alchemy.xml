@@ -2927,6 +2927,28 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarProbeCullPixels</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: reflection probe faces leave out groups of objects that would cover fewer than this many pixels of the face (its width; the faces are small). 0 turns it off. Live. Status: "Quasar probe cull".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>2.0</real>
+        </map>
+        <key>QuasarProbeCullDistance</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: reflection probe faces leave out groups of objects farther than this many metres from the probe. 0: no limit (the draw distance). Live.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>0.0</real>
+        </map>
         <key>QuasarVulkanPBRDraws</key>
         <map>
             <key>Comment</key>
