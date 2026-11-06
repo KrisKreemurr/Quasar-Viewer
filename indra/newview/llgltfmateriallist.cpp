@@ -181,7 +181,12 @@ void LLGLTFMaterialList::applyOverrideMessage(LLMessageSystem* msg, const std::s
     const LLHost& host = msg->getSender();
 
     LLViewerRegion* region = LLWorld::instance().getRegion(host);
-    llassert(region);
+    if (!region)
+    {
+        // Quasar: a region the viewer has no longer, or not yet (a teleport or a login under way), sends overrides
+        // too. Skipped, as below; an assert here halted every build that keeps asserts.
+        LL_WARNS_ONCE("GLTF") << "Material override from a region the viewer does not have: " << host << LL_ENDL;
+    }
 
     if (region)
     {
