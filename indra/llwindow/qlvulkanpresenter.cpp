@@ -3603,12 +3603,12 @@ struct QLVulkanPresenter::Impl
 
     // ---- fetched textures in Vulkan's memory (QuasarVulkanTextures; piece 2b) ----------------------------------
     //
-    // Each texture's image is placed in a block: 64 MB of device-local memory Vulkan allocates and exports, which GL
+    // Each texture's image is placed in a block: 256 MB of device-local memory Vulkan allocates and exports, which GL
     // imports once as a memory object; the texture takes its storage at its offset (glTextureStorageMem2DEXT). A block's
     // free ranges are kept by offset and merged as textures go. A texture larger than a block gets a block of its own
     // size. Only once the texture memory self-test has passed (textures can share an allocation), on the main thread,
     // and in the formats the device can export without a dedicated allocation. GL's uploads into them are as ever.
-    static constexpr VkDeviceSize TEX_BLOCK_BYTES = 64ull << 20;
+    static constexpr VkDeviceSize TEX_BLOCK_BYTES = 256ull << 20;  // fewer memory objects for GL to track (64 MB: 91 blocks in the club)
     struct TexBlock
     {
         VkDeviceMemory memory = VK_NULL_HANDLE;
