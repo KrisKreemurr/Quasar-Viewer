@@ -13310,9 +13310,9 @@ static bool ql_vulkan_shadows_wanted()
 #endif
 }
 
-// Draws the unrigged casters of SHADOW_GEOMETRY_PASSES into the bound shadow map with Vulkan, and those it could not
-// hand over with GL. True when they are drawn: drawShadow then leaves them out of its own pass.
-static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp)
+// Draws the unrigged casters of SHADOW_GEOMETRY_PASSES into the bound shadow map with Vulkan. True when it has:
+// drawShadow then leaves them out of its own pass and draws those Vulkan could not take, left in `leftovers`, with GL.
+static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, std::vector<LLDrawInfo*>& leftovers)
 {
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
@@ -13334,7 +13334,6 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp)
     LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("quasar vulkan shadow casters");
 
     const LLMatrix4a& view = LLViewerCamera::getCurrent().getModelview();
-    static std::vector<LLDrawInfo*> leftovers;
     leftovers.clear();
     const LLVertexBuffer* last_vb = nullptr;
     bool last_in_arena = false;
@@ -13385,27 +13384,14 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp)
     gGL.flush();
     if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
     {
+        leftovers.clear();
         return false;  // nothing drawn: GL draws them all
-    }
-
-    if (!leftovers.empty())
-    {
-        gDeferredShadowProgram.bind(false);
-        gGL.diffuseColor4f(1, 1, 1, 1);
-        gGL.setColorMask(false, false);
-        gGL.loadMatrix(view);
-        gGLLastMatrix = NULL;
-        for (LLDrawInfo* params : leftovers)
-        {
-            gPipeline.mSimplePool->pushUntexturedBatch(*params);
-        }
-        gGL.loadMatrix(view);
-        gGLLastMatrix = NULL;
     }
     return true;
 #else
     (void)proj;
     (void)depth_clamp;
+    leftovers.clear();
     return false;
 #endif
 }
@@ -13512,8 +13498,10 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
 
     LLVertexBuffer::unbind();
 
-    // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows).
-    const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp);
+    // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows); the few it could not
+    // take are drawn with GL in the unrigged pass below.
+    static std::vector<LLDrawInfo*> vulkan_leftovers;
+    const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers);
 
     for (int j = 0; j < 2; ++j) // 0 -- static, 1 -- rigged
     {
@@ -13540,6 +13528,17 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
             {
                 renderObjects(type, false, false, rigged);
             }
+        }
+        else if (!vulkan_leftovers.empty())
+        {
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
+            for (LLDrawInfo* params : vulkan_leftovers)
+            {
+                mSimplePool->pushUntexturedBatch(*params);
+            }
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
         }
 
         renderGLTFObjects(LLRenderPass::PASS_GLTF_PBR, false, rigged);

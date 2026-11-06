@@ -374,6 +374,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCreateFence);
     QL_VK_FN(vkDestroyFence);
     QL_VK_FN(vkWaitForFences);
+    QL_VK_FN(vkGetFenceStatus);
     QL_VK_FN(vkResetFences);
     QL_VK_FN(vkCreateCommandPool);
     QL_VK_FN(vkDestroyCommandPool);
@@ -623,6 +624,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCreateFence);
         QL_VK_DEVICE(vkDestroyFence);
         QL_VK_DEVICE(vkWaitForFences);
+        QL_VK_DEVICE(vkGetFenceStatus);
         QL_VK_DEVICE(vkResetFences);
         QL_VK_DEVICE(vkCreateCommandPool);
         QL_VK_DEVICE(vkDestroyCommandPool);
@@ -2678,7 +2680,7 @@ struct QLVulkanPresenter::Impl
     //     the map's size; Vulkan draws over it (load, no clear, so whatever GL had there stays: a kept still map, what GL
     //     drew before); GL copies it back and draws the rest (rigged, alpha-masked, terrain, trees) on top as before.
     //     Each side waits for the other on the GPU through two semaphores of their own, never on the CPU.
-    static constexpr U32          SH_SLOTS = 32;  // several frames of maps (sun cascades, spots, probes), so reuse never waits
+    static constexpr U32          SH_SLOTS = 96;  // ~34 maps a frame at most (probe faces, hero faces, cascades, spots), times the pacing depth
     static constexpr U32          SH_MAX_DRAWS = 8192;
     static constexpr VkDeviceSize SH_MVP_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 64;
     static constexpr VkDeviceSize SH_CMD_BYTES = (VkDeviceSize)SH_MAX_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
@@ -3060,7 +3062,7 @@ struct QLVulkanPresenter::Impl
     }
 
     // The depth image of a map's size, made the first time that size is drawn; the least recently used of more than
-    // four goes.
+    // six goes (a frame draws four sizes: the main view's sun, its spots, the probes' sun, the hero probe's sun).
     ShDepth* shadowDepth(U32 width, U32 height)
     {
         const U32 frame = mShFrame;
@@ -3072,11 +3074,13 @@ struct QLVulkanPresenter::Impl
                 return &d;
             }
         }
-        if (mShDepths.size() >= 4)
+        if (mShDepths.size() >= 6)
         {
             auto oldest = std::min_element(mShDepths.begin(), mShDepths.end(),
                                            [](const ShDepth& a, const ShDepth& b) { return a.lastFrame < b.lastFrame; });
+            // Rare (a size not drawn for a while): both sides done with it before it goes, GL's copy out of it too.
             waitShadowSlots();
+            gl.Finish();
             destroyShadowDepth(*oldest);
             mShDepths.erase(oldest);
         }
@@ -3305,15 +3309,18 @@ struct QLVulkanPresenter::Impl
             mShVertexTop = mShIndexTop = 0;
             ++mShArenaResets;
         }
-        mShSlot = mShNextSlot;
-        mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
-        ShSlot& slot = mShSlots[mShSlot];
+        ShSlot& slot = mShSlots[mShNextSlot];
         if (slot.submitted)
         {
-            // Thirty-two maps back, several frames: long done, so this does not wait in practice.
-            vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            // Normally several frames back and long done. Never waited for: one still in flight leaves the map to GL.
+            if (vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS)
+            {
+                return false;
+            }
             slot.submitted = false;
         }
+        mShSlot = mShNextSlot;
+        mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
         mShInPass     = true;
         mShDraws      = 0;
         mShWidth      = width;
