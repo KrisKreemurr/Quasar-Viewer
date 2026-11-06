@@ -3731,6 +3731,26 @@ void LLGLState::checkStates(GLboolean writeAlpha)
 
 ///////////////////////////////////////////////////////////////////////
 
+// Quasar: the main context's caps as LLGLState has left them, for code below llrender's headers that must not ask GL
+// (qlvulkanpresenter.cpp): glIsEnabled, like every glGet, waits for a threaded driver's thread to catch up with
+// everything queued, which at the end of a frame is most of the frame. Main thread only, as the map is.
+namespace
+{
+    struct QLGLStateRead : public LLGLState
+    {
+        static bool enabled(LLGLenum cap)
+        {
+            const auto it = sStateMap.find(cap);
+            return it != sStateMap.end() && it->second == GL_TRUE;
+        }
+    };
+}
+
+bool ql_gl_cap_tracked_enabled(unsigned int cap)
+{
+    return QLGLStateRead::enabled((LLGLenum)cap);
+}
+
 LLGLState::LLGLState(LLGLenum state, S32 enabled) :
     mState(state), mWasEnabled(false), mIsEnabled(false)
 {

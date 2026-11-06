@@ -85,6 +85,10 @@
 #define GL_LAYOUT_GENERAL_EXT 0x958D
 #endif
 
+
+// llgl.cpp: the main context's caps as llrender has set them (see GLCopyState below).
+bool ql_gl_cap_tracked_enabled(unsigned int cap);
+
 namespace
 {
     // The GL entry points this file calls, loaded here so it depends on nothing llgl loads or leaves out.
@@ -2503,6 +2507,9 @@ struct QLVulkanPresenter::Impl
     }
 
     // A blit obeys the scissor test and, into an sRGB-capable buffer, the sRGB write: neither is wanted in a copy.
+    // Whether either is on is read from what llrender has set (ql_gl_cap_tracked_enabled), never asked of GL: on
+    // NVIDIA's threaded driver glIsEnabled waits for the driver's thread to run everything queued before it, and here,
+    // at the end of the frame, that was most of it (~0.8 ms a frame in the frame generation inputs alone).
     struct GLCopyState
     {
         GLboolean scissor = GL_FALSE;
@@ -2511,8 +2518,8 @@ struct QLVulkanPresenter::Impl
     GLCopyState beginGLCopy()
     {
         GLCopyState state;
-        state.scissor = gl.IsEnabled(GL_SCISSOR_TEST);
-        state.srgb    = gl.IsEnabled(GL_FRAMEBUFFER_SRGB);
+        state.scissor = ql_gl_cap_tracked_enabled(GL_SCISSOR_TEST) ? GL_TRUE : GL_FALSE;
+        state.srgb    = ql_gl_cap_tracked_enabled(GL_FRAMEBUFFER_SRGB) ? GL_TRUE : GL_FALSE;
         if (state.scissor)
         {
             gl.Disable(GL_SCISSOR_TEST);
