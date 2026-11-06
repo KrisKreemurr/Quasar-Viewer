@@ -3839,6 +3839,17 @@ struct QLVulkanPresenter::Impl
                 return false;  // never: a name with storage already
             }
         }
+        // RGB textures, the commonest there are, are stored as RGBA with alpha 1 (GL pads RGB8 to four bytes in its own
+        // storage, and Vulkan's R8G8B8 is packed and seldom offered): GL's RGB uploads into RGBA storage fill alpha with
+        // 1, and sampling reads the same. A third more memory for those.
+        if (internal_format == GL_RGB8)
+        {
+            internal_format = GL_RGBA8;
+        }
+        else if (internal_format == GL_SRGB8)
+        {
+            internal_format = GL_SRGB8_ALPHA8;
+        }
         const S32 index = texFormatIndex((GLenum)internal_format);
         if (index < 0)
         {
