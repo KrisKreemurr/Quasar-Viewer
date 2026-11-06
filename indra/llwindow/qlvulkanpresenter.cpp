@@ -2758,6 +2758,7 @@ struct QLVulkanPresenter::Impl
         U32            width = 0, height = 0, levels = 0;
         S32            block = -1;  // a fetched texture's block (mTexBlocks), its place and size there
         VkDeviceSize   offset = 0, size = 0;
+        U64            counted = 0;  // what the texture budget counts it as
         VkFormat       vk = VK_FORMAT_UNDEFINED;   // the image's format
         VkImageView    view = VK_NULL_HANDLE;      // made the first time Vulkan draws with it or into it
         VkDescriptorSet texSet = VK_NULL_HANDLE;   // a texture's set for the G-buffer draws (mGbTexPool)
@@ -2807,10 +2808,11 @@ struct QLVulkanPresenter::Impl
                 }
             }
         }
-        bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) override
+        bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels,
+                             unsigned long long counted_bytes) override
         {
             std::lock_guard<std::mutex> lock(sExtOwnerMutex);
-            return mOwnerPtr && mOwnerPtr->texAllocate(texture, internal_format, width, height, levels);
+            return mOwnerPtr && mOwnerPtr->texAllocate(texture, internal_format, width, height, levels, counted_bytes);
         }
         bool owns(unsigned texture) const override
         {
@@ -3016,6 +3018,7 @@ struct QLVulkanPresenter::Impl
             TexBlock& block = mTexBlocks[ext.block];
             giveRange(block, ext.offset, ext.size);
             mTexBytes -= llmin(mTexBytes, (U64)ext.size);
+            mTexCounted -= llmin(mTexCounted, ext.counted);
             size_t live = 0;
             for (const TexBlock& b : mTexBlocks)
             {
@@ -3026,8 +3029,10 @@ struct QLVulkanPresenter::Impl
                 if (block.glMemory) gl.DeleteMemoryObjectsEXT(1, &block.glMemory);
                 vkFreeMemory(mDevice, block.memory, nullptr);
                 if (block.handle) CloseHandle(block.handle);
+                mTexBlockBytes -= llmin(mTexBlockBytes, (U64)block.size);
                 block = TexBlock();
             }
+            publishTexOverhead();
             ext = ExtTexture();
             return;
         }
@@ -3669,8 +3674,20 @@ struct QLVulkanPresenter::Impl
     // main thread frees them. Taken before mExtMutex where both are held (texAllocate), never after it.
     mutable std::mutex mTexMutex;
     std::vector<TexBlock> mTexBlocks;
-    U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0;
+    U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0, mTexWasteful = 0;
     U64  mTexBytes = 0;
+    U64  mTexBlockBytes = 0;  // every live block's size
+    U64  mTexCounted = 0;     // what the budget counts the textures in them as
+    // A texture whose image would take more than this times what the budget counts it as stays GL's: small ones, which
+    // NVIDIA's alignment rounds up to far more than their size.
+    static constexpr double TEX_MAX_WASTE = 1.5;
+
+    // Under mTexMutex.
+    void publishTexOverhead()
+    {
+        gQLExternalTextureOverheadBytes.store(mTexBlockBytes > mTexCounted ? mTexBlockBytes - mTexCounted : 0,
+                                              std::memory_order_relaxed);
+    }
 
     S32 texFormatIndex(GLenum gl_format)
     {
@@ -3772,6 +3789,8 @@ struct QLVulkanPresenter::Impl
         // block holds many textures), so a finish is no cost.
         gl.Finish();
         block.free[0] = block.size;
+        mTexBlockBytes += block.size;
+        publishTexOverhead();
         // A free block, or a new one at the end.
         for (size_t i = 0; i < mTexBlocks.size(); ++i)
         {
@@ -3845,7 +3864,8 @@ struct QLVulkanPresenter::Impl
         }
     }
 
-    bool texAllocate(GLuint texture, GLint internal_format, GLsizei width, GLsizei height, GLsizei levels)
+    bool texAllocate(GLuint texture, GLint internal_format, GLsizei width, GLsizei height, GLsizei levels,
+                     U64 counted_bytes)
     {
         if (!mActive || !mDevice || !mTexShared || width <= 0 || height <= 0 || levels <= 0)
         {
@@ -3905,6 +3925,12 @@ struct QLVulkanPresenter::Impl
         }
         VkMemoryRequirements req = {};
         vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+        if (counted_bytes && (double)req.size > TEX_MAX_WASTE * (double)counted_bytes)
+        {
+            vkDestroyImage(mDevice, ext.image, nullptr);
+            ++mTexWasteful;
+            return false;  // GL's: Vulkan would take far more for it than it is counted as
+        }
         // A block with room, in a memory type the image can use, or a new one.
         S32 block = -1;
         VkDeviceSize offset = 0;
@@ -3959,14 +3985,17 @@ struct QLVulkanPresenter::Impl
         ext.format = U32_MAX;  // a texture (the EXT_FORMATS index is the render targets')
         ext.vk     = TEX_FORMATS[index].vk;
         ext.block  = block;
-        ext.offset = offset;
-        ext.size   = req.size;
+        ext.offset  = offset;
+        ext.size    = req.size;
+        ext.counted = counted_bytes;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             mExtTextures[texture] = ext;
         }
         ++mTexGiven;
         mTexBytes += req.size;
+        mTexCounted += counted_bytes;
+        publishTexOverhead();
         return true;
     }
 
@@ -3988,22 +4017,26 @@ struct QLVulkanPresenter::Impl
         }
         size_t blocks = 0;
         U64 bytes = 0;
-        U32 declined = 0, refused = 0;
+        U32 declined = 0, refused = 0, wasteful = 0;
+        U64 block_bytes = 0, counted = 0;
         {
             std::lock_guard<std::mutex> tex_lock(mTexMutex);
             for (const TexBlock& b : mTexBlocks)
             {
                 blocks += b.memory ? 1 : 0;
             }
-            bytes    = mTexBytes;
-            declined = mTexDeclined;
-            refused  = mTexRefused;
+            bytes       = mTexBytes;
+            declined    = mTexDeclined;
+            refused     = mTexRefused;
+            wasteful    = mTexWasteful;
+            block_bytes = mTexBlockBytes;
+            counted     = mTexCounted;
         }
         const std::string info = llformat(
-            "%u in Vulkan's memory (%.0f MB, %u blocks) | made since start: %u on the main thread, %u on the texture "
-            "thread | %u GL's by format or room, %u refused",
-            textures, (double)bytes / (1 << 20), (U32)blocks,
-            gQLExternalTexturesOffered.load(std::memory_order_relaxed),
+            "%u in Vulkan's memory (%.0f MB in %u blocks of %.0f MB; the budget counted %.0f MB) | %u small left to GL | "
+            "made since start: %u on the main thread, %u on the texture thread | %u GL's by format or room, %u refused",
+            textures, (double)bytes / (1 << 20), (U32)blocks, (double)block_bytes / (1 << 20),
+            (double)counted / (1 << 20), wasteful, gQLExternalTexturesOffered.load(std::memory_order_relaxed),
             gQLExternalTexturesOffThread.load(std::memory_order_relaxed), declined, refused);
         static U64 logged_at = 0;
         const U64 now = (U64)std::chrono::duration_cast<std::chrono::milliseconds>(

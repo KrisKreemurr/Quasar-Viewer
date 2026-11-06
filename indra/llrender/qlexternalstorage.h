@@ -27,9 +27,11 @@ public:
     virtual bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height, int levels) = 0;
 
     /// A fetched texture's storage (@a levels levels, uploaded into later), placed among others in memory the provider
-    /// shares out (QuasarVulkanTextures). False: GL allocates as before. On the main thread or the LLImageGL thread,
-    /// with that thread's context current.
-    virtual bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) = 0;
+    /// shares out (QuasarVulkanTextures). @a counted_bytes is what the texture budget counts it as (GL's size); the
+    /// provider declines a texture whose storage would cost it much more than that. False: GL allocates as before. On
+    /// the main thread or the LLImageGL thread, with that thread's context current.
+    virtual bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels,
+                                 unsigned long long counted_bytes) = 0;
 
     /// GL has deleted these names: the provider lets go of what it gave them. Any thread; the provider frees on its own.
     virtual void deleted(int count, const unsigned* textures) = 0;
@@ -47,6 +49,11 @@ extern bool gQLExternalTexturesWanted;
 // thread's uploads). For the status line.
 extern std::atomic<unsigned> gQLExternalTexturesOffered;
 extern std::atomic<unsigned> gQLExternalTexturesOffThread;
+
+// What the provider's texture memory holds past what the texture budget counts for the textures in it (alignment,
+// blocks' free space, RGB stored as RGBA), in bytes: the budget adds it (ALVRAMUsage), so that it sees the video memory
+// textures really take. Set by the provider.
+extern std::atomic<unsigned long long> gQLExternalTextureOverheadBytes;
 
 // While one stands on a thread, the render targets and textures that thread allocates are offered to the provider.
 class QLExternalStorageScope

@@ -30,11 +30,14 @@
 #include "aluniformbuffer.h"
 #include "llimagegl.h"
 #include "llvertexbuffer.h"
+#include "qlexternalstorage.h"
 
 ALVRAMUsage ALVRAMUsage::current()
 {
     ALVRAMUsage usage;
-    usage.mStreamedTextures = LLImageGL::getTextureBytesAllocated(LLImageGLMemory::STREAMED_TEXTURE);
+    // Quasar: with what the textures in Vulkan's memory take there past their counted size (QuasarVulkanTextures).
+    usage.mStreamedTextures = LLImageGL::getTextureBytesAllocated(LLImageGLMemory::STREAMED_TEXTURE) +
+                              gQLExternalTextureOverheadBytes.load(std::memory_order_relaxed);
     usage.mOtherTextures    = LLImageGL::getTextureBytesAllocated(LLImageGLMemory::OTHER_TEXTURE);
     usage.mRenderTargets    = LLImageGL::getTextureBytesAllocated(LLImageGLMemory::RENDER_TARGET);
     usage.mReflectionProbes = LLImageGL::getTextureBytesAllocated(LLImageGLMemory::REFLECTION_PROBE);

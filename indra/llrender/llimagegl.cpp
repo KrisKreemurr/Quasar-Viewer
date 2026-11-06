@@ -55,6 +55,7 @@
 // Quasar: the provider of storage from another API's memory (qlexternalstorage.h), and where it is asked.
 QLExternalStorage* gQLExternalStorage = nullptr;
 bool gQLExternalTexturesWanted = false;
+std::atomic<unsigned long long> gQLExternalTextureOverheadBytes{ 0 };
 std::atomic<unsigned> gQLExternalTexturesOffered{ 0 };
 std::atomic<unsigned> gQLExternalTexturesOffThread{ 0 };
 static thread_local bool sQLExternalStorageWanted = false;
@@ -3877,8 +3878,10 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
     // Either thread: the LLImageGL thread's gGL is its own (thread_local), so its slot 0 holds the name it bound, and
     // the memory objects the storage comes from are shared between the contexts of the share group.
     const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && bound &&
-                          gQLExternalStorage->allocateTexture(bound, getStorageInternalFormat(), width, height,
-                                                              mMipLevels);
+                          gQLExternalStorage->allocateTexture(
+                              bound, getStorageInternalFormat(), width, height, mMipLevels,
+                              (unsigned long long)LLImageGL::dataFormatVRAMBytes(getStorageInternalFormat(), width, height,
+                                                                                 mMipLevels));
     {
         LL_PROFILE_ZONE_NAMED("glTexStorage2D");
         // Dimensions, format and level count are fixed for the lifetime of this texture
