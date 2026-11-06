@@ -6100,6 +6100,7 @@ struct QLVulkanPresenter::Impl
     bool             mGbInPass = false;
     S32              mGbTarget = -1;
     bool             mGbGreater = false, mGbRemap = false;
+    F32              mGbAnisotropy = 1.f;  // GL's level (LLRender::sAnisotropicFilteringLevel) as the sampler was made
     std::vector<GbDraw> mGbDraws;
     // For the status line: this frame's and the last whole frame's.
     U32              mGbFrame = 0;
@@ -6225,8 +6226,8 @@ struct QLVulkanPresenter::Impl
         sampler_info.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         sampler_info.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         sampler_info.addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.anisotropyEnable = mHasAniso ? VK_TRUE : VK_FALSE;
-        sampler_info.maxAnisotropy    = mHasAniso ? 16.f : 1.f;
+        sampler_info.anisotropyEnable = (mHasAniso && mGbAnisotropy > 1.f) ? VK_TRUE : VK_FALSE;
+        sampler_info.maxAnisotropy    = mHasAniso ? llclamp(mGbAnisotropy, 1.f, 16.f) : 1.f;
         sampler_info.maxLod           = VK_LOD_CLAMP_NONE;
         if (vkCreateSampler(mDevice, &sampler_info, nullptr, &mGbSampler) != VK_SUCCESS)
         {
@@ -6358,6 +6359,7 @@ struct QLVulkanPresenter::Impl
         for (GbSlot& slot : mGbSlots)
         {
             if (slot.fence) vkDestroyFence(mDevice, slot.fence, nullptr);
+            if (slot.cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &slot.cmd);
             slot = GbSlot();
         }
         if (mGbTexPool) vkDestroyDescriptorPool(mDevice, mGbTexPool, nullptr);
@@ -6403,7 +6405,7 @@ struct QLVulkanPresenter::Impl
     }
 
     // A view of the whole of a name's image, made the first time it is asked for. Null where the name is not Vulkan's.
-    VkImageView extView(GLuint name, VkImageAspectFlags aspect, VkFormat* format = nullptr)
+    VkImageView extView(GLuint name, VkImageAspectFlags aspect, VkFormat* format = nullptr, U32 levels = U32_MAX)
     {
         std::lock_guard<std::mutex> lock(mExtMutex);
         auto found = mExtTextures.find(name);
@@ -6422,7 +6424,8 @@ struct QLVulkanPresenter::Impl
             view_info.image            = ext.image;
             view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
             view_info.format           = ext.vk;
-            view_info.subresourceRange = { aspect, 0, llmax(1u, ext.levels), 0, 1 };
+            // A name's levels GL samples are fixed for its life: a new discard level makes a new name.
+            view_info.subresourceRange = { aspect, 0, llclamp(levels, 1u, llmax(1u, ext.levels)), 0, 1 };
             if (vkCreateImageView(mDevice, &view_info, nullptr, &ext.view) != VK_SUCCESS)
             {
                 ext.view = VK_NULL_HANDLE;
@@ -6432,9 +6435,21 @@ struct QLVulkanPresenter::Impl
     }
 
     // A texture's descriptor set for the draws, made the first time it is drawn with. Null where it cannot be.
-    VkDescriptorSet gbTextureSet(GLuint texture)
+    // levels: as many as GL samples (its GL_TEXTURE_MAX_LEVEL plus one): the view reaches no further, since the levels
+    // below are not filled. One- and two-channel textures stay GL's: they hold luminance or alpha read through a swizzle
+    // GL's texture keeps (LLImageGL::applySwizzleForDeprecatedFormat), which the view would not.
+    VkDescriptorSet gbTextureSet(GLuint texture, U32 levels)
     {
-        const VkImageView view = extView(texture, VK_IMAGE_ASPECT_COLOR_BIT);
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            const auto found = mExtTextures.find(texture);
+            if (found == mExtTextures.end() || found->second.vk == VK_FORMAT_R8_UNORM ||
+                found->second.vk == VK_FORMAT_R8G8_UNORM)
+            {
+                return VK_NULL_HANDLE;
+            }
+        }
+        const VkImageView view = extView(texture, VK_IMAGE_ASPECT_COLOR_BIT, nullptr, levels);
         if (!view)
         {
             return VK_NULL_HANDLE;
@@ -6623,11 +6638,12 @@ struct QLVulkanPresenter::Impl
         raster.lineWidth   = 1.f;
         VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
         multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        // GL's LLGLDepthTest default, GL_LEQUAL, turned about under reverse-Z.
         VkPipelineDepthStencilStateCreateInfo depth = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
         depth.depthTestEnable  = VK_TRUE;
         depth.depthWriteEnable = VK_TRUE;
-        depth.depthCompareOp   = greater ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
+        // Strict: GL's simple pool draws first, so the pools after it win its ties (LLGLDepthTest's GL_LEQUAL); drawn
+        // last here, the simple prims must lose them to keep that.
+        depth.depthCompareOp   = greater ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_LESS;
         VkPipelineColorBlendAttachmentState blend_attachments[4] = {};
         for (VkPipelineColorBlendAttachmentState& b : blend_attachments)
         {
@@ -6676,8 +6692,12 @@ struct QLVulkanPresenter::Impl
     }
 
     bool gbufferBegin(const GLuint* colors, U32 color_count, GLuint depth, U32 width, U32 height, bool greater,
-                      bool remap_depth)
+                      bool remap_depth, F32 anisotropy)
     {
+        if (!mGbTried)
+        {
+            mGbAnisotropy = anisotropy;  // the sampler's; a later change of GL's level is not followed (a restart is)
+        }
         if (mGbInPass || !createGbObjects())
         {
             return false;
@@ -6724,10 +6744,10 @@ struct QLVulkanPresenter::Impl
                           base_vertex, base_index, uv_offset, color_offset, normal_offset, true);
     }
 
-    bool gbufferDraw(const float mvp[16], const float normal_matrix[16], GLuint texture, U32 base_vertex,
-                     U32 first_index, U32 index_count)
+    bool gbufferDraw(const float mvp[16], const float normal_matrix[16], GLuint texture, U32 texture_levels,
+                     U32 base_vertex, U32 first_index, U32 index_count)
     {
-        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || !gbTextureSet(texture))
+        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || !gbTextureSet(texture, texture_levels))
         {
             return false;
         }
@@ -6894,8 +6914,8 @@ struct QLVulkanPresenter::Impl
             r.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
         }
         vkCmdPipelineBarrier(slot.cmd,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, (U32)releases.size(),
                              releases.data());
         vkEndCommandBuffer(slot.cmd);
@@ -8604,9 +8624,10 @@ void QLVulkanPresenter::gbufferFrame(unsigned frame)
 
 // static
 bool QLVulkanPresenter::gbufferBegin(const unsigned* colors, unsigned color_count, unsigned depth, unsigned width,
-                                     unsigned height, bool greater, bool remap_depth)
+                                     unsigned height, bool greater, bool remap_depth, float anisotropy)
 {
-    return sActive && sActive->gbufferBegin(colors, color_count, depth, width, height, greater, remap_depth);
+    return sActive && sActive->gbufferBegin(colors, color_count, depth, width, height, greater, remap_depth,
+                                            anisotropy);
 }
 
 // static
@@ -8622,9 +8643,11 @@ bool QLVulkanPresenter::gbufferArena(unsigned long long stamp, unsigned vertex_b
 
 // static
 bool QLVulkanPresenter::gbufferDraw(const float mvp[16], const float normal_matrix[16], unsigned texture,
-                                    unsigned base_vertex, unsigned first_index, unsigned index_count)
+                                    unsigned texture_levels, unsigned base_vertex, unsigned first_index,
+                                    unsigned index_count)
 {
-    return sActive && sActive->gbufferDraw(mvp, normal_matrix, texture, base_vertex, first_index, index_count);
+    return sActive && sActive->gbufferDraw(mvp, normal_matrix, texture, texture_levels, base_vertex, first_index,
+                                           index_count);
 }
 
 // static

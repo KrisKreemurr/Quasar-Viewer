@@ -5487,7 +5487,7 @@ U32 LLPipeline::sCurRenderPoolType = 0 ;
 
 // Quasar: a probe face's simple prims drawn by Vulkan (QuasarVulkanProbeDraws), defined with the shadows' Vulkan code.
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer);
-static void ql_vulkan_probe_draws_end();
+static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end();  // what GL must draw after all, or null
 
 void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 {
@@ -5594,7 +5594,8 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 
         // Quasar: a reflection probe face's simple prims are Vulkan's to draw, where it can (QuasarVulkanProbeDraws):
         // the simple pool then draws only what Vulkan could not take, and Vulkan draws the rest once the pools are done.
-        if (gCubeSnapshot && mRT == &mAuxillaryRT && !mHeroProbeManager.isMirrorPass())
+        if (gCubeSnapshot && mRT == &mAuxillaryRT && !mHeroProbeManager.isMirrorPass() &&
+            hasRenderType(LLPipeline::RENDER_TYPE_SIMPLE))
         {
             ql_vulkan_probe_draws_begin(mRT->deferredScreen);
         }
@@ -5664,8 +5665,19 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         gGL.matrixMode(LLRender::MM_MODELVIEW);
         gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
 
-        // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it.
-        ql_vulkan_probe_draws_end();
+        // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
+        // the hand-over failed (Vulkan's draws are then off from now on), GL draws what it left to Vulkan.
+        if (const std::vector<LLDrawInfo*>* lost = ql_vulkan_probe_draws_end())
+        {
+            LLGLDisable blend(GL_BLEND);
+            gDeferredDiffuseProgram.selectVariant()->bind();
+            for (LLDrawInfo* params : *lost)
+            {
+                mSimplePool->pushBatch(*params, true, true);
+            }
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        }
 
         // The stars, the one layer of the sky the G-buffer takes, after every opaque pool, so the depth test spares
         // all they cover. No pool after the opaque ones draws into the G-buffer (glow, alpha and water draw after the
@@ -13411,9 +13423,11 @@ struct QLVulkanShadowView
 // several textures, 32-bit indices, a mesh without normals or colours, a texture not in Vulkan's memory), stays GL's:
 // LLDrawPoolSimple::renderDeferred draws gQLVulkanSimpleLeftovers in place of the pass while it is set.
 static std::vector<LLDrawInfo*> sQLProbeLeftovers;
+static std::vector<LLDrawInfo*> sQLProbeTaken;  // what Vulkan took: GL's to draw after all if the hand-over fails
 std::vector<LLDrawInfo*>* gQLVulkanSimpleLeftovers = nullptr;  // lldrawpoolsimple.cpp
 static bool sQLProbeDrawsOpen = false;
 
+#if QL_VULKAN_SHADOWS
 // The inverse transpose of a model-view's upper 3x3, as the normal matrix, column-major in a 4x4.
 static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
 {
@@ -13440,6 +13454,7 @@ static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
     }
     out[15] = 1.f;
 }
+#endif
 
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
 {
@@ -13459,7 +13474,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
         colors[i] = gbuffer.getTexture(i);
     }
     if (!QLVulkanPresenter::gbufferBegin(colors, color_count, gbuffer.getDepth(), gbuffer.getWidth(),
-                                         gbuffer.getHeight(), LLRender::sReverseZ, !LLRender::sReverseZ))
+                                         gbuffer.getHeight(), LLRender::sReverseZ, !LLRender::sReverseZ,
+                                         LLRender::sAnisotropicFilteringLevel))
     {
         return false;
     }
@@ -13467,6 +13483,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
     const LLMatrix4a view = LLViewerCamera::getCurrent().getModelview();
     const LLMatrix4a proj = gGL.getProjectionMatrix();
     sQLProbeLeftovers.clear();
+    sQLProbeTaken.clear();
     const LLVertexBuffer* last_vb = nullptr;
     bool last_in_arena = false;
     unsigned base_vertex = 0, base_index = 0;
@@ -13514,14 +13531,15 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
                 mvp.setMul(modelview, proj);
                 F32 normal_matrix[16];
                 ql_normal_matrix(modelview, normal_matrix);
-                drawn = QLVulkanPresenter::gbufferDraw(mvp.getF32ptr(), normal_matrix, texture, base_vertex,
+                // The levels GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
+                const U32 levels = image->getUseMipMaps()
+                                       ? (U32)llmax(1, image->getMaxDiscardLevel() - image->getDiscardLevel() + 1)
+                                       : 1u;
+                drawn = QLVulkanPresenter::gbufferDraw(mvp.getF32ptr(), normal_matrix, texture, levels, base_vertex,
                                                        base_index + params->mOffset, params->mCount);
             }
         }
-        if (!drawn)
-        {
-            sQLProbeLeftovers.push_back(params);
-        }
+        (drawn ? sQLProbeTaken : sQLProbeLeftovers).push_back(params);
     }
     gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
     sQLProbeDrawsOpen = true;
@@ -13532,24 +13550,29 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer)
 #endif
 }
 
-static void ql_vulkan_probe_draws_end()
+static const std::vector<LLDrawInfo*>* ql_vulkan_probe_draws_end()
 {
     gQLVulkanSimpleLeftovers = nullptr;
     if (!sQLProbeDrawsOpen)
     {
-        return;
+        return nullptr;
     }
     sQLProbeDrawsOpen = false;
 #if QL_VULKAN_SHADOWS
     gGL.flush();
-    QLVulkanPresenter::gbufferEnd();
+    if (!QLVulkanPresenter::gbufferEnd() && !sQLProbeTaken.empty())
+    {
+        return &sQLProbeTaken;  // GL draws them (renderGeomDeferred); cleared at the next begin
+    }
 #endif
+    return nullptr;
 }
 
 std::string ql_vulkan_probe_draws_info()
 {
 #if QL_VULKAN_SHADOWS
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
+    QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());  // the counts move on with frames that draw no face
     return wanted() ? QLVulkanPresenter::gbufferInfo() : std::string("off (QuasarVulkanProbeDraws)");
 #else
     return "not on this platform";

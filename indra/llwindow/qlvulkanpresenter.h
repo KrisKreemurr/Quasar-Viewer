@@ -196,12 +196,13 @@ public:
     /// none of them: they were left to Vulkan).
     static void gbufferFrame(unsigned frame);
     static bool gbufferBegin(const unsigned* colors, unsigned color_count, unsigned depth, unsigned width,
-                             unsigned height, bool greater, bool remap_depth);
+                             unsigned height, bool greater, bool remap_depth, float anisotropy);
     static bool gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                              unsigned normal_offset, unsigned uv_offset, unsigned color_offset, unsigned vertex_count,
                              unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index);
     static bool gbufferDraw(const float mvp[16], const float normal_matrix[16], unsigned texture,
-                            unsigned base_vertex, unsigned first_index, unsigned index_count);
+                            unsigned texture_levels, unsigned base_vertex, unsigned first_index,
+                            unsigned index_count);
     static bool gbufferEnd();
     static void gbufferAbandon();
     static std::string gbufferInfo();
