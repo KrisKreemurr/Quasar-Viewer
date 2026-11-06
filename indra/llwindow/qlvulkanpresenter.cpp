@@ -2755,17 +2755,31 @@ struct QLVulkanPresenter::Impl
     };
 
     // What llrender talks to: allocation on the main thread, deletions from any (queued for the main thread).
+    // It outlives the presenter (never deleted: llrender's threads may hold the pointer); shutdown clears its owner under
+    // sExtOwnerMutex, which every call holds, so no call runs into a presenter going or gone.
     class ExtStorage : public QLExternalStorage
     {
     public:
-        explicit ExtStorage(Impl& owner) : mOwner(owner) {}
+        explicit ExtStorage(Impl& owner) : mOwnerPtr(&owner) {}
+        void close()
+        {
+            std::lock_guard<std::mutex> lock(sExtOwnerMutex);
+            mOwnerPtr = nullptr;
+        }
         bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height,
                       int levels) override
         {
-            return mOwner.extAllocate(texture, target, internal_format, width, height, levels);
+            std::lock_guard<std::mutex> lock(sExtOwnerMutex);
+            return mOwnerPtr && mOwnerPtr->extAllocate(texture, target, internal_format, width, height, levels);
         }
         void deleted(int count, const unsigned* textures) override
         {
+            std::lock_guard<std::mutex> owner_lock(sExtOwnerMutex);
+            if (!mOwnerPtr)
+            {
+                return;
+            }
+            Impl& mOwner = *mOwnerPtr;
             // Out of the map at once, by value: GL may hand the name out again before the next present, to a target
             // given Vulkan's memory anew.
             std::lock_guard<std::mutex> lock(mOwner.mExtMutex);
@@ -2781,17 +2795,24 @@ struct QLVulkanPresenter::Impl
         }
         bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) override
         {
-            return mOwner.texAllocate(texture, internal_format, width, height, levels);
+            std::lock_guard<std::mutex> lock(sExtOwnerMutex);
+            return mOwnerPtr && mOwnerPtr->texAllocate(texture, internal_format, width, height, levels);
         }
         bool owns(unsigned texture) const override
         {
-            std::lock_guard<std::mutex> lock(mOwner.mExtMutex);
-            return mOwner.mExtTextures.count(texture) != 0;
+            std::lock_guard<std::mutex> owner_lock(sExtOwnerMutex);
+            if (!mOwnerPtr)
+            {
+                return false;
+            }
+            std::lock_guard<std::mutex> lock(mOwnerPtr->mExtMutex);
+            return mOwnerPtr->mExtTextures.count(texture) != 0;
         }
 
     private:
-        Impl& mOwner;
+        Impl* mOwnerPtr;
     };
+    static inline std::mutex sExtOwnerMutex;  // held by every ExtStorage call, and by shutdown as it closes it
 
     mutable std::mutex mExtMutex;
     std::unordered_map<GLuint, ExtTexture> mExtTextures;
@@ -2820,7 +2841,7 @@ struct QLVulkanPresenter::Impl
     bool        mExtTested = false;
     bool        mExtPassed = false;  // at least the G-buffer's formats passed
     std::string mExtNote = "not tested yet (QuasarVulkanTargets)";
-    std::unique_ptr<ExtStorage> mExtStorage;
+    ExtStorage* mExtStorage = nullptr;  // never deleted (see ExtStorage)
     U64         mExtBytes = 0;
 
     static S32 extFormatIndex(GLenum gl_format)
@@ -3284,8 +3305,8 @@ struct QLVulkanPresenter::Impl
         cleanup();
         if (mExtPassed)
         {
-            mExtStorage = std::make_unique<ExtStorage>(*this);
-            gQLExternalStorage = mExtStorage.get();
+            mExtStorage = new ExtStorage(*this);
+            gQLExternalStorage = mExtStorage;
             textureTest();  // piece 2a: whether textures could share Vulkan's memory (nothing uses the answer yet)
         }
         return mExtPassed;
@@ -3725,6 +3746,10 @@ struct QLVulkanPresenter::Impl
         gl.ImportMemoryWin32HandleEXT(block.glMemory, block.size,
                                       mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
                                       handle);
+        // Done before the block is given out: the other context of the share group (the main thread's or the LLImageGL
+        // thread's) may take a texture from it next, and a threaded driver may not have run the import yet. Rare (a
+        // block holds many textures), so a finish is no cost.
+        gl.Finish();
         block.free[0] = block.size;
         // A free block, or a new one at the end.
         for (size_t i = 0; i < mTexBlocks.size(); ++i)
@@ -6766,9 +6791,13 @@ struct QLVulkanPresenter::Impl
     void shutdown()
     {
         // Render targets made from now on are GL's own; those already in Vulkan's memory keep GL's hold on it.
-        if (mExtStorage && gQLExternalStorage == mExtStorage.get())
+        if (mExtStorage)
         {
-            gQLExternalStorage = nullptr;
+            if (gQLExternalStorage == mExtStorage)
+            {
+                gQLExternalStorage = nullptr;
+            }
+            mExtStorage->close();  // waits for a call in flight (the LLImageGL thread's), then lets none in
         }
 #if QL_HAS_STREAMLINE
         if (mFGOn)

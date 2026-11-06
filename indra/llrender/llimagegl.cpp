@@ -495,11 +495,12 @@ void LLImageGL::cleanupClass()
             forget_tex_images((U32)sFreeList[i].size(), sFreeList[i].data());
             if (gl_alive)
             {
-                glDeleteTextures((GLsizei)sFreeList[i].size(), sFreeList[i].data());
+                // Quasar: the provider lets go before GL frees the names, which another thread can be handed at once.
                 if (gQLExternalStorage)
                 {
                     gQLExternalStorage->deleted((S32)sFreeList[i].size(), sFreeList[i].data());
                 }
+                glDeleteTextures((GLsizei)sFreeList[i].size(), sFreeList[i].data());
             }
             sFreeList[i].resize(0);
         }
@@ -1983,12 +1984,13 @@ void LLImageGL::updateClass()
     {
         gGL.forgetTextures((S32)sFreeList[idx].size(), sFreeList[idx].data());
         forget_tex_images((U32)sFreeList[idx].size(), sFreeList[idx].data());
-        glDeleteTextures((GLsizei)sFreeList[idx].size(), sFreeList[idx].data());
         if (gQLExternalStorage)
         {
-            // Quasar: storage another API gave these names goes with them.
+            // Quasar: storage another API gave these names goes with them, told before GL frees the names: the
+            // LLImageGL thread can be handed a freed name at once, and its new storage must not be taken for the old.
             gQLExternalStorage->deleted((S32)sFreeList[idx].size(), sFreeList[idx].data());
         }
+        glDeleteTextures((GLsizei)sFreeList[idx].size(), sFreeList[idx].data());
         sFreeList[idx].resize(0);
     }
 
