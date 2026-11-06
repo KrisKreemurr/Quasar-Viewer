@@ -9,6 +9,8 @@
 #ifndef QL_EXTERNAL_STORAGE_H
 #define QL_EXTERNAL_STORAGE_H
 
+#include <atomic>
+
 // GL can use memory Vulkan allocates (GL_EXT_memory_object); Vulkan cannot use GL's. A texture that both are to draw
 // into or read is therefore given storage from Vulkan's memory: LLImageGL::allocateTexture2D asks the provider below,
 // while a QLExternalStorageScope stands on the allocating thread, before it makes storage of its own. The provider
@@ -39,6 +41,11 @@ extern QLExternalStorage* gQLExternalStorage;
 
 // Whether fetched textures are offered to the provider too (LLImageGL::allocateTextureStorage, on the main thread).
 extern bool gQLExternalTexturesWanted;
+
+// Fetched textures given storage while gQLExternalTexturesWanted: on the main thread (offered), off it (GL's: the
+// LLImageGL thread's uploads). For the status line.
+extern std::atomic<unsigned> gQLExternalTexturesOffered;
+extern std::atomic<unsigned> gQLExternalTexturesOffThread;
 
 // While one stands on a thread, the render targets and textures that thread allocates are offered to the provider.
 class QLExternalStorageScope

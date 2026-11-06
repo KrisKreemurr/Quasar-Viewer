@@ -188,6 +188,16 @@ void QLVulkanPost::tick()
 }
 
 // static
+std::string QLVulkanPost::textureLine()
+{
+#if QL_VULKAN_PRESENTER
+    return QLVulkanPresenter::textureInfo();
+#else
+    return "not on this platform";
+#endif
+}
+
+// static
 std::string QLVulkanPost::geometryLine()
 {
 #if QL_VULKAN_PRESENTER

@@ -49,6 +49,7 @@
 #include "qlvulkanshaders.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -3902,6 +3903,44 @@ struct QLVulkanPresenter::Impl
         return true;
     }
 
+    // The textures' own line: how many are in Vulkan's memory first (the line is cut at the screen's edge), then where
+    // the rest went. Logged every half minute too.
+    std::string textureInfo() const
+    {
+        if (!mTexShared)
+        {
+            return "not in Vulkan's memory (QuasarVulkanTargets and QuasarVulkanTextures, restart; " + mTexNote + ")";
+        }
+        U32 textures = 0;
+        size_t blocks = 0;
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            for (const auto& entry : mExtTextures)
+            {
+                textures += entry.second.block >= 0 ? 1 : 0;
+            }
+            for (const TexBlock& b : mTexBlocks)
+            {
+                blocks += b.memory ? 1 : 0;
+            }
+        }
+        const std::string info = llformat(
+            "%u in Vulkan's memory (%.0f MB, %u blocks) | made since start: %u on the main thread, %u off it (GL's) | "
+            "%u GL's by format or room, %u refused",
+            textures, (double)mTexBytes / (1 << 20), (U32)blocks,
+            gQLExternalTexturesOffered.load(std::memory_order_relaxed),
+            gQLExternalTexturesOffThread.load(std::memory_order_relaxed), mTexDeclined, mTexRefused);
+        static U64 logged_at = 0;
+        const U64 now = (U64)std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - logged_at > 30000)
+        {
+            logged_at = now;
+            LL_INFOS("Vulkan") << "Textures: " << info << LL_ENDL;
+        }
+        return info;
+    }
+
     std::string targetInfo() const
     {
         if (!mExtPassed)
@@ -7592,6 +7631,12 @@ std::string QLVulkanPresenter::shadowInfo()
 bool QLVulkanPresenter::depthTest()
 {
     return sActive && sActive->depthTest();
+}
+
+// static
+std::string QLVulkanPresenter::textureInfo()
+{
+    return sActive ? sActive->textureInfo() : std::string("needs Vulkan presentation");
 }
 
 // static

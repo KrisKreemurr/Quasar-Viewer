@@ -698,6 +698,8 @@ public:
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan geometry: " + QLVulkanPost::geometryLine());
             ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan textures: " + QLVulkanPost::textureLine());
+            ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan shadows: " + ql_vulkan_shadows_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar GL shadow draws: " + ql_shadow_gl_draws_info());

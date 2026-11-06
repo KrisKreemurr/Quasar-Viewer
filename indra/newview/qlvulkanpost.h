@@ -46,6 +46,7 @@ public:
     /// about five seconds after login (QuasarVulkanGeometryTest).
     static void tick();
     static std::string geometryLine();
+    static std::string textureLine();  // fetched textures in Vulkan's memory (QuasarVulkanTextures)
 };
 
 /// QuasarUILayer: the viewer's 2D interface (windows, chat, menus, toolbars, the debug text) drawn into a layer of its

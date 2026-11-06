@@ -182,6 +182,7 @@ public:
     /// QLExternalStorageScope are given Vulkan's memory. True when they passed. On the main thread, GL current.
     static bool targetTest();
     static std::string targetInfo();
+    static std::string textureInfo();  // fetched textures in Vulkan's memory (QuasarVulkanTextures)
 
     // ---- Shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------------------------------------
 

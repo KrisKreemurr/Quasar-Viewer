@@ -55,6 +55,8 @@
 // Quasar: the provider of storage from another API's memory (qlexternalstorage.h), and where it is asked.
 QLExternalStorage* gQLExternalStorage = nullptr;
 bool gQLExternalTexturesWanted = false;
+std::atomic<unsigned> gQLExternalTexturesOffered{ 0 };
+std::atomic<unsigned> gQLExternalTexturesOffThread{ 0 };
 static thread_local bool sQLExternalStorageWanted = false;
 
 QLExternalStorageScope::QLExternalStorageScope(bool wanted) : mPrevious(sQLExternalStorageWanted)
@@ -3858,6 +3860,11 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
     // it can give it; the uploads into it are GL's as ever.
     // The name is the one bound on unit 0 (every caller binds the name it is making storage for there: createGLTexture's
     // new name, scaleDown's new name), not mTexName, which is the old texture's or none yet.
+    if (gQLExternalTexturesWanted && gQLExternalStorage)
+    {
+        (on_main_thread() ? gQLExternalTexturesOffered : gQLExternalTexturesOffThread)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
     const U32 bound = gGL.getCurrentTexUnitIndex() == 0 ? gGL.getTextureSlot(0)->getCurrTexture() : 0;
     const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && bound &&
                           on_main_thread() &&
