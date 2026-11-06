@@ -3678,6 +3678,7 @@ struct QLVulkanPresenter::Impl
     U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0, mTexWasteful = 0;
     U64  mTexBytes = 0;
     U64  mTexBlockBytes = 0;  // every live block's size
+    std::unordered_map<U64, U64> mTexWastefulShapes;  // format, levels and size of images found wasteful: their count
     U64  mTexCounted = 0;     // what the budget counts the textures in them as
     // A texture whose image would take more than this times what the budget counts it as stays GL's: small ones, which
     // NVIDIA's alignment rounds up to far more than their size.
@@ -3699,7 +3700,7 @@ struct QLVulkanPresenter::Impl
                 if (mTexFormatState[i] == 0)
                 {
                     mTexFormatState[i] = texFormatShareable(TEX_FORMATS[i].vk) ? 1 : 2;
-                    mTexChecksLeft[i]  = 64;
+                    mTexChecksLeft[i]  = 4;  // each check waits for a threaded driver: ~1 ms
                     LL_INFOS("Vulkan") << "Textures in Vulkan's memory: " << TEX_FORMATS[i].name
                                        << (mTexFormatState[i] == 1 ? " shared" : " stays GL's") << LL_ENDL;
                 }
@@ -3918,11 +3919,22 @@ struct QLVulkanPresenter::Impl
         info.usage         = texUsage(TEX_FORMATS[index].vk);
         info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(mDevice, &info, nullptr, &ext.image) != VK_SUCCESS)
+        // An image's size is the same for the same format, size and levels: a wasteful one is known without making it.
+        const U64 shape = (U64)index | ((U64)levels << 5) | ((U64)(width & 0xFFFF) << 10) | ((U64)(height & 0xFFFF) << 26);
+        const auto known = mTexWastefulShapes.find(shape);
+        if (counted_bytes && known != mTexWastefulShapes.end() && known->second == counted_bytes)
         {
-            ext.image = VK_NULL_HANDLE;
-            ++mTexDeclined;
+            ++mTexWasteful;
             return false;
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan texture - vk image");
+            if (vkCreateImage(mDevice, &info, nullptr, &ext.image) != VK_SUCCESS)
+            {
+                ext.image = VK_NULL_HANDLE;
+                ++mTexDeclined;
+                return false;
+            }
         }
         VkMemoryRequirements req = {};
         vkGetImageMemoryRequirements(mDevice, ext.image, &req);
@@ -3930,6 +3942,7 @@ struct QLVulkanPresenter::Impl
         {
             vkDestroyImage(mDevice, ext.image, nullptr);
             ++mTexWasteful;
+            mTexWastefulShapes[shape] = counted_bytes;
             return false;  // GL's: Vulkan would take far more for it than it is counted as
         }
         // A block with room, in a memory type the image can use, or a new one.
@@ -3961,10 +3974,15 @@ struct QLVulkanPresenter::Impl
             ++mTexDeclined;
             return false;
         }
-        gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
-        gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, b.glMemory, (GLuint64)offset);
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan texture - gl storage");
+            gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+            gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, b.glMemory,
+                                      (GLuint64)offset);
+        }
         if (mTexChecksLeft[index] > 0)
         {
+            LL_PROFILE_ZONE_NAMED("vulkan texture - gl check");
             --mTexChecksLeft[index];
             GLint immutable = GL_FALSE;
             gl.GetTextureParameteriv(texture, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
