@@ -2123,6 +2123,12 @@ void LLImageGL::allocateTexture2D(U32 target, S32 intformat, S32 width, S32 heig
     // Quasar: storage from the external provider's memory, where a scope asks for it and the provider can give it
     // (no pixels: render targets, whose contents are drawn).
     if (pixels == nullptr && target == GL_TEXTURE_2D && QLExternalStorageScope::active() &&
+        gGL.getCurrentTexUnitIndex() != 0)
+    {
+        LL_INFOS("Vulkan") << "Render target not offered to Vulkan's memory: texture unit "
+                           << gGL.getCurrentTexUnitIndex() << " active, not 0" << LL_ENDL;
+    }
+    if (pixels == nullptr && target == GL_TEXTURE_2D && QLExternalStorageScope::active() &&
         gGL.getCurrentTexUnitIndex() == 0)
     {
         const U32 name = gGL.getTextureSlot(0)->getCurrTexture();

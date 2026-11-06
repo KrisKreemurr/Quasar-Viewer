@@ -818,6 +818,25 @@ void LLPipeline::applyRenderInputs()
     {
         applyRenderInputs(*taken);
     }
+#if QL_VULKAN_SHADOWS
+    // Quasar: the first reconcile runs before Vulkan presents, so the probe pack is made in GL's memory and kept as it
+    // is by every reconcile after (its size does not follow the window's). Once the render target self-test has
+    // passed, the pack is reconciled again, once, which makes what is GL's again in Vulkan's memory (ensureResources).
+    static bool ql_probe_pack_moved = false;
+    static const bool ql_targets_wanted = gSavedSettings.getBOOL("QuasarVulkanTargets");
+    if (ql_targets_wanted && !ql_probe_pack_moved && !mRenderInputRequests.overriding() &&
+        QLVulkanPresenter::targetTest())
+    {
+        ql_probe_pack_moved = true;
+        LLRenderTarget& gbuffer = mAuxillaryRT.deferredScreen;
+        const U32 name = gbuffer.getNumTextures() ? gbuffer.getTexture(0) : 0;
+        if (name && gQLExternalStorage && !gQLExternalStorage->owns(name))
+        {
+            LL_INFOS("Vulkan") << "The probe pack was made in GL's memory: reconciled again for Vulkan's" << LL_ENDL;
+            rebuildGLBuffers(mLatchedInputs, RebuildCause::Setting);
+        }
+    }
+#endif
 }
 
 void LLPipeline::loadRenderInputs()
@@ -1056,6 +1075,18 @@ void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRende
             // presenter's render target self-test has passed: piece 1 of the probes and the main view in Vulkan. GL
             // draws into them as ever; nothing changes on screen.
             const bool vulkan_memory = ql_vulkan_targets_wanted(Plan::packOf(id));
+            // A target kept from before the self-test passed (the first reconcile runs before Vulkan presents) is GL's:
+            // it is made again, in Vulkan's memory.
+            if (vulkan_memory && gQLExternalStorage)
+            {
+                const U32 name = target.getNumTextures() ? target.getTexture(0) : target.getDepth();
+                if (name && !gQLExternalStorage->owns(name))
+                {
+                    LL_INFOS("Vulkan") << "Probe target " << Plan::name(id)
+                                       << " was made in GL's memory: made again in Vulkan's" << LL_ENDL;
+                    target.release();
+                }
+            }
             QLExternalStorageScope vulkan_storage(vulkan_memory);
             const LLRenderTarget::EnsureResult result = resource.mDepthFrom
                 ? target.ensure(*resource.mDesc, *resourceTarget(*resource.mDepthFrom))

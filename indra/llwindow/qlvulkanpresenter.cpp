@@ -2779,7 +2779,12 @@ struct QLVulkanPresenter::Impl
                       int levels) override
         {
             std::lock_guard<std::mutex> lock(sExtOwnerMutex);
-            return mOwnerPtr && mOwnerPtr->extAllocate(texture, target, internal_format, width, height, levels);
+            const bool given = mOwnerPtr && mOwnerPtr->extAllocate(texture, target, internal_format, width, height, levels);
+            // Render targets are made rarely (as the render inputs change): every one is logged.
+            LL_INFOS("Vulkan") << "Render target in Vulkan's memory: GL name " << texture << ", " << width << "x" << height
+                               << " format 0x" << std::hex << internal_format << std::dec << ", " << levels
+                               << " levels: " << (given ? "given" : "declined, GL's own") << LL_ENDL;
+            return given;
         }
         void deleted(int count, const unsigned* textures) override
         {
