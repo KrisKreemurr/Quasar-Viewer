@@ -214,6 +214,10 @@ public:
 
     static bool shadowEnd(unsigned depth_texture);
 
+    /// Whether GL's signals and waits around a map name the arenas and depth image they hand over (the default), or
+    /// nothing (QuasarVulkanShadowSignalObjects off: an experiment on what makes the signal wait).
+    static void shadowSignalObjects(bool name_them);
+
     /// Leaves a begun map without drawing it.
     static void shadowAbandon();
 

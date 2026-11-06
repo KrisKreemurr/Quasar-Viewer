@@ -13321,6 +13321,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
     rigged_leftovers.clear();
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
+    static LLCachedControl<bool> signal_objects(gSavedSettings, "QuasarVulkanShadowSignalObjects", true);
+    QLVulkanPresenter::shadowSignalObjects(signal_objects());
     if (!ql_vulkan_shadows_wanted() || gPipeline.resourceInputs().mShadowDetail > 2)
     {
         return false;

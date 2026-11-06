@@ -2894,6 +2894,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanShadowSignalObjects</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experiment): whether GL's semaphore signal and wait around each Vulkan shadow map name the buffers and image they hand over. Off names nothing, to see whether naming them is what makes the signal wait for NVIDIA's driver thread (Tracy: vulkan shadow - gl signal). Watch for wrong or missing shadows when off.</string>
+            <key>Persist</key>
+            <integer>0</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanShadowsRigged</key>
         <map>
             <key>Comment</key>

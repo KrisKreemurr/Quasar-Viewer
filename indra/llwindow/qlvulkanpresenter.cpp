@@ -2749,6 +2749,7 @@ struct QLVulkanPresenter::Impl
         U64             serial = 0;  // which submission this slot last carried
     };
 
+    static inline bool sShSignalObjects = true;
     bool        mShTried = false;
     bool        mShReady = false;
     std::string mShNote = "off (QuasarVulkanShadows)";
@@ -3659,7 +3660,16 @@ struct QLVulkanPresenter::Impl
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl signal");
-            gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+            // QuasarVulkanShadowSignalObjects off (an experiment): the signal names nothing it hands over, in case naming
+            // the arenas and the depth image is what makes NVIDIA's driver wait for its thread here.
+            if (sShSignalObjects)
+            {
+                gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+            }
+            else
+            {
+                gl.SignalSemaphoreEXT(mShGLDoneGL, 0, nullptr, 0, nullptr, nullptr);
+            }
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl flush");
@@ -3793,7 +3803,14 @@ struct QLVulkanPresenter::Impl
         // GL: back once Vulkan is done (on the GPU), and the map into GL's own texture.
         {
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl wait");
-            gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+            if (sShSignalObjects)
+            {
+                gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
+            }
+            else
+            {
+                gl.WaitSemaphoreEXT(mShVKDoneGL, 0, nullptr, 0, nullptr, nullptr);
+            }
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl copy out");
@@ -5399,6 +5416,12 @@ bool QLVulkanPresenter::shadowDrawRigged(const float mvp[16], unsigned palette, 
 bool QLVulkanPresenter::shadowEnd(unsigned depth_texture)
 {
     return sActive && sActive->shadowEnd((GLuint)depth_texture);
+}
+
+// static
+void QLVulkanPresenter::shadowSignalObjects(bool name_them)
+{
+    Impl::sShSignalObjects = name_them;
 }
 
 // static
