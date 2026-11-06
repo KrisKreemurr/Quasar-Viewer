@@ -42,8 +42,8 @@ public:
 
     static std::string statusLine();
 
-    /// Once a frame, with the window's GL context current: the shared-geometry self-test, run once, about five seconds
-    /// after login (QuasarVulkanGeometryTest).
+    /// Once a frame, with the window's GL context current: the shared-geometry and shadow map self-tests, run once,
+    /// about five seconds after login (QuasarVulkanGeometryTest).
     static void tick();
     static std::string geometryLine();
 };

@@ -49,6 +49,7 @@
 #include "qlvulkanshaders.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -119,6 +120,9 @@ namespace
     typedef void (APIENTRY* QL_PFN_ImportSemaphoreWin32Handle)(GLuint, GLenum, void*);
     typedef void (APIENTRY* QL_PFN_SemaphoreOp)(GLuint, GLuint, const GLuint*, GLuint, const GLuint*, const GLenum*);
     typedef void (APIENTRY* QL_PFN_GetUnsignedBytei_v)(GLenum, GLuint, GLubyte*);
+    typedef void (APIENTRY* QL_PFN_TextureStorage2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei);
+    typedef void (APIENTRY* QL_PFN_CopyImageSubData)(GLuint, GLenum, GLint, GLint, GLint, GLint, GLuint, GLenum, GLint,
+                                                     GLint, GLint, GLint, GLsizei, GLsizei, GLsizei);
 
     struct QLGLInterop
     {
@@ -155,6 +159,8 @@ namespace
         QL_PFN_SemaphoreOp                  SignalSemaphoreEXT = nullptr;
         QL_PFN_SemaphoreOp                  WaitSemaphoreEXT = nullptr;
         QL_PFN_GetUnsignedBytei_v           GetUnsignedBytei_vEXT = nullptr;
+        QL_PFN_TextureStorage2D             TextureStorage2D = nullptr;
+        QL_PFN_CopyImageSubData             CopyImageSubData = nullptr;
 
         bool load()
         {
@@ -193,6 +199,8 @@ namespace
             QL_GL_LOAD(SignalSemaphoreEXT, "glSignalSemaphoreEXT");
             QL_GL_LOAD(WaitSemaphoreEXT, "glWaitSemaphoreEXT");
             QL_GL_LOAD(GetUnsignedBytei_vEXT, "glGetUnsignedBytei_vEXT");
+            QL_GL_LOAD(TextureStorage2D, "glTextureStorage2D");
+            QL_GL_LOAD(CopyImageSubData, "glCopyImageSubData");
 #undef QL_GL_LOAD
             return true;
         }
@@ -393,6 +401,20 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdDispatch);
     QL_VK_FN(vkCmdCopyBuffer);
     QL_VK_FN(vkCmdFillBuffer);
+    QL_VK_FN(vkCreateRenderPass);
+    QL_VK_FN(vkDestroyRenderPass);
+    QL_VK_FN(vkCreateFramebuffer);
+    QL_VK_FN(vkDestroyFramebuffer);
+    QL_VK_FN(vkCreateGraphicsPipelines);
+    QL_VK_FN(vkCmdBeginRenderPass);
+    QL_VK_FN(vkCmdEndRenderPass);
+    QL_VK_FN(vkCmdDraw);
+    QL_VK_FN(vkCmdDrawIndexed);
+    QL_VK_FN(vkCmdBindVertexBuffers);
+    QL_VK_FN(vkCmdBindIndexBuffer);
+    QL_VK_FN(vkCmdSetViewport);
+    QL_VK_FN(vkCmdSetScissor);
+    QL_VK_FN(vkCmdCopyBufferToImage);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -627,6 +649,20 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdDispatch);
         QL_VK_DEVICE(vkCmdCopyBuffer);
         QL_VK_DEVICE(vkCmdFillBuffer);
+        QL_VK_DEVICE(vkCreateRenderPass);
+        QL_VK_DEVICE(vkDestroyRenderPass);
+        QL_VK_DEVICE(vkCreateFramebuffer);
+        QL_VK_DEVICE(vkDestroyFramebuffer);
+        QL_VK_DEVICE(vkCreateGraphicsPipelines);
+        QL_VK_DEVICE(vkCmdBeginRenderPass);
+        QL_VK_DEVICE(vkCmdEndRenderPass);
+        QL_VK_DEVICE(vkCmdDraw);
+        QL_VK_DEVICE(vkCmdDrawIndexed);
+        QL_VK_DEVICE(vkCmdBindVertexBuffers);
+        QL_VK_DEVICE(vkCmdBindIndexBuffer);
+        QL_VK_DEVICE(vkCmdSetViewport);
+        QL_VK_DEVICE(vkCmdSetScissor);
+        QL_VK_DEVICE(vkCmdCopyBufferToImage);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -2207,6 +2243,398 @@ struct QLVulkanPresenter::Impl
         return mGeoPassed;
     }
 
+    // ---- step 1 of geometry in Vulkan: the shadow map hand-over (QuasarVulkanGeometryTest) ----------------------
+
+    // Once, after login, with the window's GL context current: Vulkan draws into a depth image it allocates and GL
+    // imports, GL copies it into a depth texture of its own made as the viewer's shadow maps are (DEPTH_COMPONENT32F,
+    // immutable), and reads every texel back against what was drawn. That is the hand-over a shadow map drawn in Vulkan
+    // takes before the lighting samples it, and the first thing Vulkan draws rather than copies: a render pass, a
+    // graphics pipeline with no fragment stage, depth only. Waits on the CPU for each step, so it is run once.
+    bool        mDepthTested = false;
+    bool        mDepthPassed = false;
+    std::string mDepthNote = "not tested yet";
+
+    bool depthTest()
+    {
+        if (mDepthTested)
+        {
+            return mDepthPassed;
+        }
+        mDepthTested = true;
+        if (!mActive)
+        {
+            mDepthNote = "not tested: Vulkan does not present";
+            return false;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan shadow map self-test");
+
+        constexpr U32 SIZE = 256;
+        constexpr VkFormat FORMAT = VK_FORMAT_D32_SFLOAT;
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        VkImage         image = VK_NULL_HANDLE;
+        VkDeviceMemory  memory = VK_NULL_HANDLE;
+        HANDLE          memory_handle = nullptr;
+        VkImageView     view = VK_NULL_HANDLE;
+        VkRenderPass    pass = VK_NULL_HANDLE;
+        VkFramebuffer   framebuffer = VK_NULL_HANDLE;
+        VkShaderModule  module = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkPipeline      pipeline = VK_NULL_HANDLE;
+        VkSemaphore     gl_done_vk = VK_NULL_HANDLE, vk_done_vk = VK_NULL_HANDLE;
+        GLuint          gl_done_gl = 0, vk_done_gl = 0;
+        HANDLE          gl_done_handle = nullptr, vk_done_handle = nullptr;
+        GLuint          gl_memory = 0, gl_imported = 0, gl_own = 0;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence         fence = VK_NULL_HANDLE;
+        auto cleanup = [&]()
+        {
+            if (mDevice)
+            {
+                vkDeviceWaitIdle(mDevice);
+            }
+            if (gl.Finish)
+            {
+                gl.Finish();
+            }
+            if (gl_own) gl.DeleteTextures(1, &gl_own);
+            if (gl_imported) gl.DeleteTextures(1, &gl_imported);
+            if (gl_memory) gl.DeleteMemoryObjectsEXT(1, &gl_memory);
+            if (gl_done_gl) gl.DeleteSemaphoresEXT(1, &gl_done_gl);
+            if (vk_done_gl) gl.DeleteSemaphoresEXT(1, &vk_done_gl);
+            if (gl_done_vk) vkDestroySemaphore(mDevice, gl_done_vk, nullptr);
+            if (vk_done_vk) vkDestroySemaphore(mDevice, vk_done_vk, nullptr);
+            if (gl_done_handle) CloseHandle(gl_done_handle);
+            if (vk_done_handle) CloseHandle(vk_done_handle);
+            if (fence) vkDestroyFence(mDevice, fence, nullptr);
+            if (pipeline) vkDestroyPipeline(mDevice, pipeline, nullptr);
+            if (layout) vkDestroyPipelineLayout(mDevice, layout, nullptr);
+            if (module) vkDestroyShaderModule(mDevice, module, nullptr);
+            if (framebuffer) vkDestroyFramebuffer(mDevice, framebuffer, nullptr);
+            if (pass) vkDestroyRenderPass(mDevice, pass, nullptr);
+            if (view) vkDestroyImageView(mDevice, view, nullptr);
+            if (image) vkDestroyImage(mDevice, image, nullptr);
+            if (memory) vkFreeMemory(mDevice, memory, nullptr);
+            if (memory_handle) CloseHandle(memory_handle);
+        };
+        auto fail = [&](const std::string& why)
+        {
+            mDepthNote = "failed: " + why;
+            LL_WARNS("Vulkan") << "Shadow map self-test " << mDepthNote << LL_ENDL;
+            cleanup();
+            return false;
+        };
+
+        VkFormatProperties props = {};
+        vkGetPhysicalDeviceFormatProperties(mPhysical, FORMAT, &props);
+        if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        {
+            return fail("D32_SFLOAT cannot be drawn into");
+        }
+
+        // The depth image, exported, with every use a shadow map could be put to.
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = FORMAT;
+        info.extent        = { SIZE, SIZE, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mDevice, &info, nullptr, &image) != VK_SUCCESS)
+        {
+            image = VK_NULL_HANDLE;
+            return fail("vkCreateImage (D32_SFLOAT)");
+        }
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, image, &req);
+        const U32 type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (type == U32_MAX)
+        {
+            return fail("no device-local memory for a depth image");
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.image = image;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &memory) != VK_SUCCESS)
+        {
+            memory = VK_NULL_HANDLE;
+            return fail("vkAllocateMemory (depth image)");
+        }
+        vkBindImageMemory(mDevice, image, memory, 0);
+        VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view_info.image            = image;
+        view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format           = FORMAT;
+        view_info.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(mDevice, &view_info, nullptr, &view) != VK_SUCCESS)
+        {
+            view = VK_NULL_HANDLE;
+            return fail("vkCreateImageView (depth)");
+        }
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return fail("vkGetMemoryWin32HandleKHR (depth image)");
+        }
+        if (!mKMT)
+        {
+            memory_handle = handle;  // kept open while GL holds the import
+        }
+
+        // GL's import of it, and a depth texture of GL's own, made as a shadow map is.
+        gl.CreateMemoryObjectsEXT(1, &gl_memory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(gl_memory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(gl_memory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateTextures(GL_TEXTURE_2D, 1, &gl_imported);
+        gl.TextureParameteri(gl_imported, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(gl_imported, 1, GL_DEPTH_COMPONENT32F, (GLsizei)SIZE, (GLsizei)SIZE, gl_memory, 0);
+        gl.CreateTextures(GL_TEXTURE_2D, 1, &gl_own);
+        gl.TextureStorage2D(gl_own, 1, GL_DEPTH_COMPONENT32F, (GLsizei)SIZE, (GLsizei)SIZE);
+        gl.Finish();
+        logGLErrors("importing the shadow map self-test's depth image");
+
+        // A render pass with one depth attachment, kept in GENERAL as every shared image is, cleared to 0 (reverse-Z's
+        // far) and stored; a pipeline with no vertex input and no fragment stage.
+        VkAttachmentDescription attachment = {};
+        attachment.format         = FORMAT;
+        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout  = VK_IMAGE_LAYOUT_GENERAL;
+        attachment.finalLayout    = VK_IMAGE_LAYOUT_GENERAL;
+        VkAttachmentReference depth_ref = { 0, VK_IMAGE_LAYOUT_GENERAL };
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.pDepthStencilAttachment = &depth_ref;
+        VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        pass_info.attachmentCount = 1;
+        pass_info.pAttachments    = &attachment;
+        pass_info.subpassCount    = 1;
+        pass_info.pSubpasses      = &subpass;
+        if (vkCreateRenderPass(mDevice, &pass_info, nullptr, &pass) != VK_SUCCESS)
+        {
+            pass = VK_NULL_HANDLE;
+            return fail("vkCreateRenderPass (depth only)");
+        }
+        VkFramebufferCreateInfo fb_info = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fb_info.renderPass      = pass;
+        fb_info.attachmentCount = 1;
+        fb_info.pAttachments    = &view;
+        fb_info.width           = SIZE;
+        fb_info.height          = SIZE;
+        fb_info.layers          = 1;
+        if (vkCreateFramebuffer(mDevice, &fb_info, nullptr, &framebuffer) != VK_SUCCESS)
+        {
+            framebuffer = VK_NULL_HANDLE;
+            return fail("vkCreateFramebuffer (depth only)");
+        }
+        VkShaderModuleCreateInfo module_info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        module_info.codeSize = sizeof(ql_spv_qldepthtest_vert);
+        module_info.pCode    = ql_spv_qldepthtest_vert;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &module) != VK_SUCCESS)
+        {
+            module = VK_NULL_HANDLE;
+            return fail("vkCreateShaderModule (depth test)");
+        }
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        if (vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &layout) != VK_SUCCESS)
+        {
+            layout = VK_NULL_HANDLE;
+            return fail("vkCreatePipelineLayout (depth test)");
+        }
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stage.module = module;
+        stage.pName  = "main";
+        VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport viewport = { 0.f, 0.f, (float)SIZE, (float)SIZE, 0.f, 1.f };
+        VkRect2D scissor = { { 0, 0 }, { SIZE, SIZE } };
+        VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        viewport_state.viewportCount = 1;
+        viewport_state.pViewports    = &viewport;
+        viewport_state.scissorCount  = 1;
+        viewport_state.pScissors     = &scissor;
+        VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode    = VK_CULL_MODE_NONE;
+        raster.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth   = 1.f;
+        VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        depth.depthTestEnable  = VK_TRUE;
+        depth.depthWriteEnable = VK_TRUE;
+        depth.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
+        VkPipelineColorBlendStateCreateInfo blend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        VkGraphicsPipelineCreateInfo pipeline_info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pipeline_info.stageCount          = 1;
+        pipeline_info.pStages             = &stage;
+        pipeline_info.pVertexInputState   = &vertex_input;
+        pipeline_info.pInputAssemblyState = &assembly;
+        pipeline_info.pViewportState      = &viewport_state;
+        pipeline_info.pRasterizationState = &raster;
+        pipeline_info.pMultisampleState   = &multisample;
+        pipeline_info.pDepthStencilState  = &depth;
+        pipeline_info.pColorBlendState    = &blend;
+        pipeline_info.layout              = layout;
+        pipeline_info.renderPass          = pass;
+        pipeline_info.subpass             = 0;
+        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        {
+            pipeline = VK_NULL_HANDLE;
+            return fail("vkCreateGraphicsPipelines (depth only)");
+        }
+
+        if (!createSharedSemaphore(gl_done_vk, gl_done_gl, gl_done_handle) ||
+            !createSharedSemaphore(vk_done_vk, vk_done_gl, vk_done_handle))
+        {
+            return fail("its semaphores could not be shared");
+        }
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkAllocateCommandBuffers(mDevice, &cmd_info, &cmd) != VK_SUCCESS ||
+            vkCreateFence(mDevice, &fence_info, nullptr, &fence) != VK_SUCCESS)
+        {
+            return fail("no command buffer");
+        }
+
+        // GL hands the image over; Vulkan takes it from the external queue, draws, and gives it back.
+        const GLenum general = GL_LAYOUT_GENERAL_EXT;
+        gl.SignalSemaphoreEXT(gl_done_gl, 0, nullptr, 1, &gl_imported, &general);
+        gl.Flush();
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+        VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        acquire.srcAccessMask       = 0;
+        acquire.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        acquire.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        acquire.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        acquire.dstQueueFamilyIndex = mQueueFamily;
+        acquire.image               = image;
+        acquire.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &acquire);
+        VkClearValue clear = {};
+        clear.depthStencil = { 0.f, 0 };
+        VkRenderPassBeginInfo pass_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        pass_begin.renderPass      = pass;
+        pass_begin.framebuffer     = framebuffer;
+        pass_begin.renderArea      = scissor;
+        pass_begin.clearValueCount = 1;
+        pass_begin.pClearValues    = &clear;
+        vkCmdBeginRenderPass(cmd, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        VkImageMemoryBarrier release = acquire;
+        release.srcAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        release.dstAccessMask       = 0;
+        release.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        release.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        release.srcQueueFamilyIndex = mQueueFamily;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &release);
+        vkEndCommandBuffer(cmd);
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &gl_done_vk;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &vk_done_vk;
+        if (vkQueueSubmit(mQueue, 1, &submit, fence) != VK_SUCCESS)
+        {
+            return fail("the depth pass could not be submitted");
+        }
+        vkWaitForFences(mDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+
+        // GL takes it back, copies it into its own depth texture, and reads that.
+        gl.WaitSemaphoreEXT(vk_done_gl, 0, nullptr, 1, &gl_imported, &general);
+        gl.CopyImageSubData(gl_imported, GL_TEXTURE_2D, 0, 0, 0, 0, gl_own, GL_TEXTURE_2D, 0, 0, 0, 0, (GLsizei)SIZE,
+                            (GLsizei)SIZE, 1);
+        std::vector<F32> texels(SIZE * SIZE, -1.f);
+        gl.GetTextureSubImage(gl_own, 0, 0, 0, 0, (GLsizei)SIZE, (GLsizei)SIZE, 1, GL_DEPTH_COMPONENT, GL_FLOAT,
+                              (GLsizei)(texels.size() * sizeof(F32)), texels.data());
+        logGLErrors("the shadow map self-test");
+
+        // What was drawn at each texel, with Vulkan's row r as GL's row r (the memory is one), and the same turned over,
+        // to tell the two apart if the first does not hold.
+        constexpr F32 TOLERANCE = 1e-5f;
+        U32 bad = 0, bad_flipped = 0;
+        F32 worst = 0.f;
+        for (U32 r = 0; r < SIZE; ++r)
+        {
+            for (U32 x = 0; x < SIZE; ++x)
+            {
+                const F32 u = ((F32)x + 0.5f) / (F32)SIZE;
+                const F32 v = ((F32)r + 0.5f) / (F32)SIZE;
+                const F32 got = texels[r * SIZE + x];
+                const F32 want = 0.1f + 0.4f * u + 0.4f * v;
+                const F32 want_flipped = 0.1f + 0.4f * u + 0.4f * (1.f - v);
+                const F32 err = std::fabs(got - want);
+                worst = llmax(worst, err);
+                bad += err > TOLERANCE ? 1 : 0;
+                bad_flipped += std::fabs(got - want_flipped) > TOLERANCE ? 1 : 0;
+            }
+        }
+
+        const U32 total = SIZE * SIZE;
+        mDepthPassed = bad == 0;
+        if (mDepthPassed)
+        {
+            mDepthNote = "shadow map hand-over works (self-test passed)";
+        }
+        else if (bad_flipped == 0)
+        {
+            mDepthNote = "hand-over works, rows turned over (self-test: GL's row 0 is Vulkan's last)";
+        }
+        else
+        {
+            mDepthNote = llformat("failed: %u of %u texels wrong (worst by %g; centre reads %g)", bad, total, worst,
+                                  texels[(SIZE / 2) * SIZE + SIZE / 2]);
+        }
+        LL_INFOS("Vulkan") << "Shadow map self-test, " << SIZE << "x" << SIZE << " D32_SFLOAT through "
+                           << (mKMT ? "a KMT" : "an NT") << " handle, drawn by Vulkan, copied by GL: " << (total - bad)
+                           << "/" << total << " texels right (worst by " << worst << "), " << (total - bad_flipped)
+                           << " if turned over: " << (mDepthPassed ? "passed" : "FAILED") << LL_ENDL;
+        cleanup();
+        return mDepthPassed;
+    }
+
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
 
     // GL draws the viewer's 2D interface into a layer of its own (newview's QLUILayer), premultiplied, and hands it over
@@ -3714,6 +4142,22 @@ std::string QLVulkanPresenter::geometryInfo()
         return "needs Vulkan presentation (QuasarVulkanPresent)";
     }
     return sActive->mGeoNote;
+}
+
+// static
+bool QLVulkanPresenter::depthTest()
+{
+    return sActive && sActive->depthTest();
+}
+
+// static
+std::string QLVulkanPresenter::depthInfo()
+{
+    if (!sActive)
+    {
+        return "needs Vulkan presentation (QuasarVulkanPresent)";
+    }
+    return sActive->mDepthNote;
 }
 
 // static

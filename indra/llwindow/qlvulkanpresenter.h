@@ -170,6 +170,13 @@ public:
 
     static std::string geometryInfo();
 
+    /// Once, after the geometry test, with the window's GL context current: whether a depth image Vulkan draws into
+    /// can be copied by GL into a depth texture made as the viewer's shadow maps are, every texel as drawn. Waits on
+    /// the CPU, so it is run once, never per frame.
+    static bool depthTest();
+
+    static std::string depthInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;

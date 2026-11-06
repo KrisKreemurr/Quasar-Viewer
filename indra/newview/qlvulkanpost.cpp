@@ -183,6 +183,7 @@ void QLVulkanPost::tick()
     done = true;
     gGL.flush();
     QLVulkanPresenter::geometryTest();
+    QLVulkanPresenter::depthTest();  // the shadow map hand-over (step 1 of shadows in Vulkan)
 #endif
 }
 
@@ -190,7 +191,7 @@ void QLVulkanPost::tick()
 std::string QLVulkanPost::geometryLine()
 {
 #if QL_VULKAN_PRESENTER
-    return QLVulkanPresenter::geometryInfo();
+    return QLVulkanPresenter::geometryInfo() + " | " + QLVulkanPresenter::depthInfo();
 #else
     return "not on this platform";
 #endif
