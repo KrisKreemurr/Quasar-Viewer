@@ -3856,9 +3856,12 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
 
     // Quasar: the storage from the external provider's shared memory (QuasarVulkanTextures), on the main thread, where
     // it can give it; the uploads into it are GL's as ever.
-    const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && mTexName &&
+    // The name is the one bound on unit 0 (every caller binds the name it is making storage for there: createGLTexture's
+    // new name, scaleDown's new name), not mTexName, which is the old texture's or none yet.
+    const U32 bound = gGL.getCurrentTexUnitIndex() == 0 ? gGL.getTextureSlot(0)->getCurrTexture() : 0;
+    const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && bound &&
                           on_main_thread() &&
-                          gQLExternalStorage->allocateTexture(mTexName, getStorageInternalFormat(), width, height,
+                          gQLExternalStorage->allocateTexture(bound, getStorageInternalFormat(), width, height,
                                                               mMipLevels);
     {
         LL_PROFILE_ZONE_NAMED("glTexStorage2D");

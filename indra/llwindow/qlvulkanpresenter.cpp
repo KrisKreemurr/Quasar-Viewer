@@ -2773,7 +2773,7 @@ struct QLVulkanPresenter::Impl
                 auto found = mOwner.mExtTextures.find(textures[i]);
                 if (found != mOwner.mExtTextures.end())
                 {
-                    mOwner.mExtFreeing.push_back(found->second);
+                    mOwner.mExtFreeing.emplace_back(mOwner.mExtPresents, found->second);
                     mOwner.mExtTextures.erase(found);
                 }
             }
@@ -2794,13 +2794,23 @@ struct QLVulkanPresenter::Impl
 
     mutable std::mutex mExtMutex;
     std::unordered_map<GLuint, ExtTexture> mExtTextures;
-    std::vector<ExtTexture> mExtFreeing;  // taken out of mExtTextures as GL deleted their names; freed at the next present
+    // Taken out of mExtTextures as GL deleted their names, with the present they were taken at: freed (their images, their
+    // ranges back to their blocks) EXT_FREE_PRESENTS presents on, when GL's GPU is past every frame that could read them
+    // (the pacing depth is 3; GL's deferred delete is a frame).
+    static constexpr U64 EXT_FREE_PRESENTS = 8;
+    std::vector<std::pair<U64, ExtTexture>> mExtFreeing;
+    U64         mExtPresents = 0;
     bool        mExtKeptAlive = false;    // shut down while GL still held some: the device was kept for them
 
     size_t extLiveCount() const
     {
         std::lock_guard<std::mutex> lock(mExtMutex);
-        return mExtTextures.size() + mExtFreeing.size();
+        size_t blocks = 0;
+        for (const TexBlock& b : mTexBlocks)
+        {
+            blocks += b.memory ? 1 : 0;
+        }
+        return mExtTextures.size() + mExtFreeing.size() + blocks;
     }
     bool        mExtFormatOK[EXT_FORMAT_COUNT] = {};
     bool        mExtTested = false;
@@ -2987,7 +2997,15 @@ struct QLVulkanPresenter::Impl
         std::vector<ExtTexture> freeing;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
-            freeing.swap(mExtFreeing);
+            ++mExtPresents;
+            auto due = std::stable_partition(mExtFreeing.begin(), mExtFreeing.end(),
+                                             [this](const std::pair<U64, ExtTexture>& f)
+                                             { return mExtPresents < f.first + EXT_FREE_PRESENTS; });
+            for (auto it = due; it != mExtFreeing.end(); ++it)
+            {
+                freeing.push_back(it->second);
+            }
+            mExtFreeing.erase(due, mExtFreeing.end());
         }
         for (ExtTexture& ext : freeing)
         {
@@ -3583,8 +3601,6 @@ struct QLVulkanPresenter::Impl
     static constexpr TexFormat TEX_FORMATS[] = {
         { GL_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, "RGBA8" },
         { GL_SRGB8_ALPHA8, VK_FORMAT_R8G8B8A8_SRGB, "SRGB8_ALPHA8" },
-        { GL_RGB8, VK_FORMAT_R8G8B8_UNORM, "RGB8" },
-        { GL_SRGB8, VK_FORMAT_R8G8B8_SRGB, "SRGB8" },
         { GL_R8, VK_FORMAT_R8_UNORM, "R8" },
         { GL_RG8, VK_FORMAT_R8G8_UNORM, "RG8" },
         { GL_COMPRESSED_RGB_S3TC_DXT1_EXT, VK_FORMAT_BC1_RGB_UNORM_BLOCK, "DXT1 RGB" },
@@ -3624,6 +3640,15 @@ struct QLVulkanPresenter::Impl
         return -1;
     }
 
+    // What GL may do with a texture, as Vulkan must be told: sample it, copy in and out, and, uncompressed, draw into it
+    // (GL's mipmaps and readbacks go through framebuffers).
+    static VkImageUsageFlags texUsage(VkFormat format)
+    {
+        const bool compressed = format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && format <= VK_FORMAT_BC7_SRGB_BLOCK;
+        return VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+               (compressed ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    }
+
     bool texFormatShareable(VkFormat format)
     {
         if (!vkGetPhysicalDeviceImageFormatProperties2)
@@ -3638,7 +3663,7 @@ struct QLVulkanPresenter::Impl
         info.format = format;
         info.type   = VK_IMAGE_TYPE_2D;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        info.usage  = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        info.usage  = texUsage(format);
         VkExternalImageFormatProperties external_props = { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
         VkImageFormatProperties2 out = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
         out.pNext = &external_props;
@@ -3739,8 +3764,14 @@ struct QLVulkanPresenter::Impl
 
     static void giveRange(TexBlock& block, VkDeviceSize offset, VkDeviceSize size)
     {
+        const auto placed = block.free.emplace(offset, size);
+        if (!placed.second)
+        {
+            LL_WARNS("Vulkan") << "Textures in Vulkan's memory: a range given back twice, at " << offset << LL_ENDL;
+            return;
+        }
         block.used -= llmin(block.used, size);
-        auto it = block.free.emplace(offset, size).first;
+        auto it = placed.first;
         // With the free range after it, and the one before.
         auto next = std::next(it);
         if (next != block.free.end() && it->first + it->second == next->first)
@@ -3765,6 +3796,14 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            if (mExtTextures.count(texture))
+            {
+                ++mTexDeclined;
+                return false;  // never: a name with storage already
+            }
+        }
         const S32 index = texFormatIndex((GLenum)internal_format);
         if (index < 0)
         {
@@ -3788,7 +3827,7 @@ struct QLVulkanPresenter::Impl
         info.arrayLayers   = 1;
         info.samples       = VK_SAMPLE_COUNT_1_BIT;
         info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        info.usage         = texUsage(TEX_FORMATS[index].vk);
         info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(mDevice, &info, nullptr, &ext.image) != VK_SUCCESS)
