@@ -13340,10 +13340,17 @@ static S32 ql_mask_pass_index(U32 type)
 }
 
 // Hands the shadow maps queued for Vulkan over (QLVulkanPresenter::shadowFlush): due before anything reads them.
+// A hand-over that failed leaves its maps without Vulkan's casters (Vulkan's shadows are then off for good): the next
+// view throws away what the caches kept of them, so GL draws them whole.
+static bool sQLVulkanShadowLost = false;
+
 static void ql_vulkan_shadow_flush()
 {
 #if QL_VULKAN_SHADOWS
-    QLVulkanPresenter::shadowFlush();
+    if (!QLVulkanPresenter::shadowFlush())
+    {
+        sQLVulkanShadowLost = true;
+    }
 #endif
 }
 
@@ -14917,6 +14924,16 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
     }
     // Quasar: the maps Vulkan's casters were queued for this view are handed over once, as the view ends.
     QLVulkanShadowView vulkan_shadow_view;
+    if (sQLVulkanShadowLost)
+    {
+        sQLVulkanShadowLost = false;
+        for (QLShadowCascadeKeep& kept : sCascadeKeep)
+        {
+            kept.mValid       = false;
+            kept.mStaticValid = false;
+        }
+        mSpotShadowCache.invalidate();
+    }
 
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     LL_PROFILE_GPU_ZONE("generateSunShadow");

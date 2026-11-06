@@ -3804,6 +3804,9 @@ struct QLVulkanPresenter::Impl
                 return false;
             }
         }
+        // Its last submission is done: a fence still marked submitted (a poll that asked it a moment early) is
+        // signalled, and must not be read as a later submission's once the slot rides in one without heading it.
+        slot.submitted = false;
         mShSlot = mShNextSlot;
         mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
         mShInPass     = true;
@@ -4449,8 +4452,9 @@ struct QLVulkanPresenter::Impl
                 depth_order.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 1, &depth_order, 0, nullptr, 0,
-                                     nullptr);
+                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     0, 1, &depth_order, 0, nullptr, 0, nullptr);
             }
             VkRenderPassBeginInfo pass_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
             pass_begin.renderPass  = mShPass;
@@ -4570,11 +4574,12 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         const U64 serial = ++mShSubmitSerial;
-        head.submitted = true;
         for (const ShPending& p : pending)
         {
-            mShSlots[p.slot].serial = serial;
+            mShSlots[p.slot].serial    = serial;
+            mShSlots[p.slot].submitted = false;  // only the head's fence is this submission's
         }
+        head.submitted = true;
         if (rigged)
         {
             mShSegmentSerial[mShFrame % SH_PALETTE_SEGMENTS] = serial;
