@@ -13339,6 +13339,20 @@ static S32 ql_mask_pass_index(U32 type)
     return -1;
 }
 
+// Hands the shadow maps queued for Vulkan over (QLVulkanPresenter::shadowFlush): due before anything reads them.
+static void ql_vulkan_shadow_flush()
+{
+#if QL_VULKAN_SHADOWS
+    QLVulkanPresenter::shadowFlush();
+#endif
+}
+
+// A view's shadow maps are finished by Vulkan as it ends: generateSunShadow's every way out.
+struct QLVulkanShadowView
+{
+    ~QLVulkanShadowView() { ql_vulkan_shadow_flush(); }
+};
+
 static bool ql_vulkan_shadows_wanted()
 {
 #if QL_VULKAN_SHADOWS
@@ -14901,6 +14915,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
     {
         return;
     }
+    // Quasar: the maps Vulkan's casters were queued for this view are handed over once, as the view ends.
+    QLVulkanShadowView vulkan_shadow_view;
 
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     LL_PROFILE_GPU_ZONE("generateSunShadow");
@@ -15981,6 +15997,11 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                                          keep_still ? QL_CASTERS_STILL : QL_CASTERS_ALL);
                     }
                     renderShadow(view[j], proj[j], shadow_cam, result[j], true, !have_union_cull, sun_occlusion);
+                }
+                if (keep_still)
+                {
+                    // Quasar: the still map is copied out next, so Vulkan's still casters must be in it first.
+                    ql_vulkan_shadow_flush();
                 }
 
                 mRT->shadow[j].flush();

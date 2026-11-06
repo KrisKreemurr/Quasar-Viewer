@@ -232,7 +232,13 @@ public:
                                  float cutoff, unsigned test, unsigned base_vertex, unsigned first_index,
                                  unsigned index_count);
 
+    /// Queues the map: Vulkan draws its casters over the map at the next shadowFlush, once GL has drawn the rest of
+    /// it. False: none of the map's casters are Vulkan's, and GL draws them all.
     static bool shadowEnd(unsigned depth_texture);
+
+    /// Hands every queued map over at once (one GL signal, one Vulkan submission, one GL wait): due before anything
+    /// reads a queued map, so at the end of each view's shadow maps. Nothing queued: nothing done.
+    static bool shadowFlush();
 
     /// Whether GL's signals and waits around a map name the arenas and depth image they hand over (the default), or
     /// nothing (QuasarVulkanShadowSignalObjects off: an experiment on what makes the signal wait).
