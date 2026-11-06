@@ -400,6 +400,8 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdBlitImage);
     QL_VK_FN(vkCmdClearColorImage);
     QL_VK_FN(vkCmdClearDepthStencilImage);
+    QL_VK_FN(vkGetPhysicalDeviceImageFormatProperties2);  // optional (Vulkan 1.1): asked, never required
+    QL_VK_FN(vkGetImageMemoryRequirements2);              // optional (Vulkan 1.1)
     QL_VK_FN(vkFreeCommandBuffers);
     QL_VK_FN(vkCmdCopyImageToBuffer);
     QL_VK_FN(vkCreateBuffer);
@@ -605,6 +607,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_INSTANCE(vkGetPhysicalDeviceMemoryProperties);
         QL_VK_INSTANCE(vkGetPhysicalDeviceFormatProperties);
         QL_VK_INSTANCE(vkGetPhysicalDeviceFeatures);
+        vkGetPhysicalDeviceImageFormatProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties2>(
+            vkGetInstanceProcAddr(mInstance, "vkGetPhysicalDeviceImageFormatProperties2"));
         QL_VK_INSTANCE(vkEnumerateDeviceExtensionProperties);
         QL_VK_INSTANCE(vkCreateDevice);
         QL_VK_INSTANCE(vkGetDeviceProcAddr);
@@ -655,6 +659,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdBlitImage);
         QL_VK_DEVICE(vkCmdClearColorImage);
         QL_VK_DEVICE(vkCmdClearDepthStencilImage);
+        vkGetImageMemoryRequirements2 = reinterpret_cast<PFN_vkGetImageMemoryRequirements2>(
+            vkGetDeviceProcAddr(mDevice, "vkGetImageMemoryRequirements2"));
         QL_VK_DEVICE(vkFreeCommandBuffers);
         QL_VK_DEVICE(vkCmdCopyImageToBuffer);
         QL_VK_DEVICE(vkCreateBuffer);
@@ -3224,8 +3230,298 @@ struct QLVulkanPresenter::Impl
         {
             mExtStorage = std::make_unique<ExtStorage>(*this);
             gQLExternalStorage = mExtStorage.get();
+            textureTest();  // piece 2a: whether textures could share Vulkan's memory (nothing uses the answer yet)
         }
         return mExtPassed;
+    }
+
+    // ---- textures in Vulkan's memory: can they share it? (piece 2a, with the render target self-test) ---------
+    //
+    // A region holds thousands of textures, and a device allows a few thousand allocations at most
+    // (maxMemoryAllocationCount: 4096 on NVIDIA's Windows driver): textures in Vulkan's memory must share it, many
+    // images placed in one allocation and GL taking each at its offset. That needs the formats to be exportable
+    // without a dedicated allocation, and GL to take a texture's storage from part of a memory object. Asked and tried
+    // once: the formats' external properties, and two textures placed in one allocation, cleared by Vulkan to
+    // different values, read back by GL.
+    std::string mTexNote = "not tested";
+    bool        mTexShared = false;  // textures can share an allocation
+
+    bool textureTest()
+    {
+        LL_PROFILE_ZONE_NAMED("vulkan texture memory self-test");
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(mPhysical, &props);
+        std::string report = llformat("maxMemoryAllocationCount %u", props.limits.maxMemoryAllocationCount);
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        // What each texture format's external memory allows, as the device reports it.
+        struct TexFormat
+        {
+            VkFormat    vk;
+            const char* name;
+        };
+        static const TexFormat formats[] = {
+            { VK_FORMAT_R8G8B8A8_UNORM, "RGBA8" },
+            { VK_FORMAT_R8G8B8A8_SRGB, "SRGB8_ALPHA8" },
+            { VK_FORMAT_R8_UNORM, "R8" },
+            { VK_FORMAT_R8G8_UNORM, "RG8" },
+            { VK_FORMAT_BC1_RGB_UNORM_BLOCK, "DXT1" },
+            { VK_FORMAT_BC3_UNORM_BLOCK, "DXT5" },
+        };
+        bool all_shareable = true;
+        if (!vkGetPhysicalDeviceImageFormatProperties2)
+        {
+            report += ", no vkGetPhysicalDeviceImageFormatProperties2";
+            all_shareable = false;
+        }
+        else
+        {
+            for (const TexFormat& f : formats)
+            {
+                VkPhysicalDeviceExternalImageFormatInfo external_info = {
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
+                external_info.handleType = handle_type;
+                VkPhysicalDeviceImageFormatInfo2 info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2 };
+                info.pNext  = &external_info;
+                info.format = f.vk;
+                info.type   = VK_IMAGE_TYPE_2D;
+                info.tiling = VK_IMAGE_TILING_OPTIMAL;
+                info.usage  = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                VkExternalImageFormatProperties external_props = { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+                VkImageFormatProperties2 out = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+                out.pNext = &external_props;
+                const VkResult result = vkGetPhysicalDeviceImageFormatProperties2(mPhysical, &info, &out);
+                const VkExternalMemoryFeatureFlags features = external_props.externalMemoryProperties.externalMemoryFeatures;
+                const bool exportable = result == VK_SUCCESS && (features & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT);
+                const bool dedicated_only = (features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0;
+                report += llformat(", %s %s", f.name,
+                                   !exportable ? "not exportable" : (dedicated_only ? "dedicated only" : "shareable"));
+                all_shareable = all_shareable && exportable && !dedicated_only;
+            }
+        }
+
+        // Two RGBA8 textures in one allocation, at their own offsets.
+        constexpr U32 SIZE = 64;
+        VkImage images[2] = {};
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        HANDLE handle = nullptr;
+        GLuint gl_memory = 0;
+        GLuint textures[2] = {};
+        VkSemaphore gl_done_vk = VK_NULL_HANDLE, vk_done_vk = VK_NULL_HANDLE;
+        GLuint gl_done_gl = 0, vk_done_gl = 0;
+        HANDLE gl_done_handle = nullptr, vk_done_handle = nullptr;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        auto finish = [&](bool shared, const std::string& how)
+        {
+            gl.Finish();
+            vkDeviceWaitIdle(mDevice);
+            if (textures[0]) gl.DeleteTextures(2, textures);
+            if (gl_memory) gl.DeleteMemoryObjectsEXT(1, &gl_memory);
+            if (gl_done_gl) gl.DeleteSemaphoresEXT(1, &gl_done_gl);
+            if (vk_done_gl) gl.DeleteSemaphoresEXT(1, &vk_done_gl);
+            if (fence) vkDestroyFence(mDevice, fence, nullptr);
+            if (cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cmd);
+            if (gl_done_vk) vkDestroySemaphore(mDevice, gl_done_vk, nullptr);
+            if (vk_done_vk) vkDestroySemaphore(mDevice, vk_done_vk, nullptr);
+            for (VkImage image : images)
+            {
+                if (image) vkDestroyImage(mDevice, image, nullptr);
+            }
+            if (memory) vkFreeMemory(mDevice, memory, nullptr);
+            for (HANDLE h : { handle, gl_done_handle, vk_done_handle })
+            {
+                if (h) CloseHandle(h);
+            }
+            mTexShared = shared && all_shareable;
+            mTexNote = llformat("textures %s (%s)", mTexShared ? "can share memory" : "cannot share memory",
+                                how.c_str());
+            LL_INFOS("Vulkan") << "Texture memory self-test: " << report << "; two textures in one allocation: " << how
+                               << ": " << (mTexShared ? "passed" : "FAILED") << LL_ENDL;
+            return mTexShared;
+        };
+
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        info.extent        = { SIZE, SIZE, 1 };
+        info.mipLevels     = 1;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkMemoryRequirements req[2] = {};
+        for (U32 i = 0; i < 2; ++i)
+        {
+            if (vkCreateImage(mDevice, &info, nullptr, &images[i]) != VK_SUCCESS)
+            {
+                images[i] = VK_NULL_HANDLE;
+                return finish(false, "vkCreateImage");
+            }
+            vkGetImageMemoryRequirements(mDevice, images[i], &req[i]);
+        }
+        if (vkGetImageMemoryRequirements2)
+        {
+            VkMemoryDedicatedRequirements dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+            VkMemoryRequirements2 req2 = { VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
+            req2.pNext = &dedicated;
+            VkImageMemoryRequirementsInfo2 which = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 };
+            which.image = images[0];
+            vkGetImageMemoryRequirements2(mDevice, &which, &req2);
+            report += llformat(", an external RGBA8 image: %s dedicated", dedicated.requiresDedicatedAllocation
+                                                                              ? "requires"
+                                                                              : (dedicated.prefersDedicatedAllocation
+                                                                                     ? "prefers"
+                                                                                     : "needs no"));
+            if (dedicated.requiresDedicatedAllocation)
+            {
+                return finish(false, "the device requires each its own allocation");
+            }
+        }
+        const VkDeviceSize align = llmax(req[0].alignment, req[1].alignment);
+        const VkDeviceSize offset1 = (req[0].size + align - 1) / align * align;
+        const VkDeviceSize total = offset1 + req[1].size;
+        const U32 type = memoryType(req[0].memoryTypeBits & req[1].memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (type == U32_MAX)
+        {
+            return finish(false, "no memory type both can use");
+        }
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = total;
+        alloc.memoryTypeIndex = type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &memory) != VK_SUCCESS)
+        {
+            memory = VK_NULL_HANDLE;
+            return finish(false, "vkAllocateMemory");
+        }
+        const VkDeviceSize offsets[2] = { 0, offset1 };
+        for (U32 i = 0; i < 2; ++i)
+        {
+            if (vkBindImageMemory(mDevice, images[i], memory, offsets[i]) != VK_SUCCESS)
+            {
+                return finish(false, "vkBindImageMemory");
+            }
+        }
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = memory;
+        get.handleType = handle_type;
+        HANDLE exported_handle = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &exported_handle) != VK_SUCCESS || !exported_handle)
+        {
+            return finish(false, "vkGetMemoryWin32HandleKHR");
+        }
+        if (!mKMT)
+        {
+            handle = exported_handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &gl_memory);  // not dedicated: two textures take their storage from it
+        gl.ImportMemoryWin32HandleEXT(gl_memory, total,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                      exported_handle);
+        gl.CreateTextures(GL_TEXTURE_2D, 2, textures);
+        for (U32 i = 0; i < 2; ++i)
+        {
+            gl.TextureParameteri(textures[i], GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+            gl.TextureStorageMem2DEXT(textures[i], 1, GL_RGBA8, (GLsizei)SIZE, (GLsizei)SIZE, gl_memory,
+                                      (GLuint64)offsets[i]);
+        }
+        for (U32 i = 0; i < 2; ++i)
+        {
+            GLint immutable = GL_FALSE;
+            gl.GetTextureParameteriv(textures[i], GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+            if (!immutable)
+            {
+                while (gl.GetError() != GL_NO_ERROR)
+                {
+                }
+                return finish(false, llformat("GL would not take texture %u at its offset", i));
+            }
+        }
+        if (!createSharedSemaphore(gl_done_vk, gl_done_gl, gl_done_handle) ||
+            !createSharedSemaphore(vk_done_vk, vk_done_gl, vk_done_handle))
+        {
+            return finish(false, "semaphores");
+        }
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkAllocateCommandBuffers(mDevice, &cmd_info, &cmd) != VK_SUCCESS ||
+            vkCreateFence(mDevice, &fence_info, nullptr, &fence) != VK_SUCCESS)
+        {
+            return finish(false, "no command buffer");
+        }
+        const GLenum layouts[2] = { GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT };
+        gl.SignalSemaphoreEXT(gl_done_gl, 0, nullptr, 2, textures, layouts);
+        gl.Flush();
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+        const VkClearColorValue values[2] = { { { 0.25f, 0.5f, 0.75f, 1.f } }, { { 1.f, 0.f, 0.5f, 0.25f } } };
+        for (U32 i = 0; i < 2; ++i)
+        {
+            VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            acquire.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            acquire.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+            acquire.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            acquire.dstQueueFamilyIndex = mQueueFamily;
+            acquire.image               = images[i];
+            acquire.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &acquire);
+            vkCmdClearColorImage(cmd, images[i], VK_IMAGE_LAYOUT_GENERAL, &values[i], 1, &acquire.subresourceRange);
+            VkImageMemoryBarrier release = acquire;
+            release.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            release.dstAccessMask       = 0;
+            release.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            release.srcQueueFamilyIndex = mQueueFamily;
+            release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &release);
+        }
+        vkEndCommandBuffer(cmd);
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &gl_done_vk;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &vk_done_vk;
+        if (vkQueueSubmit(mQueue, 1, &submit, fence) != VK_SUCCESS)
+        {
+            return finish(false, "the clears could not be submitted");
+        }
+        vkWaitForFences(mDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+        gl.WaitSemaphoreEXT(vk_done_gl, 0, nullptr, 2, textures, layouts);
+        bool right = true;
+        std::string got;
+        for (U32 i = 0; i < 2; ++i)
+        {
+            F32 rgba[4] = { -1.f, -1.f, -1.f, -1.f };
+            gl.GetTextureSubImage(textures[i], 0, (GLint)SIZE / 2, (GLint)SIZE / 2, 0, 1, 1, 1, GL_RGBA, GL_FLOAT,
+                                  sizeof(rgba), rgba);
+            for (U32 c = 0; c < 4; ++c)
+            {
+                right = right && std::fabs(rgba[c] - values[i].float32[c]) < 0.01f;
+            }
+            got += llformat("%s%.2f %.2f %.2f %.2f", i ? " / " : "", rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+        logGLErrors("the texture memory self-test");
+        return finish(right, right ? llformat("both right at offsets 0 and %llu", (unsigned long long)offset1)
+                                   : "read back " + got);
     }
 
     std::string targetInfo() const
@@ -3235,8 +3531,8 @@ struct QLVulkanPresenter::Impl
             return "targets: " + mExtNote;
         }
         std::lock_guard<std::mutex> lock(mExtMutex);
-        return llformat("targets: %s, %u in Vulkan's memory (%.0f MB)", mExtNote.c_str(), (U32)mExtTextures.size(),
-                        (double)mExtBytes / (1 << 20));
+        return llformat("targets: %s, %u in Vulkan's memory (%.0f MB); %s", mExtNote.c_str(),
+                        (U32)mExtTextures.size(), (double)mExtBytes / (1 << 20), mTexNote.c_str());
     }
 
     // ---- step 2 of geometry in Vulkan: shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------
