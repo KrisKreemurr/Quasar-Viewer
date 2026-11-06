@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -2745,6 +2746,7 @@ struct QLVulkanPresenter::Impl
         VkFence         fence = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
         bool            submitted = false;
+        U64             serial = 0;  // which submission this slot last carried
     };
 
     bool        mShTried = false;
@@ -2759,8 +2761,12 @@ struct QLVulkanPresenter::Impl
     VkDeviceMemory mShPalettesMemory = VK_NULL_HANDLE;
     U8*            mShPalettesMapped = nullptr;
     U32            mShPaletteFrame = U32_MAX;
-    U32            mShPaletteCount = 0;
-    std::unordered_map<U64, U32> mShPaletteBases;  // (avatar, skin) to the vec4 its palette starts at
+    U32            mShPaletteCount = 0, mShPaletteCountLast = 0;
+    bool           mShPaletteSegmentFree = false;  // this frame's segment is the GPU's no longer
+    std::map<std::pair<U64, U64>, U32> mShPaletteBases;  // (avatar, skin) to the vec4 its palette starts at
+    // Each segment's last submission: a segment is written again only once every map that read it is done.
+    U64            mShSegmentSerial[SH_PALETTE_SEGMENTS] = {};
+    U64            mShSubmitSerial = 0;
 
     VkBuffer       mShHost = VK_NULL_HANDLE;
     VkDeviceMemory mShHostMemory = VK_NULL_HANDLE;
@@ -3451,7 +3457,7 @@ struct QLVulkanPresenter::Impl
     // A skin's palette for this frame, written into this frame's segment of the ring the first time any map asks for
     // it. key identifies the avatar and the skin; floats is mGLMp (the origin, then 12 a joint). U32_MAX when the
     // segment is full or the palette is larger than a mesh can have.
-    U32 shadowPalette(U64 key, const float* data, U32 floats)
+    U32 shadowPalette(U64 avatar, U64 skin, const float* data, U32 floats)
     {
         if (!mShPalettesMapped || !data || floats < 4 || floats > SH_PALETTE_VEC4S * 4)
         {
@@ -3461,8 +3467,27 @@ struct QLVulkanPresenter::Impl
         {
             mShPaletteFrame = mShFrame;
             mShPaletteBases.clear();
+            mShPaletteCountLast = mShPaletteCount;
             mShPaletteCount = 0;
+            // The segment this frame writes was last read SH_PALETTE_SEGMENTS frames ago: normally long done, but never
+            // assumed (a pacing depth past it, or none). Asked, never waited for: while it is still read, this frame's
+            // rigged casters are GL's.
+            const U64 last = mShSegmentSerial[mShFrame % SH_PALETTE_SEGMENTS];
+            mShPaletteSegmentFree = true;
+            for (const ShSlot& slot : mShSlots)
+            {
+                if (slot.submitted && slot.serial <= last && vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS)
+                {
+                    mShPaletteSegmentFree = false;
+                    break;
+                }
+            }
         }
+        if (!mShPaletteSegmentFree)
+        {
+            return U32_MAX;
+        }
+        const std::pair<U64, U64> key(avatar, skin);
         const auto found = mShPaletteBases.find(key);
         if (found != mShPaletteBases.end())
         {
@@ -3742,6 +3767,11 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         slot.submitted = true;
+        slot.serial    = ++mShSubmitSerial;
+        if (rigged_draws)
+        {
+            mShSegmentSerial[mShFrame % SH_PALETTE_SEGMENTS] = slot.serial;
+        }
 
         // GL: back once Vulkan is done (on the GPU), and the map into GL's own texture.
         gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
@@ -3770,7 +3800,7 @@ struct QLVulkanPresenter::Impl
                         mShPassesLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
                         (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
                         (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20),
-                        mShStatic.resets, mShRigged.resets, mShPaletteCount);
+                        mShStatic.resets, mShRigged.resets, mShPaletteCountLast);
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
@@ -5329,9 +5359,10 @@ bool QLVulkanPresenter::shadowArenaRigged(unsigned long long stamp, unsigned ver
 }
 
 // static
-unsigned QLVulkanPresenter::shadowPalette(unsigned long long key, const float* floats, unsigned count)
+unsigned QLVulkanPresenter::shadowPalette(unsigned long long avatar, unsigned long long skin, const float* floats,
+                                         unsigned count)
 {
-    return sActive ? sActive->shadowPalette((U64)key, floats, count) : ~0u;
+    return sActive ? sActive->shadowPalette((U64)avatar, (U64)skin, floats, count) : ~0u;
 }
 
 // static

@@ -13419,9 +13419,9 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     const LLVOAvatar::MatrixPaletteCache& mpc = avatar->updateSkinInfoMatrixPalette(params->mSkinInfo);
                     // No palette yet (the skin not loaded): GL would not draw it either.
                     skip_skin = mpc.mMatrixPalette.empty();
-                    const U64 key = (skin * 0x9E3779B97F4A7C15ull) ^ (U64)(uintptr_t)avatar;
                     palette = skip_skin ? ~0u
-                                        : QLVulkanPresenter::shadowPalette(key, mpc.mGLMp.data(), (U32)mpc.mGLMp.size());
+                                        : QLVulkanPresenter::shadowPalette((U64)(uintptr_t)avatar, skin,
+                                                                           mpc.mGLMp.data(), (U32)mpc.mGLMp.size());
                 }
                 if (skip_skin)
                 {
