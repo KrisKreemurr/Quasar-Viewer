@@ -14338,6 +14338,7 @@ namespace
         U32  mKept = 0;
         U32  mLastChangeFrame = 0;
         bool mOn = false;
+        S32  mSelfFrom = 0;  // the first cascade past the camera's own avatar (QuasarSunCacheSkipSelf)
         char mWhat[ALRenderResourcePlan::SUN_CASCADES] = {};  // each cascade: F full, M moving only, K kept, - none
     };
     QLSunCacheStats sSunCacheStats;
@@ -14492,7 +14493,8 @@ std::string ql_sun_shadow_cache_info()
         what += c ? c : '-';
         what += ' ';
     }
-    return llformat("%s| still change %uf ago", what.c_str(), frame - s.mLastChangeFrame);
+    return llformat("%s| still change %uf ago | you reach cascade %d", what.c_str(), frame - s.mLastChangeFrame,
+                    s.mSelfFrom - 1);
 }
 
 namespace
@@ -15021,6 +15023,32 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             }
             return moved2 <= STAGGER_MAX_EYE_MOVE * STAGGER_MAX_EYE_MOVE && (camera.getAtAxis() * kept.mAt) >= STAGGER_MIN_AT_COS;
         };
+        // Quasar: the cascades the camera's own avatar reaches into are never cached either
+        // (QuasarSunCacheSkipSelf): its shadow on itself is fine enough to show a cached fit taking turns with fresh
+        // ones, so zoomed out, where it stands in the second cascade or past, the cache steps back past it. Cascade j
+        // covers the view's depths from 0.75 of its near split to 1.25 of its far one (the frusta below); the avatar is
+        // taken as reaching 2 m around where it stands.
+        static LLCachedControl<bool> skip_self(gSavedSettings, "QuasarSunCacheSkipSelf", true);
+        S32 self_cached_from = 0;
+        if (skip_self() && isAgentAvatarValid() && !gAgentAvatarp->isDead())
+        {
+            constexpr F32 SELF_REACH = 2.f;
+            const F32 depth = (gAgentAvatarp->getPositionAgent() - camera.getOrigin()) * camera.getAtAxis();
+            const F32 nearest = depth - SELF_REACH;
+            const F32 farthest = depth + SELF_REACH;
+            for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
+            {
+                if (farthest >= dist[j] * 0.75f && nearest <= dist[j + 1] * 1.25f)
+                {
+                    self_cached_from = (S32)j + 1;
+                }
+            }
+        }
+        if (mRT == &mMainRT && !gCubeSnapshot)
+        {
+            sSunCacheStats.mSelfFrom = self_cached_from;
+        }
+
         U32 farthest_drawn = 0;
         for (U32 j = 0; j < cascades && j < ALRenderResourcePlan::SUN_CASCADES; ++j)
         {
@@ -15041,7 +15069,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             // every frame: the camera's own avatar is in them, and its shadow on itself is fine enough to change with
             // every refit, so a cached fit taking turns with fresh ones made it flicker.
             static LLCachedControl<S32> cache_from(gSavedSettings, "QuasarSunCacheFromCascade", 1);
-            if (cache_on && (S32)j >= llclamp((S32)cache_from(), 0, 3) && mRT->shadow[j].isComplete())
+            if (cache_on && (S32)j >= llmax(llclamp((S32)cache_from(), 0, 3), self_cached_from) &&
+                mRT->shadow[j].isComplete())
             {
                 const QLShadowCascadeKeep& kept = sCascadeKeep[j];
                 const U32 frame = LLFrameTimer::getFrameCount();

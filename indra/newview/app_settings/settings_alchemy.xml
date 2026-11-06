@@ -2751,6 +2751,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarSunCacheSkipSelf</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: the sun shadow cache never caches the cascades your own avatar reaches into (as it never caches those nearer than QuasarSunCacheFromCascade), so its shadow on itself does not flicker when the camera is zoomed out.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarSunCacheMovingRate</key>
         <map>
             <key>Comment</key>
