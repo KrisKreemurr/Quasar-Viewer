@@ -24,6 +24,10 @@ public:
     /// caller allocates as before. On the thread whose GL context is current, which is the main one.
     virtual bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height, int levels) = 0;
 
+    /// A fetched texture's storage (@a levels levels, uploaded into later), placed among others in memory the provider
+    /// shares out (QuasarVulkanTextures). False: GL allocates as before. On the main thread.
+    virtual bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) = 0;
+
     /// GL has deleted these names: the provider lets go of what it gave them. Any thread; the provider frees on its own.
     virtual void deleted(int count, const unsigned* textures) = 0;
 
@@ -32,6 +36,9 @@ public:
 };
 
 extern QLExternalStorage* gQLExternalStorage;
+
+// Whether fetched textures are offered to the provider too (LLImageGL::allocateTextureStorage, on the main thread).
+extern bool gQLExternalTexturesWanted;
 
 // While one stands on a thread, the render targets and textures that thread allocates are offered to the provider.
 class QLExternalStorageScope

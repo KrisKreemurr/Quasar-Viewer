@@ -2916,6 +2916,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarVulkanTextures</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, restart, needs QuasarVulkanTargets): fetched textures get their storage from Vulkan's memory, packed into shared 64 MB blocks, which GL uploads into and draws with as before. Nothing changes on screen: groundwork for drawing with Vulkan. Status: "textures:" on the "Quasar Vulkan geometry" line.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanTargets</key>
         <map>
             <key>Comment</key>

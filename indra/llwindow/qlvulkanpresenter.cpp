@@ -2747,8 +2747,10 @@ struct QLVulkanPresenter::Impl
         VkDeviceMemory memory = VK_NULL_HANDLE;
         HANDLE         handle = nullptr;
         GLuint         glMemory = 0;
-        U32            format = 0;  // index into EXT_FORMATS
+        U32            format = 0;  // index into EXT_FORMATS; U32_MAX for a fetched texture in a shared block
         U32            width = 0, height = 0, levels = 0;
+        S32            block = -1;  // a fetched texture's block (mTexBlocks), its place and size there
+        VkDeviceSize   offset = 0, size = 0;
     };
 
     // What llrender talks to: allocation on the main thread, deletions from any (queued for the main thread).
@@ -2775,6 +2777,10 @@ struct QLVulkanPresenter::Impl
                     mOwner.mExtTextures.erase(found);
                 }
             }
+        }
+        bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels) override
+        {
+            return mOwner.texAllocate(texture, internal_format, width, height, levels);
         }
         bool owns(unsigned texture) const override
         {
@@ -2945,6 +2951,29 @@ struct QLVulkanPresenter::Impl
 
     void extFree(ExtTexture& ext)
     {
+        if (ext.block >= 0 && ext.block < (S32)mTexBlocks.size())
+        {
+            // A fetched texture: its image goes, its range goes back to its block, and a block left empty goes too
+            // while another remains.
+            if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
+            TexBlock& block = mTexBlocks[ext.block];
+            giveRange(block, ext.offset, ext.size);
+            mTexBytes -= llmin(mTexBytes, (U64)ext.size);
+            size_t live = 0;
+            for (const TexBlock& b : mTexBlocks)
+            {
+                live += b.memory ? 1 : 0;
+            }
+            if (block.used == 0 && live > 1)
+            {
+                if (block.glMemory) gl.DeleteMemoryObjectsEXT(1, &block.glMemory);
+                vkFreeMemory(mDevice, block.memory, nullptr);
+                if (block.handle) CloseHandle(block.handle);
+                block = TexBlock();
+            }
+            ext = ExtTexture();
+            return;
+        }
         if (ext.glMemory) gl.DeleteMemoryObjectsEXT(1, &ext.glMemory);
         if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
         if (ext.memory) vkFreeMemory(mDevice, ext.memory, nullptr);
@@ -2962,9 +2991,12 @@ struct QLVulkanPresenter::Impl
         }
         for (ExtTexture& ext : freeing)
         {
-            VkMemoryRequirements req = {};
-            vkGetImageMemoryRequirements(mDevice, ext.image, &req);
-            mExtBytes -= llmin(mExtBytes, (U64)req.size);
+            if (ext.block < 0)
+            {
+                VkMemoryRequirements req = {};
+                vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+                mExtBytes -= llmin(mExtBytes, (U64)req.size);
+            }
             extFree(ext);
         }
     }
@@ -3524,6 +3556,313 @@ struct QLVulkanPresenter::Impl
                                    : "read back " + got);
     }
 
+    // ---- fetched textures in Vulkan's memory (QuasarVulkanTextures; piece 2b) ----------------------------------
+    //
+    // Each texture's image is placed in a block: 64 MB of device-local memory Vulkan allocates and exports, which GL
+    // imports once as a memory object; the texture takes its storage at its offset (glTextureStorageMem2DEXT). A block's
+    // free ranges are kept by offset and merged as textures go. A texture larger than a block gets a block of its own
+    // size. Only once the texture memory self-test has passed (textures can share an allocation), on the main thread,
+    // and in the formats the device can export without a dedicated allocation. GL's uploads into them are as ever.
+    static constexpr VkDeviceSize TEX_BLOCK_BYTES = 64ull << 20;
+    struct TexBlock
+    {
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        HANDLE         handle = nullptr;
+        GLuint         glMemory = 0;
+        VkDeviceSize   size = 0;
+        U32            type = 0;
+        std::map<VkDeviceSize, VkDeviceSize> free;  // offset to size
+        VkDeviceSize   used = 0;
+    };
+    struct TexFormat
+    {
+        GLenum   gl;
+        VkFormat vk;
+        const char* name;
+    };
+    static constexpr TexFormat TEX_FORMATS[] = {
+        { GL_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, "RGBA8" },
+        { GL_SRGB8_ALPHA8, VK_FORMAT_R8G8B8A8_SRGB, "SRGB8_ALPHA8" },
+        { GL_RGB8, VK_FORMAT_R8G8B8_UNORM, "RGB8" },
+        { GL_SRGB8, VK_FORMAT_R8G8B8_SRGB, "SRGB8" },
+        { GL_R8, VK_FORMAT_R8_UNORM, "R8" },
+        { GL_RG8, VK_FORMAT_R8G8_UNORM, "RG8" },
+        { GL_COMPRESSED_RGB_S3TC_DXT1_EXT, VK_FORMAT_BC1_RGB_UNORM_BLOCK, "DXT1 RGB" },
+        { GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, "DXT1" },
+        { GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, "SRGB DXT1" },
+        { GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, VK_FORMAT_BC2_UNORM_BLOCK, "DXT3" },
+        { GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT, VK_FORMAT_BC2_SRGB_BLOCK, "SRGB DXT3" },
+        { GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, VK_FORMAT_BC3_UNORM_BLOCK, "DXT5" },
+        { GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT, VK_FORMAT_BC3_SRGB_BLOCK, "SRGB DXT5" },
+    };
+    static constexpr U32 TEX_FORMAT_COUNT = (U32)(sizeof(TEX_FORMATS) / sizeof(TEX_FORMATS[0]));
+    // Per format: 0 not asked yet, 1 the device can share it, 2 it cannot. And the allocations still checked with GL
+    // (an allocation GL would not take is asked after, for the first ones of each format; later ones are trusted, since
+    // each question waits for a threaded driver).
+    U8   mTexFormatState[TEX_FORMAT_COUNT] = {};
+    U32  mTexChecksLeft[TEX_FORMAT_COUNT] = {};
+    std::vector<TexBlock> mTexBlocks;
+    U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0;
+    U64  mTexBytes = 0;
+
+    S32 texFormatIndex(GLenum gl_format)
+    {
+        for (U32 i = 0; i < TEX_FORMAT_COUNT; ++i)
+        {
+            if (TEX_FORMATS[i].gl == gl_format)
+            {
+                if (mTexFormatState[i] == 0)
+                {
+                    mTexFormatState[i] = texFormatShareable(TEX_FORMATS[i].vk) ? 1 : 2;
+                    mTexChecksLeft[i]  = 64;
+                    LL_INFOS("Vulkan") << "Textures in Vulkan's memory: " << TEX_FORMATS[i].name
+                                       << (mTexFormatState[i] == 1 ? " shared" : " stays GL's") << LL_ENDL;
+                }
+                return mTexFormatState[i] == 1 ? (S32)i : -1;
+            }
+        }
+        return -1;
+    }
+
+    bool texFormatShareable(VkFormat format)
+    {
+        if (!vkGetPhysicalDeviceImageFormatProperties2)
+        {
+            return false;
+        }
+        VkPhysicalDeviceExternalImageFormatInfo external_info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
+        external_info.handleType = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                        : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        VkPhysicalDeviceImageFormatInfo2 info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2 };
+        info.pNext  = &external_info;
+        info.format = format;
+        info.type   = VK_IMAGE_TYPE_2D;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage  = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        VkExternalImageFormatProperties external_props = { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+        VkImageFormatProperties2 out = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+        out.pNext = &external_props;
+        if (vkGetPhysicalDeviceImageFormatProperties2(mPhysical, &info, &out) != VK_SUCCESS)
+        {
+            return false;
+        }
+        const VkExternalMemoryFeatureFlags features = external_props.externalMemoryProperties.externalMemoryFeatures;
+        return (features & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) &&
+               !(features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT);
+    }
+
+    // A block of at least `bytes`, in a memory type `type_bits` allows, exported and imported by GL. -1 where none.
+    S32 newTexBlock(VkDeviceSize bytes, U32 type_bits)
+    {
+        const U32 type = memoryType(type_bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (type == U32_MAX)
+        {
+            return -1;
+        }
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        TexBlock block;
+        block.size = llmax(bytes, TEX_BLOCK_BYTES);
+        block.type = type;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = block.size;
+        alloc.memoryTypeIndex = type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &block.memory) != VK_SUCCESS)
+        {
+            return -1;
+        }
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = block.memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            vkFreeMemory(mDevice, block.memory, nullptr);
+            return -1;
+        }
+        if (!mKMT)
+        {
+            block.handle = handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &block.glMemory);
+        gl.ImportMemoryWin32HandleEXT(block.glMemory, block.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                      handle);
+        block.free[0] = block.size;
+        // A free block, or a new one at the end.
+        for (size_t i = 0; i < mTexBlocks.size(); ++i)
+        {
+            if (!mTexBlocks[i].memory)
+            {
+                mTexBlocks[i] = std::move(block);
+                return (S32)i;
+            }
+        }
+        mTexBlocks.push_back(std::move(block));
+        LL_INFOS("Vulkan") << "Textures in Vulkan's memory: block " << mTexBlocks.size() << " ("
+                           << (mTexBlocks.back().size >> 20) << " MB)" << LL_ENDL;
+        return (S32)mTexBlocks.size() - 1;
+    }
+
+    // First fit, aligned. False where the block has no room.
+    static bool takeRange(TexBlock& block, VkDeviceSize size, VkDeviceSize align, VkDeviceSize& offset)
+    {
+        for (auto it = block.free.begin(); it != block.free.end(); ++it)
+        {
+            const VkDeviceSize start = (it->first + align - 1) / align * align;
+            const VkDeviceSize end   = it->first + it->second;
+            if (start + size > end)
+            {
+                continue;
+            }
+            const VkDeviceSize before_start = it->first;
+            const VkDeviceSize before = start - it->first;
+            const VkDeviceSize after  = end - (start + size);
+            block.free.erase(it);
+            if (before)
+            {
+                block.free[before_start] = before;
+            }
+            if (after)
+            {
+                block.free[start + size] = after;
+            }
+            block.used += size;
+            offset = start;
+            return true;
+        }
+        return false;
+    }
+
+    static void giveRange(TexBlock& block, VkDeviceSize offset, VkDeviceSize size)
+    {
+        block.used -= llmin(block.used, size);
+        auto it = block.free.emplace(offset, size).first;
+        // With the free range after it, and the one before.
+        auto next = std::next(it);
+        if (next != block.free.end() && it->first + it->second == next->first)
+        {
+            it->second += next->second;
+            block.free.erase(next);
+        }
+        if (it != block.free.begin())
+        {
+            auto prev = std::prev(it);
+            if (prev->first + prev->second == it->first)
+            {
+                prev->second += it->second;
+                block.free.erase(it);
+            }
+        }
+    }
+
+    bool texAllocate(GLuint texture, GLint internal_format, GLsizei width, GLsizei height, GLsizei levels)
+    {
+        if (!mActive || !mDevice || !mTexShared || width <= 0 || height <= 0 || levels <= 0)
+        {
+            return false;
+        }
+        const S32 index = texFormatIndex((GLenum)internal_format);
+        if (index < 0)
+        {
+            ++mTexDeclined;
+            return false;
+        }
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        ExtTexture ext;
+        ext.width  = (U32)width;
+        ext.height = (U32)height;
+        ext.levels = (U32)levels;
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = TEX_FORMATS[index].vk;
+        info.extent        = { (U32)width, (U32)height, 1 };
+        info.mipLevels     = (U32)levels;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mDevice, &info, nullptr, &ext.image) != VK_SUCCESS)
+        {
+            ext.image = VK_NULL_HANDLE;
+            ++mTexDeclined;
+            return false;
+        }
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+        // A block with room, in a memory type the image can use, or a new one.
+        S32 block = -1;
+        VkDeviceSize offset = 0;
+        for (size_t i = 0; i < mTexBlocks.size() && block < 0; ++i)
+        {
+            TexBlock& b = mTexBlocks[i];
+            if (b.memory && (req.memoryTypeBits & (1u << b.type)) && takeRange(b, req.size, req.alignment, offset))
+            {
+                block = (S32)i;
+            }
+        }
+        if (block < 0)
+        {
+            block = newTexBlock(req.size + req.alignment, req.memoryTypeBits);
+            if (block < 0 || !takeRange(mTexBlocks[block], req.size, req.alignment, offset))
+            {
+                vkDestroyImage(mDevice, ext.image, nullptr);
+                ++mTexDeclined;
+                return false;
+            }
+        }
+        TexBlock& b = mTexBlocks[block];
+        if (vkBindImageMemory(mDevice, ext.image, b.memory, offset) != VK_SUCCESS)
+        {
+            giveRange(b, offset, req.size);
+            vkDestroyImage(mDevice, ext.image, nullptr);
+            ++mTexDeclined;
+            return false;
+        }
+        gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, b.glMemory, (GLuint64)offset);
+        if (mTexChecksLeft[index] > 0)
+        {
+            --mTexChecksLeft[index];
+            GLint immutable = GL_FALSE;
+            gl.GetTextureParameteriv(texture, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+            while (gl.GetError() != GL_NO_ERROR)
+            {
+            }
+            if (!immutable)
+            {
+                // GL would not take this format from shared memory: it stays GL's from now on.
+                LL_WARNS("Vulkan") << "Textures in Vulkan's memory: GL would not take a " << width << "x" << height << " "
+                                   << TEX_FORMATS[index].name << " texture: the format stays GL's" << LL_ENDL;
+                mTexFormatState[index] = 2;
+                giveRange(b, offset, req.size);
+                vkDestroyImage(mDevice, ext.image, nullptr);
+                ++mTexRefused;
+                return false;
+            }
+        }
+        ext.format = U32_MAX;  // a texture (the EXT_FORMATS index is the render targets')
+        ext.block  = block;
+        ext.offset = offset;
+        ext.size   = req.size;
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            mExtTextures[texture] = ext;
+        }
+        ++mTexGiven;
+        mTexBytes += req.size;
+        return true;
+    }
+
     std::string targetInfo() const
     {
         if (!mExtPassed)
@@ -3531,8 +3870,20 @@ struct QLVulkanPresenter::Impl
             return "targets: " + mExtNote;
         }
         std::lock_guard<std::mutex> lock(mExtMutex);
-        return llformat("targets: %s, %u in Vulkan's memory (%.0f MB); %s", mExtNote.c_str(),
-                        (U32)mExtTextures.size(), (double)mExtBytes / (1 << 20), mTexNote.c_str());
+        U32 targets = 0, textures = 0;
+        for (const auto& entry : mExtTextures)
+        {
+            (entry.second.block >= 0 ? textures : targets) += 1;
+        }
+        size_t blocks = 0;
+        for (const TexBlock& b : mTexBlocks)
+        {
+            blocks += b.memory ? 1 : 0;
+        }
+        return llformat("targets: %s, %u in Vulkan's memory (%.0f MB) | textures: %u (%.0f MB in %u blocks), %u GL's "
+                        "(format or room), %u refused | %s",
+                        mExtNote.c_str(), targets, (double)mExtBytes / (1 << 20), textures,
+                        (double)mTexBytes / (1 << 20), (U32)blocks, mTexDeclined, mTexRefused, mTexNote.c_str());
     }
 
     // ---- step 2 of geometry in Vulkan: shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------

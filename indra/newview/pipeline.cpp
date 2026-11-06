@@ -986,7 +986,11 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
     {
         return false;
     }
-    return QLVulkanPresenter::targetTest();
+    const bool passed = QLVulkanPresenter::targetTest();
+    // Fetched textures too (QuasarVulkanTextures, read at start), once the provider is there: piece 2.
+    static const bool textures = gSavedSettings.getBOOL("QuasarVulkanTextures");
+    gQLExternalTexturesWanted = passed && textures;
+    return passed;
 #else
     (void)pack;
     return false;

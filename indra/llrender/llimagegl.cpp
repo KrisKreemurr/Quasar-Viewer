@@ -54,6 +54,7 @@
 
 // Quasar: the provider of storage from another API's memory (qlexternalstorage.h), and where it is asked.
 QLExternalStorage* gQLExternalStorage = nullptr;
+bool gQLExternalTexturesWanted = false;
 static thread_local bool sQLExternalStorageWanted = false;
 
 QLExternalStorageScope::QLExternalStorageScope(bool wanted) : mPrevious(sQLExternalStorageWanted)
@@ -3853,12 +3854,21 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
 
     assertStorageAllocatable(mTarget, getStorageInternalFormat());
 
+    // Quasar: the storage from the external provider's shared memory (QuasarVulkanTextures), on the main thread, where
+    // it can give it; the uploads into it are GL's as ever.
+    const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && mTexName &&
+                          on_main_thread() &&
+                          gQLExternalStorage->allocateTexture(mTexName, getStorageInternalFormat(), width, height,
+                                                              mMipLevels);
     {
         LL_PROFILE_ZONE_NAMED("glTexStorage2D");
         // Dimensions, format and level count are fixed for the lifetime of this texture
         // object. Every later write must be a sub-image, and any change of size or format
         // must create a new texture -- see scaleDown and createGLTexture.
-        glTexStorage2D(mTarget, mMipLevels, getStorageInternalFormat(), width, height);
+        if (!external)
+        {
+            glTexStorage2D(mTarget, mMipLevels, getStorageInternalFormat(), width, height);
+        }
         skipSRGBDecode(mTarget);
         mStorageAllocated = true;
         mStorage.mWidth  = width;
