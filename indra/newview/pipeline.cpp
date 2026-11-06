@@ -15255,6 +15255,8 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
         static LLCachedControl<bool> sun_cache(gSavedSettings, "QuasarSunShadowCache", true);
         const bool cache_on = sun_cache() && sShadowCullMode() == 1 && mRT == &mMainRT && !gCubeSnapshot && !gSnapshot;
         bool moving_only[ALRenderResourcePlan::SUN_CASCADES] = {};
+        // Quasar: the cascades the cache may keep; the rest are drawn whole every frame, with no still map to keep.
+        bool cacheable[ALRenderResourcePlan::SUN_CASCADES] = {};
         bool any_full = false;
         if (mRT == &mMainRT && !gCubeSnapshot)
         {
@@ -15353,6 +15355,7 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
             if (cache_on && (S32)j >= llmax(llclamp((S32)cache_from(), 0, 3), self_cached_from) &&
                 mRT->shadow[j].isComplete())
             {
+                cacheable[j] = true;
                 const QLShadowCascadeKeep& kept = sCascadeKeep[j];
                 const U32 frame = LLFrameTimer::getFrameCount();
                 moving_only[j] = kept.mValid && kept.mStaticValid && kept.mStatic && kept.mStatic->isComplete()
@@ -16004,8 +16007,10 @@ void LLPipeline::generateSunShadow(LLCamera& camera)
                 mRT->shadow[j].clear();
 
                 // Quasar: with the cache on, the still casters first, kept, then what moves over them.
+                // Only a cascade the cache may keep splits its casters and keeps its still map: one it never keeps
+                // (the nearest, the camera's own avatar's) would copy it out and draw twice for nothing.
                 const bool keep_still = cache_on && have_union_cull && j < (S32)ALRenderResourcePlan::SUN_CASCADES &&
-                                        ql_ensure_still_map(sCascadeKeep[j], mRT->shadow[j]);
+                                        cacheable[j] && ql_ensure_still_map(sCascadeKeep[j], mRT->shadow[j]);
                 {
                     static LLCullResult result[4];
                     if (have_union_cull)
