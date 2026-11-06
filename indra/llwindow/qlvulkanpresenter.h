@@ -217,7 +217,8 @@ public:
     /// colour (4 bytes, from color_offset; ~0u where it has none and the test reads none), and joint weights where
     /// rigged. Each draw's texture is a tile of an alpha atlas: shadowMaskTexture finds it by the texture's GL name
     /// and content stamp, or has GL blit it in now from the mip level nearest the tile (levels: how many the texture
-    /// has; RGB or RGBA, not compressed, a 2D texture), and false leaves the caster GL's to draw. shadowDrawMasked:
+    /// has; RGBA, not compressed, a 2D texture; has_alpha false, an RGB one, takes the atlas's opaque tile and is not
+    /// copied), and false leaves the caster GL's to draw. shadowDrawMasked:
     /// its matrix, its palette (~0u unrigged), its tile, its texture matrix (GL's, column-major; null: none), its
     /// cutoff, and its test: 0 shadowAlphaMaskF (times the vertex alpha, then 0.05), 1 the same fullbright (no vertex
     /// alpha), 2 treeShadowF (the cutoff alone).
@@ -226,7 +227,7 @@ public:
                                   unsigned vertex_count, unsigned index_buffer, unsigned index_count,
                                   unsigned& base_vertex, unsigned& base_index);
     static bool shadowMaskTexture(unsigned texture, unsigned long long stamp, unsigned width, unsigned height,
-                                  unsigned levels, unsigned& tile);
+                                  unsigned levels, bool has_alpha, unsigned& tile);
     static bool shadowDrawMasked(const float mvp[16], unsigned palette, unsigned tile, const float* texture_matrix,
                                  float cutoff, unsigned test, unsigned base_vertex, unsigned first_index,
                                  unsigned index_count);

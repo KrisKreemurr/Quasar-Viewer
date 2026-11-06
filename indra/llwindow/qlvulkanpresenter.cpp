@@ -125,6 +125,8 @@ namespace
     typedef void (APIENTRY* QL_PFN_TextureStorage2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei);
     typedef void (APIENTRY* QL_PFN_CopyNamedBufferSubData)(GLuint, GLuint, GLintptr, GLintptr, GLsizeiptr);
     typedef void (APIENTRY* QL_PFN_NamedBufferStorageMemEXT)(GLuint, GLsizeiptr, GLuint, GLuint64);
+    typedef void (APIENTRY* QL_PFN_ClearTexSubImage)(GLuint, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei,
+                                                     GLenum, GLenum, const void*);
     typedef void (APIENTRY* QL_PFN_CopyImageSubData)(GLuint, GLenum, GLint, GLint, GLint, GLint, GLuint, GLenum, GLint,
                                                      GLint, GLint, GLint, GLsizei, GLsizei, GLsizei);
 
@@ -168,6 +170,7 @@ namespace
         QL_PFN_CopyNamedBufferSubData       CopyNamedBufferSubData = nullptr;
         QL_PFN_NamedBufferStorageMemEXT     NamedBufferStorageMemEXT = nullptr;
         QL_PFN_CreateObjects                CreateBuffers = nullptr;
+        QL_PFN_ClearTexSubImage             ClearTexSubImage = nullptr;
         QL_PFN_DeleteObjects                DeleteBuffers = nullptr;
 
         bool load()
@@ -212,6 +215,7 @@ namespace
             QL_GL_LOAD(CopyNamedBufferSubData, "glCopyNamedBufferSubData");
             QL_GL_LOAD(NamedBufferStorageMemEXT, "glNamedBufferStorageMemEXT");
             QL_GL_LOAD(CreateBuffers, "glCreateBuffers");
+            QL_GL_LOAD(ClearTexSubImage, "glClearTexSubImage");
             QL_GL_LOAD(DeleteBuffers, "glDeleteBuffers");
 #undef QL_GL_LOAD
             return true;
@@ -3311,6 +3315,12 @@ struct QLVulkanPresenter::Impl
         gl.TextureParameteri(mShAtlasGL, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
         gl.TextureStorageMem2DEXT(mShAtlasGL, 1, GL_RGBA8, (GLsizei)SH_ATLAS_SIZE, (GLsizei)SH_ATLAS_SIZE,
                                   mShAtlasGLMemory, 0);
+        // Opaque throughout to start: tile 0 stays so, the tile of every texture with no alpha channel (whose alpha
+        // is 1 everywhere, so nothing to copy), and a tile a blit fails to fill casts as solid rather than as whatever
+        // texture had it before.
+        const U8 opaque[4] = { 255, 255, 255, 255 };
+        gl.ClearTexSubImage(mShAtlasGL, 0, 0, 0, 0, (GLsizei)SH_ATLAS_SIZE, (GLsizei)SH_ATLAS_SIZE, 1, GL_RGBA,
+                            GL_UNSIGNED_BYTE, opaque);
         gl.CreateFramebuffers(1, &mShReadFbo);
         gl.CreateFramebuffers(1, &mShAtlasFbo);
         gl.NamedFramebufferTexture(mShAtlasFbo, GL_COLOR_ATTACHMENT0, mShAtlasGL, 0);
@@ -3377,7 +3387,7 @@ struct QLVulkanPresenter::Impl
 
         mShTiles.assign(SH_TILES, ShTile());
         mShTileOf.clear();
-        mShTilesTaken = 0;
+        mShTilesTaken = 1;  // tile 0 is the opaque one
         mShMaskReady = true;
         mShMaskNote  = "ready";
         LL_INFOS("Vulkan") << "Masked shadow casters in Vulkan ready: arenas of " << (mShMasked.totalBytes() >> 20)
@@ -3817,11 +3827,16 @@ struct QLVulkanPresenter::Impl
     // A texture's tile in the alpha atlas: found by its GL name and content stamp, or blitted in now by GL from the
     // level nearest the tile's size (levels: how many it has). The tile is the least recently drawn once all are
     // given out, never one the map being collected draws with. False when none is free: the caster is GL's.
-    bool shadowMaskTexture(GLuint texture, U64 stamp, U32 width, U32 height, U32 levels, U32& tile)
+    bool shadowMaskTexture(GLuint texture, U64 stamp, U32 width, U32 height, U32 levels, bool has_alpha, U32& tile)
     {
         if (!mShInPass || !mShMaskReady || !texture || width == 0 || height == 0)
         {
             return false;
+        }
+        if (!has_alpha)
+        {
+            tile = 0;  // alpha 1 everywhere: the opaque tile
+            return true;
         }
         const std::pair<GLuint, U64> key(texture, stamp);
         const auto found = mShTileOf.find(key);
@@ -3839,7 +3854,7 @@ struct QLVulkanPresenter::Impl
         else
         {
             U64 oldest = U64_MAX;
-            for (U32 i = 0; i < SH_TILES; ++i)
+            for (U32 i = 1; i < SH_TILES; ++i)
             {
                 if (mShTiles[i].lastPass != mShPassSerial && mShTiles[i].lastPass < oldest)
                 {
@@ -3870,6 +3885,11 @@ struct QLVulkanPresenter::Impl
         {
             gl.Disable(GL_SCISSOR_TEST);
         }
+        // Opaque first, so a blit that cannot read the texture (a level it does not have) leaves a solid tile, not the
+        // last texture's. A clear of the image, which no mask or scissor touches.
+        const U8 opaque[4] = { 255, 255, 255, 255 };
+        gl.ClearTexSubImage(mShAtlasGL, 0, x, y, 0, (GLsizei)SH_TILE, (GLsizei)SH_TILE, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            opaque);
         gl.NamedFramebufferTexture(mShReadFbo, GL_COLOR_ATTACHMENT0, texture, (GLint)level);
         gl.BlitNamedFramebuffer(mShReadFbo, mShAtlasFbo, 0, 0, src_w, src_h, x, y, x + (GLint)SH_TILE,
                                 y + (GLint)SH_TILE, GL_COLOR_BUFFER_BIT, GL_LINEAR);
@@ -5988,9 +6008,9 @@ bool QLVulkanPresenter::shadowArenaMasked(bool rigged, unsigned long long stamp,
 
 // static
 bool QLVulkanPresenter::shadowMaskTexture(unsigned texture, unsigned long long stamp, unsigned width, unsigned height,
-                                          unsigned levels, unsigned& tile)
+                                          unsigned levels, bool has_alpha, unsigned& tile)
 {
-    return sActive && sActive->shadowMaskTexture(texture, (U64)stamp, width, height, levels, tile);
+    return sActive && sActive->shadowMaskTexture(texture, (U64)stamp, width, height, levels, has_alpha, tile);
 }
 
 // static

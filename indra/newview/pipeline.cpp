@@ -13613,9 +13613,11 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                                         ++levels;
                                     }
                                 }
+                                // An RGB texture's alpha is 1 everywhere (and SRGB8 cannot be blitted from).
+                                const bool has_alpha = format == GL_RGBA8 || format == GL_SRGB8_ALPHA8;
                                 last_tiled = QLVulkanPresenter::shadowMaskTexture(image->getTexName(), image_stamp,
                                                                                   (unsigned)width, (unsigned)height,
-                                                                                  levels, tile);
+                                                                                  levels, has_alpha, tile);
                             }
                         }
                     }
