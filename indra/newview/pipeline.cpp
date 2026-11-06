@@ -13738,7 +13738,9 @@ std::string ql_shadow_gl_draws_info()
 {
     static const char* const names[QL_SHADOW_PARTS] = { "opaque", "gltf", "occlusion", "geom",
                                                          "masked", "blend", "grass", "gltf mask" };
-    const U32* d = sQLShadowPartLast;
+    // A copy, taken at once: the line reads it several times.
+    U32 d[QL_SHADOW_PARTS];
+    memcpy(d, sQLShadowPartLast, sizeof(d));
     U32 order[QL_SHADOW_PARTS];
     U32 total = 0;
     for (U32 i = 0; i < QL_SHADOW_PARTS; ++i)
@@ -13747,7 +13749,7 @@ std::string ql_shadow_gl_draws_info()
         total += d[i];
     }
     // The largest first: the line is long, and the screen cuts its end.
-    std::stable_sort(order, order + QL_SHADOW_PARTS, [d](U32 a, U32 b) { return d[a] > d[b]; });
+    std::stable_sort(order, order + QL_SHADOW_PARTS, [&d](U32 a, U32 b) { return d[a] > d[b]; });
     std::string info = llformat("%u |", total);
     for (U32 i = 0; i < QL_SHADOW_PARTS; ++i)
     {
