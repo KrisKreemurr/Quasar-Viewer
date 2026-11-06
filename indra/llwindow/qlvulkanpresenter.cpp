@@ -4416,14 +4416,16 @@ struct QLVulkanPresenter::Impl
                      (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
                      (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20), mShStatic.resets,
                      mShRigged.resets, mShPaletteCountLast);
+        // The masked casters first: the line is long, and the screen cuts its end.
         if (!mShMaskReady)
         {
-            return info + " | masked: " + mShMaskNote;
+            return "masked: " + mShMaskNote + " | " + info;
         }
-        return info + llformat(" | masked %u (%u rigged), arenas %.0f + %.0f MB, %u+%u resets, atlas %u/%u, %u new",
-                               mShMaskedLast + mShMaskedRiggedLast, mShMaskedRiggedLast,
-                               (double)mShMasked.used() / (1 << 20), (double)mShMaskedRigged.used() / (1 << 20),
-                               mShMasked.resets, mShMaskedRigged.resets, mShTilesTaken, SH_TILES, mShTileUploadsLast);
+        return llformat("masked %u (%u rigged), atlas %u/%u, %u new, arenas %.0f + %.0f MB, %u+%u resets | ",
+                        mShMaskedLast + mShMaskedRiggedLast, mShMaskedRiggedLast, mShTilesTaken, SH_TILES,
+                        mShTileUploadsLast, (double)mShMasked.used() / (1 << 20),
+                        (double)mShMaskedRigged.used() / (1 << 20), mShMasked.resets, mShMaskedRigged.resets) +
+               info;
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
