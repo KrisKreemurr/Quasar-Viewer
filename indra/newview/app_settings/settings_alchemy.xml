@@ -2883,6 +2883,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanShadowsRigged</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental): with QuasarVulkanShadows on, rigged shadow casters (avatars' bodies, clothes and hair; rigged mesh) are drawn by Vulkan too, skinned by their skeletons. Off: they stay in GL.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanShadows</key>
         <map>
             <key>Comment</key>

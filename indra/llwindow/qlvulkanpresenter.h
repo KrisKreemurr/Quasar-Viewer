@@ -199,6 +199,18 @@ public:
     /// arena: base_index plus the draw's own offset), base_vertex added to each.
     static bool shadowDraw(const float mvp[16], unsigned base_vertex, unsigned first_index, unsigned index_count);
 
+    /// Rigged casters (avatars, rigged mesh), after all of a map's unrigged ones. Their meshes go into an arena of their
+    /// own with each vertex's joint weights (16 bytes a vertex, from weight_offset), and each draw names its palette:
+    /// shadowPalette returns where this frame's copy of it is (written the first time any map asks for it this frame;
+    /// key tells avatar and skin apart; floats is LLVOAvatar::MatrixPaletteCache::mGLMp, the origin then 12 a joint),
+    /// or ~0u when it could not be kept, and the caster is then GL's to draw.
+    static bool shadowArenaRigged(unsigned long long stamp, unsigned vertex_buffer, unsigned vertex_offset,
+                                  unsigned weight_offset, unsigned vertex_count, unsigned index_buffer,
+                                  unsigned index_count, unsigned& base_vertex, unsigned& base_index);
+    static unsigned shadowPalette(unsigned long long key, const float* floats, unsigned count);
+    static bool shadowDrawRigged(const float mvp[16], unsigned palette, unsigned base_vertex, unsigned first_index,
+                                 unsigned index_count);
+
     static bool shadowEnd(unsigned depth_texture);
 
     /// Leaves a begun map without drawing it.

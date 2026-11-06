@@ -2680,18 +2680,53 @@ struct QLVulkanPresenter::Impl
     //     the map's size; Vulkan draws over it (load, no clear, so whatever GL had there stays: a kept still map, what GL
     //     drew before); GL copies it back and draws the rest (rigged, alpha-masked, terrain, trees) on top as before.
     //     Each side waits for the other on the GPU through two semaphores of their own, never on the CPU.
+    //   - Rigged casters (step 4: avatars, rigged mesh) go into an arena of their own, which keeps each vertex's joint
+    //     weights beside its position (same index, the second half), and each draw names its skeleton: the avatar's
+    //     palette for the skin, written once a frame into a ring every map of the frame reads (qlshadowskin.vert).
+    //     A map draws its unrigged casters, then its rigged ones: two indirect draws.
     static constexpr U32          SH_SLOTS = 96;  // ~34 maps a frame at most (probe faces, hero faces, cascades, spots), times the pacing depth
     static constexpr U32          SH_MAX_DRAWS = 8192;
     static constexpr VkDeviceSize SH_MVP_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 64;
     static constexpr VkDeviceSize SH_CMD_BYTES = (VkDeviceSize)SH_MAX_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
-    static constexpr VkDeviceSize SH_SLOT_BYTES = ((SH_MVP_BYTES + SH_CMD_BYTES) + 255) & ~(VkDeviceSize)255;
+    static constexpr VkDeviceSize SH_PALBASE_BYTES = (VkDeviceSize)SH_MAX_DRAWS * 4;
+    static constexpr VkDeviceSize SH_SLOT_BYTES =
+        ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES) + 255) & ~(VkDeviceSize)255;
+    static_assert((SH_MVP_BYTES + SH_CMD_BYTES) % 256 == 0, "each slot's palette bases start on a storage offset");
+    // The unrigged arena: positions, then indices. The rigged one: positions, weights beside them, then indices.
     static constexpr VkDeviceSize SH_ARENA_VERTEX_BYTES = 192ull << 20;
     static constexpr VkDeviceSize SH_ARENA_INDEX_BYTES = 64ull << 20;
+    static constexpr VkDeviceSize SH_RIGGED_VERTEX_BYTES = 128ull << 20;
+    static constexpr VkDeviceSize SH_RIGGED_INDEX_BYTES = 48ull << 20;
+    // A palette as LLVOAvatar packs it for GL: the origin, then three columns a joint, each a vec4; a slot of the ring
+    // holds the most a mesh can have. The ring is a segment a frame, four frames round: what the GPU reads of a frame is
+    // done three frames on, by the pacing depth GL's frame fences keep.
+    static constexpr U32          SH_PALETTE_VEC4S = 1 + 3 * 110;
+    static constexpr VkDeviceSize SH_PALETTE_BYTES = (VkDeviceSize)SH_PALETTE_VEC4S * 16;
+    static constexpr U32          SH_PALETTES_PER_FRAME = 1536;
+    static constexpr U32          SH_PALETTE_SEGMENTS = 4;
+    static constexpr VkDeviceSize SH_PALETTE_SEGMENT_BYTES = SH_PALETTE_BYTES * SH_PALETTES_PER_FRAME;
 
     struct ShArenaEntry
     {
         U32 mBaseVertex = 0;
         U32 mBaseIndex = 0;
+    };
+    // A buffer Vulkan allocates and GL imports, positions (16 bytes a vertex), weights beside them where it keeps any
+    // (the same index, from vertexBytes on), then 16-bit indices; filled by GL's copies, found again by content stamp.
+    struct ShArena
+    {
+        VkBuffer       buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        HANDLE         handle = nullptr;
+        GLuint         glMemory = 0, gl = 0;
+        VkDeviceSize   vertexBytes = 0, weightBytes = 0, indexBytes = 0;
+        VkDeviceSize   vertexTop = 0, indexTop = 0;
+        U32            resets = 0;
+        std::unordered_map<U64, ShArenaEntry> entries;
+
+        VkDeviceSize indexStart() const { return vertexBytes + weightBytes; }
+        VkDeviceSize totalBytes() const { return vertexBytes + weightBytes + indexBytes; }
+        VkDeviceSize used() const { return vertexTop * (weightBytes ? 2 : 1) + indexTop; }
     };
     struct ShDepth
     {
@@ -2716,12 +2751,16 @@ struct QLVulkanPresenter::Impl
     bool        mShReady = false;
     std::string mShNote = "off (QuasarVulkanShadows)";
 
-    VkBuffer       mShArena = VK_NULL_HANDLE;
-    VkDeviceMemory mShArenaMemory = VK_NULL_HANDLE;
-    HANDLE         mShArenaHandle = nullptr;
-    GLuint         mShArenaGLMemory = 0, mShArenaGL = 0;
-    VkDeviceSize   mShVertexTop = 0, mShIndexTop = 0;
-    std::unordered_map<U64, ShArenaEntry> mShEntries;
+    ShArena        mShStatic;
+    ShArena        mShRigged;
+
+    // The palettes: a host-visible ring Vulkan reads, a segment a frame; this frame's, found by avatar and skin.
+    VkBuffer       mShPalettes = VK_NULL_HANDLE;
+    VkDeviceMemory mShPalettesMemory = VK_NULL_HANDLE;
+    U8*            mShPalettesMapped = nullptr;
+    U32            mShPaletteFrame = U32_MAX;
+    U32            mShPaletteCount = 0;
+    std::unordered_map<U64, U32> mShPaletteBases;  // (avatar, skin) to the vec4 its palette starts at
 
     VkBuffer       mShHost = VK_NULL_HANDLE;
     VkDeviceMemory mShHostMemory = VK_NULL_HANDLE;
@@ -2734,7 +2773,9 @@ struct QLVulkanPresenter::Impl
     VkPipelineLayout      mShLayout = VK_NULL_HANDLE;
     VkShaderModule        mShModule = VK_NULL_HANDLE;
     VkRenderPass          mShPass = VK_NULL_HANDLE;
+    VkShaderModule        mShSkinModule = VK_NULL_HANDLE;
     VkPipeline            mShPipelines[4] = {};  // [clamp][greater]
+    VkPipeline            mShSkinPipelines[4] = {};
     std::vector<ShDepth>  mShDepths;
 
     VkSemaphore mShGLDoneVK = VK_NULL_HANDLE, mShVKDoneVK = VK_NULL_HANDLE;
@@ -2745,14 +2786,16 @@ struct QLVulkanPresenter::Impl
     bool     mShInPass = false;
     U32      mShSlot = 0;
     U32      mShDraws = 0;
+    U32      mShStaticDraws = 0;  // the first draws, unrigged; the rest are rigged
+    bool     mShRiggedStarted = false;
     U32      mShWidth = 0, mShHeight = 0;
     bool     mShClamp = false, mShGreater = false, mShRemapDepth = false;
 
     // For the status line: this frame's so far, and the last whole frame's.
     U32      mShFrame = 0;
     U32      mShPassesNow = 0, mShDrawsNow = 0, mShPassesLast = 0, mShDrawsLast = 0;
+    U32      mShRiggedNow = 0, mShRiggedLast = 0;
     U64      mShCopiedNow = 0, mShCopiedLast = 0;
-    U32      mShArenaResets = 0;
 
     bool shFail(const std::string& why)
     {
@@ -2783,68 +2826,13 @@ struct QLVulkanPresenter::Impl
             mShTried = false;  // tried again once it has
             return false;
         }
-        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
-                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 
-        // The arena: positions, then indices, exported to GL as one buffer object.
-        VkExternalMemoryBufferCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
-        external.handleTypes = handle_type;
-        VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        info.pNext       = &external;
-        info.size        = SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES;
-        info.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(mDevice, &info, nullptr, &mShArena) != VK_SUCCESS)
+        if (!createArena(mShStatic, SH_ARENA_VERTEX_BYTES, false, SH_ARENA_INDEX_BYTES, "unrigged arena") ||
+            !createArena(mShRigged, SH_RIGGED_VERTEX_BYTES, true, SH_RIGGED_INDEX_BYTES, "rigged arena"))
         {
-            mShArena = VK_NULL_HANDLE;
-            return shFail("vkCreateBuffer (arena)");
+            return false;
         }
         VkMemoryRequirements req = {};
-        vkGetBufferMemoryRequirements(mDevice, mShArena, &req);
-        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (device_type == U32_MAX)
-        {
-            return shFail("no device-local memory for the arena");
-        }
-        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
-        dedicated.buffer = mShArena;
-        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
-        exported.pNext       = &dedicated;
-        exported.handleTypes = handle_type;
-        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        alloc.pNext           = &exported;
-        alloc.allocationSize  = req.size;
-        alloc.memoryTypeIndex = device_type;
-        if (vkAllocateMemory(mDevice, &alloc, nullptr, &mShArenaMemory) != VK_SUCCESS)
-        {
-            mShArenaMemory = VK_NULL_HANDLE;
-            return shFail("vkAllocateMemory (arena, 256 MB)");
-        }
-        vkBindBufferMemory(mDevice, mShArena, mShArenaMemory, 0);
-        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
-        get.memory     = mShArenaMemory;
-        get.handleType = handle_type;
-        HANDLE handle  = nullptr;
-        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
-        {
-            return shFail("vkGetMemoryWin32HandleKHR (arena)");
-        }
-        if (!mKMT)
-        {
-            mShArenaHandle = handle;
-        }
-        gl.CreateMemoryObjectsEXT(1, &mShArenaGLMemory);
-        const GLint dedicated_flag = GL_TRUE;
-        gl.MemoryObjectParameterivEXT(mShArenaGLMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
-        gl.ImportMemoryWin32HandleEXT(mShArenaGLMemory, req.size,
-                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
-        gl.CreateBuffers(1, &mShArenaGL);
-        gl.NamedBufferStorageMemEXT(mShArenaGL, (GLsizeiptr)(SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES),
-                                    mShArenaGLMemory, 0);
-        gl.Finish();
-        logGLErrors("importing the shadow arena");
 
         // The ring the CPU writes each map's draws into.
         VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -2875,21 +2863,54 @@ struct QLVulkanPresenter::Impl
         }
         mShHostMapped = static_cast<U8*>(mapped);
 
+        // The palettes' ring.
+        VkBufferCreateInfo pal_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        pal_info.size        = SH_PALETTE_SEGMENT_BYTES * SH_PALETTE_SEGMENTS;
+        pal_info.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        pal_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &pal_info, nullptr, &mShPalettes) != VK_SUCCESS)
+        {
+            mShPalettes = VK_NULL_HANDLE;
+            return shFail("vkCreateBuffer (palettes)");
+        }
+        vkGetBufferMemoryRequirements(mDevice, mShPalettes, &req);
+        const U32 pal_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo pal_alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        pal_alloc.allocationSize  = req.size;
+        pal_alloc.memoryTypeIndex = pal_type;
+        if (pal_type == U32_MAX || vkAllocateMemory(mDevice, &pal_alloc, nullptr, &mShPalettesMemory) != VK_SUCCESS)
+        {
+            mShPalettesMemory = VK_NULL_HANDLE;
+            return shFail("no host memory for the palettes");
+        }
+        vkBindBufferMemory(mDevice, mShPalettes, mShPalettesMemory, 0);
+        mapped = nullptr;
+        if (vkMapMemory(mDevice, mShPalettesMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return shFail("vkMapMemory (palettes)");
+        }
+        mShPalettesMapped = static_cast<U8*>(mapped);
+
         // The descriptor set of each slot: its matrices.
-        VkDescriptorSetLayoutBinding binding = {};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        // The slot's matrices, its palette bases, and the palettes' ring.
+        VkDescriptorSetLayoutBinding bindings[3] = {};
+        for (U32 b = 0; b < 3; ++b)
+        {
+            bindings[b].binding         = b;
+            bindings[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[b].descriptorCount = 1;
+            bindings[b].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        }
         VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        set_info.bindingCount = 1;
-        set_info.pBindings    = &binding;
+        set_info.bindingCount = 3;
+        set_info.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mShSetLayout) != VK_SUCCESS)
         {
             mShSetLayout = VK_NULL_HANDLE;
             return shFail("vkCreateDescriptorSetLayout (shadows)");
         }
-        VkDescriptorPoolSize pool_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS };
+        VkDescriptorPoolSize pool_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SH_SLOTS * 3 };
         VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pool_info.maxSets       = SH_SLOTS;
         pool_info.poolSizeCount = 1;
@@ -2932,14 +2953,22 @@ struct QLVulkanPresenter::Impl
             {
                 return shFail("vkAllocateDescriptorSets (shadows)");
             }
-            VkDescriptorBufferInfo buffer = { mShHost, SH_SLOT_BYTES * i, SH_MVP_BYTES };
-            VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            write.dstSet          = slot.set;
-            write.dstBinding      = 0;
-            write.descriptorCount = 1;
-            write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.pBufferInfo     = &buffer;
-            vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+            const VkDescriptorBufferInfo buffers[3] = {
+                { mShHost, SH_SLOT_BYTES * i, SH_MVP_BYTES },
+                { mShHost, SH_SLOT_BYTES * i + SH_MVP_BYTES + SH_CMD_BYTES, SH_PALBASE_BYTES },
+                { mShPalettes, 0, SH_PALETTE_SEGMENT_BYTES * SH_PALETTE_SEGMENTS },
+            };
+            VkWriteDescriptorSet writes[3] = {};
+            for (U32 b = 0; b < 3; ++b)
+            {
+                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[b].dstSet          = slot.set;
+                writes[b].dstBinding      = b;
+                writes[b].descriptorCount = 1;
+                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[b].pBufferInfo     = &buffers[b];
+            }
+            vkUpdateDescriptorSets(mDevice, 3, writes, 0, nullptr);
         }
 
         // The render pass: a depth attachment loaded and stored, GENERAL throughout as every shared image is kept.
@@ -2974,6 +3003,13 @@ struct QLVulkanPresenter::Impl
             mShModule = VK_NULL_HANDLE;
             return shFail("vkCreateShaderModule (shadows)");
         }
+        module_info.codeSize = sizeof(ql_spv_qlshadowskin_vert);
+        module_info.pCode    = ql_spv_qlshadowskin_vert;
+        if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mShSkinModule) != VK_SUCCESS)
+        {
+            mShSkinModule = VK_NULL_HANDLE;
+            return shFail("vkCreateShaderModule (rigged shadows)");
+        }
         for (U32 clamp = 0; clamp < 2; ++clamp)
         {
             for (U32 greater = 0; greater < 2; ++greater)
@@ -2982,7 +3018,8 @@ struct QLVulkanPresenter::Impl
                 {
                     continue;
                 }
-                if (!createShadowPipeline(clamp != 0, greater != 0, mShPipelines[clamp * 2 + greater]))
+                if (!createShadowPipeline(clamp != 0, greater != 0, false, mShPipelines[clamp * 2 + greater]) ||
+                    !createShadowPipeline(clamp != 0, greater != 0, true, mShSkinPipelines[clamp * 2 + greater]))
                 {
                     return false;
                 }
@@ -2998,24 +3035,28 @@ struct QLVulkanPresenter::Impl
         mShReady = true;
         mShNote  = llformat("ready%s%s", mHasMultiIndirect ? "" : " (no multi-draw indirect: one call a draw)",
                             mHasDepthClamp ? "" : " (no depth clamp: the sun stays in GL)");
-        LL_INFOS("Vulkan") << "Shadows in Vulkan " << mShNote << ": a 256 MB arena, " << SH_SLOTS << " slots of "
-                           << SH_MAX_DRAWS << " draws" << LL_ENDL;
+        LL_INFOS("Vulkan") << "Shadows in Vulkan " << mShNote << ": arenas of "
+                           << (mShStatic.totalBytes() >> 20) << " MB (unrigged) and " << (mShRigged.totalBytes() >> 20)
+                           << " MB (rigged), " << SH_SLOTS << " slots of " << SH_MAX_DRAWS << " draws" << LL_ENDL;
         return true;
     }
 
-    bool createShadowPipeline(bool clamp, bool greater, VkPipeline& pipeline)
+    bool createShadowPipeline(bool clamp, bool greater, bool rigged, VkPipeline& pipeline)
     {
         VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
         stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
-        stage.module = mShModule;
+        stage.module = rigged ? mShSkinModule : mShModule;
         stage.pName  = "main";
-        VkVertexInputBindingDescription vertex_binding = { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX };
-        VkVertexInputAttributeDescription position = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+        // Positions at binding 0; for a rigged caster, its weights at binding 1 (the arena's second part, bound there).
+        const VkVertexInputBindingDescription vertex_bindings[2] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
+                                                                     { 1, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
+        const VkVertexInputAttributeDescription attributes[2] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+                                                                  { 1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertex_input.vertexBindingDescriptionCount   = 1;
-        vertex_input.pVertexBindingDescriptions      = &vertex_binding;
-        vertex_input.vertexAttributeDescriptionCount = 1;
-        vertex_input.pVertexAttributeDescriptions    = &position;
+        vertex_input.vertexBindingDescriptionCount   = rigged ? 2 : 1;
+        vertex_input.pVertexBindingDescriptions      = vertex_bindings;
+        vertex_input.vertexAttributeDescriptionCount = rigged ? 2 : 1;
+        vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
@@ -3056,7 +3097,7 @@ struct QLVulkanPresenter::Impl
         if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
-            return shFail("vkCreateGraphicsPipelines (shadows)");
+            return shFail(rigged ? "vkCreateGraphicsPipelines (rigged shadows)" : "vkCreateGraphicsPipelines (shadows)");
         }
         return true;
     }
@@ -3234,7 +3275,14 @@ struct QLVulkanPresenter::Impl
             if (p) vkDestroyPipeline(mDevice, p, nullptr);
             p = VK_NULL_HANDLE;
         }
+        for (VkPipeline& p : mShSkinPipelines)
+        {
+            if (p) vkDestroyPipeline(mDevice, p, nullptr);
+            p = VK_NULL_HANDLE;
+        }
         if (mShModule) vkDestroyShaderModule(mDevice, mShModule, nullptr);
+        if (mShSkinModule) vkDestroyShaderModule(mDevice, mShSkinModule, nullptr);
+        mShSkinModule = VK_NULL_HANDLE;
         if (mShPass) vkDestroyRenderPass(mDevice, mShPass, nullptr);
         if (mShLayout) vkDestroyPipelineLayout(mDevice, mShLayout, nullptr);
         if (mShDescriptorPool) vkDestroyDescriptorPool(mDevice, mShDescriptorPool, nullptr);
@@ -3253,18 +3301,19 @@ struct QLVulkanPresenter::Impl
         if (mShHostMemory) vkFreeMemory(mDevice, mShHostMemory, nullptr);
         mShHost = VK_NULL_HANDLE;
         mShHostMemory = VK_NULL_HANDLE;
-        if (mShArenaGL) gl.DeleteBuffers(1, &mShArenaGL);
-        if (mShArenaGLMemory) gl.DeleteMemoryObjectsEXT(1, &mShArenaGLMemory);
-        if (mShArena) vkDestroyBuffer(mDevice, mShArena, nullptr);
-        if (mShArenaMemory) vkFreeMemory(mDevice, mShArenaMemory, nullptr);
-        if (mShArenaHandle) CloseHandle(mShArenaHandle);
-        mShArenaGL = 0;
-        mShArenaGLMemory = 0;
-        mShArena = VK_NULL_HANDLE;
-        mShArenaMemory = VK_NULL_HANDLE;
-        mShArenaHandle = nullptr;
-        mShEntries.clear();
-        mShVertexTop = mShIndexTop = 0;
+        if (mShPalettesMapped)
+        {
+            vkUnmapMemory(mDevice, mShPalettesMemory);
+            mShPalettesMapped = nullptr;
+        }
+        if (mShPalettes) vkDestroyBuffer(mDevice, mShPalettes, nullptr);
+        if (mShPalettesMemory) vkFreeMemory(mDevice, mShPalettesMemory, nullptr);
+        mShPalettes = VK_NULL_HANDLE;
+        mShPalettesMemory = VK_NULL_HANDLE;
+        mShPaletteBases.clear();
+        mShPaletteFrame = U32_MAX;
+        destroyArena(mShStatic);
+        destroyArena(mShRigged);
         if (mShGLDoneGL) gl.DeleteSemaphoresEXT(1, &mShGLDoneGL);
         if (mShVKDoneGL) gl.DeleteSemaphoresEXT(1, &mShVKDoneGL);
         if (mShGLDoneVK) vkDestroySemaphore(mDevice, mShGLDoneVK, nullptr);
@@ -3284,6 +3333,8 @@ struct QLVulkanPresenter::Impl
         {
             mShPassesLast = mShPassesNow;
             mShDrawsLast  = mShDrawsNow;
+            mShRiggedLast = mShRiggedNow;
+            mShRiggedNow  = 0;
             mShCopiedLast = mShCopiedNow;
             mShPassesNow = mShDrawsNow = 0;
             mShCopiedNow = 0;
@@ -3301,14 +3352,9 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
-        // Start the arena over when it is nearly full, before any of this map's draws is in it.
-        if (mShVertexTop > SH_ARENA_VERTEX_BYTES - SH_ARENA_VERTEX_BYTES / 8 ||
-            mShIndexTop > SH_ARENA_INDEX_BYTES - SH_ARENA_INDEX_BYTES / 8)
-        {
-            mShEntries.clear();
-            mShVertexTop = mShIndexTop = 0;
-            ++mShArenaResets;
-        }
+        // Start an arena over when it is nearly full, before any of this map's draws is in it.
+        resetArenaIfFull(mShStatic);
+        resetArenaIfFull(mShRigged);
         ShSlot& slot = mShSlots[mShNextSlot];
         if (slot.submitted)
         {
@@ -3323,6 +3369,8 @@ struct QLVulkanPresenter::Impl
         mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
         mShInPass     = true;
         mShDraws      = 0;
+        mShStaticDraws   = 0;
+        mShRiggedStarted = false;
         mShWidth      = width;
         mShHeight     = height;
         mShClamp      = clamp;
@@ -3331,16 +3379,17 @@ struct QLVulkanPresenter::Impl
         return true;
     }
 
-    // A mesh in the arena: found by its content stamp, or copied in now. False when it does not fit.
-    bool shadowArena(U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 vertex_count, GLuint index_buffer,
-                     U32 index_count, U32& base_vertex, U32& base_index)
+    // A mesh in an arena: found by its content stamp, or copied in now (its weights too, where the arena keeps them).
+    // False when it does not fit.
+    bool arenaPlace(ShArena& arena, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
+                    U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index)
     {
         if (!mShInPass)
         {
             return false;
         }
-        const auto found = mShEntries.find(stamp);
-        if (found != mShEntries.end())
+        const auto found = arena.entries.find(stamp);
+        if (found != arena.entries.end())
         {
             base_vertex = found->second.mBaseVertex;
             base_index  = found->second.mBaseIndex;
@@ -3349,33 +3398,194 @@ struct QLVulkanPresenter::Impl
         const VkDeviceSize vertex_bytes = (VkDeviceSize)vertex_count * 16;
         const VkDeviceSize index_bytes  = ((VkDeviceSize)index_count * 2 + 3) & ~(VkDeviceSize)3;
         if (!vertex_buffer || !index_buffer || vertex_count == 0 || index_count == 0 ||
-            mShVertexTop + vertex_bytes > SH_ARENA_VERTEX_BYTES || mShIndexTop + index_bytes > SH_ARENA_INDEX_BYTES)
+            arena.vertexTop + vertex_bytes > arena.vertexBytes || arena.indexTop + index_bytes > arena.indexBytes)
         {
             return false;
         }
-        gl.CopyNamedBufferSubData(vertex_buffer, mShArenaGL, (GLintptr)vertex_offset, (GLintptr)mShVertexTop,
+        gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)vertex_offset, (GLintptr)arena.vertexTop,
                                   (GLsizeiptr)vertex_bytes);
-        gl.CopyNamedBufferSubData(index_buffer, mShArenaGL, 0, (GLintptr)(SH_ARENA_VERTEX_BYTES + mShIndexTop),
+        if (arena.weightBytes)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)weight_offset,
+                                      (GLintptr)(arena.vertexBytes + arena.vertexTop), (GLsizeiptr)vertex_bytes);
+        }
+        gl.CopyNamedBufferSubData(index_buffer, arena.gl, 0, (GLintptr)(arena.indexStart() + arena.indexTop),
                                   (GLsizeiptr)index_count * 2);
         ShArenaEntry entry;
-        entry.mBaseVertex = (U32)(mShVertexTop / 16);
-        entry.mBaseIndex  = (U32)(mShIndexTop / 2);
-        mShEntries.emplace(stamp, entry);
-        mShVertexTop += vertex_bytes;
-        mShIndexTop += index_bytes;
-        mShCopiedNow += vertex_bytes + index_bytes;
+        entry.mBaseVertex = (U32)(arena.vertexTop / 16);
+        entry.mBaseIndex  = (U32)(arena.indexTop / 2);
+        arena.entries.emplace(stamp, entry);
+        arena.vertexTop += vertex_bytes;
+        arena.indexTop += index_bytes;
+        mShCopiedNow += vertex_bytes * (arena.weightBytes ? 2 : 1) + index_bytes;
         base_vertex = entry.mBaseVertex;
         base_index  = entry.mBaseIndex;
         return true;
     }
 
+    bool shadowArena(U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 vertex_count, GLuint index_buffer,
+                     U32 index_count, U32& base_vertex, U32& base_index)
+    {
+        return arenaPlace(mShStatic, stamp, vertex_buffer, vertex_offset, 0, vertex_count, index_buffer, index_count,
+                          base_vertex, base_index);
+    }
+
+    bool shadowArenaRigged(U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset, U32 vertex_count,
+                           GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index)
+    {
+        return arenaPlace(mShRigged, stamp, vertex_buffer, vertex_offset, weight_offset, vertex_count, index_buffer,
+                          index_count, base_vertex, base_index);
+    }
+
+    void resetArenaIfFull(ShArena& arena)
+    {
+        if (arena.vertexTop > arena.vertexBytes - arena.vertexBytes / 8 ||
+            arena.indexTop > arena.indexBytes - arena.indexBytes / 8)
+        {
+            arena.entries.clear();
+            arena.vertexTop = arena.indexTop = 0;
+            ++arena.resets;
+        }
+    }
+
+    // A skin's palette for this frame, written into this frame's segment of the ring the first time any map asks for
+    // it. key identifies the avatar and the skin; floats is mGLMp (the origin, then 12 a joint). U32_MAX when the
+    // segment is full or the palette is larger than a mesh can have.
+    U32 shadowPalette(U64 key, const float* data, U32 floats)
+    {
+        if (!mShPalettesMapped || !data || floats < 4 || floats > SH_PALETTE_VEC4S * 4)
+        {
+            return U32_MAX;
+        }
+        if (mShPaletteFrame != mShFrame)
+        {
+            mShPaletteFrame = mShFrame;
+            mShPaletteBases.clear();
+            mShPaletteCount = 0;
+        }
+        const auto found = mShPaletteBases.find(key);
+        if (found != mShPaletteBases.end())
+        {
+            return found->second;
+        }
+        if (mShPaletteCount >= SH_PALETTES_PER_FRAME)
+        {
+            return U32_MAX;
+        }
+        const U32 segment = mShFrame % SH_PALETTE_SEGMENTS;
+        const VkDeviceSize offset = SH_PALETTE_SEGMENT_BYTES * segment + SH_PALETTE_BYTES * mShPaletteCount;
+        memcpy(mShPalettesMapped + offset, data, (size_t)floats * sizeof(float));
+        const U32 base = (U32)(offset / 16);
+        ++mShPaletteCount;
+        mShPaletteBases.emplace(key, base);
+        return base;
+    }
+
+    bool createArena(ShArena& arena, VkDeviceSize vertex_bytes, bool weights, VkDeviceSize index_bytes, const char* what)
+    {
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        arena.vertexBytes = vertex_bytes;
+        arena.weightBytes = weights ? vertex_bytes : 0;
+        arena.indexBytes  = index_bytes;
+        VkExternalMemoryBufferCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        info.pNext       = &external;
+        info.size        = arena.totalBytes();
+        info.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &info, nullptr, &arena.buffer) != VK_SUCCESS)
+        {
+            arena.buffer = VK_NULL_HANDLE;
+            return shFail(llformat("vkCreateBuffer (%s)", what));
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, arena.buffer, &req);
+        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (device_type == U32_MAX)
+        {
+            return shFail(llformat("no device-local memory for the %s", what));
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.buffer = arena.buffer;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = device_type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &arena.memory) != VK_SUCCESS)
+        {
+            arena.memory = VK_NULL_HANDLE;
+            return shFail(llformat("vkAllocateMemory (%s, %u MB)", what, (U32)(arena.totalBytes() >> 20)));
+        }
+        vkBindBufferMemory(mDevice, arena.buffer, arena.memory, 0);
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = arena.memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return shFail(llformat("vkGetMemoryWin32HandleKHR (%s)", what));
+        }
+        if (!mKMT)
+        {
+            arena.handle = handle;
+        }
+        gl.CreateMemoryObjectsEXT(1, &arena.glMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(arena.glMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(arena.glMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.CreateBuffers(1, &arena.gl);
+        gl.NamedBufferStorageMemEXT(arena.gl, (GLsizeiptr)arena.totalBytes(), arena.glMemory, 0);
+        gl.Finish();
+        logGLErrors(what);
+        return true;
+    }
+
+    void destroyArena(ShArena& arena)
+    {
+        if (arena.gl) gl.DeleteBuffers(1, &arena.gl);
+        if (arena.glMemory) gl.DeleteMemoryObjectsEXT(1, &arena.glMemory);
+        if (arena.buffer) vkDestroyBuffer(mDevice, arena.buffer, nullptr);
+        if (arena.memory) vkFreeMemory(mDevice, arena.memory, nullptr);
+        if (arena.handle) CloseHandle(arena.handle);
+        arena = ShArena();
+    }
+
     bool shadowDraw(const float mvp[16], U32 base_vertex, U32 first_index, U32 index_count)
     {
-        if (!mShInPass || mShDraws >= SH_MAX_DRAWS)
+        if (!mShInPass || mShRiggedStarted || mShDraws >= SH_MAX_DRAWS)
         {
             return false;
         }
+        writeShadowDraw(mvp, base_vertex, first_index, index_count, 0);
+        mShStaticDraws = mShDraws;
+        return true;
+    }
+
+    // A rigged caster, after all the map's unrigged ones: its matrix, its palette (shadowPalette) and its mesh in the
+    // rigged arena.
+    bool shadowDrawRigged(const float mvp[16], U32 palette_base, U32 base_vertex, U32 first_index, U32 index_count)
+    {
+        if (!mShInPass || mShDraws >= SH_MAX_DRAWS || palette_base == U32_MAX)
+        {
+            return false;
+        }
+        mShRiggedStarted = true;
+        writeShadowDraw(mvp, base_vertex, first_index, index_count, palette_base);
+        return true;
+    }
+
+    void writeShadowDraw(const float mvp[16], U32 base_vertex, U32 first_index, U32 index_count, U32 palette_base)
+    {
         U8* slot = mShHostMapped + SH_SLOT_BYTES * mShSlot;
+        memcpy(slot + SH_MVP_BYTES + SH_CMD_BYTES + (size_t)mShDraws * 4, &palette_base, 4);
         memcpy(slot + (size_t)mShDraws * 64, mvp, 64);
         VkDrawIndexedIndirectCommand cmd = {};
         cmd.indexCount    = index_count;
@@ -3385,7 +3595,6 @@ struct QLVulkanPresenter::Impl
         cmd.firstInstance = mShDraws;
         memcpy(slot + SH_MVP_BYTES + (size_t)mShDraws * sizeof(cmd), &cmd, sizeof(cmd));
         ++mShDraws;
-        return true;
     }
 
     // The map's casters, drawn over what GL's depth_texture holds; back in it once Vulkan is done.
@@ -3401,11 +3610,16 @@ struct QLVulkanPresenter::Impl
             return true;
         }
         ShDepth* target = shadowDepth(mShWidth, mShHeight);
-        const VkPipeline pipeline = mShPipelines[(mShClamp ? 2 : 0) + (mShGreater ? 1 : 0)];
-        if (!target || !pipeline || !depth_texture)
+        const U32 variant = (mShClamp ? 2 : 0) + (mShGreater ? 1 : 0);
+        const VkPipeline pipeline = mShPipelines[variant];
+        const VkPipeline skin_pipeline = mShSkinPipelines[variant];
+        if (!target || !pipeline || !skin_pipeline || !depth_texture)
         {
             return false;
         }
+        const U32 static_draws = mShStaticDraws;
+        const U32 rigged_draws = mShDraws - mShStaticDraws;
+        const GLuint gl_buffers[2] = { mShStatic.gl, mShRigged.gl };
         LL_PROFILE_ZONE_NAMED("vulkan shadow map");
         const GLint w = (GLint)mShWidth;
         const GLint h = (GLint)mShHeight;
@@ -3414,7 +3628,7 @@ struct QLVulkanPresenter::Impl
         // GL: the map as it stands into Vulkan's image, and both over to Vulkan.
         gl.CopyImageSubData(depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
                             1);
-        gl.SignalSemaphoreEXT(mShGLDoneGL, 1, &mShArenaGL, 1, &target->glTexture, &general);
+        gl.SignalSemaphoreEXT(mShGLDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
         gl.Flush();
 
         ShSlot& slot = mShSlots[mShSlot];
@@ -3423,9 +3637,12 @@ struct QLVulkanPresenter::Impl
         VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(slot.cmd, &begin);
-        bufferBarrier(slot.cmd, mShArena, 0, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
-                      VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+        for (const ShArena* arena : { &mShStatic, &mShRigged })
+        {
+            bufferBarrier(slot.cmd, arena->buffer, 0, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+                          VK_QUEUE_FAMILY_EXTERNAL, mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+        }
         VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         acquire.srcAccessMask       = 0;
         acquire.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
@@ -3449,31 +3666,56 @@ struct QLVulkanPresenter::Impl
         const VkRect2D scissor = { { 0, 0 }, { mShWidth, mShHeight } };
         vkCmdSetViewport(slot.cmd, 0, 1, &viewport);
         vkCmdSetScissor(slot.cmd, 0, 1, &scissor);
-        vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mShLayout, 0, 1, &slot.set, 0, nullptr);
         const float flags[4] = { mShRemapDepth ? 1.f : 0.f, 0.f, 0.f, 0.f };
         vkCmdPushConstants(slot.cmd, mShLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(flags), flags);
-        const VkDeviceSize zero = 0;
-        vkCmdBindVertexBuffers(slot.cmd, 0, 1, &mShArena, &zero);
-        vkCmdBindIndexBuffer(slot.cmd, mShArena, SH_ARENA_VERTEX_BYTES, VK_INDEX_TYPE_UINT16);
         const VkDeviceSize commands = SH_SLOT_BYTES * mShSlot + SH_MVP_BYTES;
-        if (mHasMultiIndirect)
+        const VkDrawIndexedIndirectCommand* cmds =
+            reinterpret_cast<const VkDrawIndexedIndirectCommand*>(mShHostMapped + commands);
+        // Draws [first, first + count) of the slot, by one indirect draw where the device can.
+        auto draw_range = [&](U32 first, U32 count)
         {
-            vkCmdDrawIndexedIndirect(slot.cmd, mShHost, commands, mShDraws, sizeof(VkDrawIndexedIndirectCommand));
-        }
-        else
-        {
-            const VkDrawIndexedIndirectCommand* cmds = reinterpret_cast<const VkDrawIndexedIndirectCommand*>(
-                mShHostMapped + commands);
-            for (U32 i = 0; i < mShDraws; ++i)
+            if (count == 0)
             {
-                vkCmdDrawIndexed(slot.cmd, cmds[i].indexCount, 1, cmds[i].firstIndex, cmds[i].vertexOffset, i);
+                return;
             }
+            if (mHasMultiIndirect)
+            {
+                vkCmdDrawIndexedIndirect(slot.cmd, mShHost, commands + (VkDeviceSize)first * sizeof(*cmds), count,
+                                         sizeof(VkDrawIndexedIndirectCommand));
+            }
+            else
+            {
+                for (U32 i = first; i < first + count; ++i)
+                {
+                    vkCmdDrawIndexed(slot.cmd, cmds[i].indexCount, 1, cmds[i].firstIndex, cmds[i].vertexOffset, i);
+                }
+            }
+        };
+        if (static_draws)
+        {
+            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            const VkDeviceSize zero = 0;
+            vkCmdBindVertexBuffers(slot.cmd, 0, 1, &mShStatic.buffer, &zero);
+            vkCmdBindIndexBuffer(slot.cmd, mShStatic.buffer, mShStatic.indexStart(), VK_INDEX_TYPE_UINT16);
+            draw_range(0, static_draws);
+        }
+        if (rigged_draws)
+        {
+            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skin_pipeline);
+            const VkBuffer buffers[2] = { mShRigged.buffer, mShRigged.buffer };
+            const VkDeviceSize offsets[2] = { 0, mShRigged.vertexBytes };
+            vkCmdBindVertexBuffers(slot.cmd, 0, 2, buffers, offsets);
+            vkCmdBindIndexBuffer(slot.cmd, mShRigged.buffer, mShRigged.indexStart(), VK_INDEX_TYPE_UINT16);
+            draw_range(static_draws, rigged_draws);
         }
         vkCmdEndRenderPass(slot.cmd);
 
-        bufferBarrier(slot.cmd, mShArena, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
-                      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        for (const ShArena* arena : { &mShStatic, &mShRigged })
+        {
+            bufferBarrier(slot.cmd, arena->buffer, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
         VkImageMemoryBarrier release = acquire;
         release.srcAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         release.dstAccessMask       = 0;
@@ -3502,11 +3744,12 @@ struct QLVulkanPresenter::Impl
         slot.submitted = true;
 
         // GL: back once Vulkan is done (on the GPU), and the map into GL's own texture.
-        gl.WaitSemaphoreEXT(mShVKDoneGL, 1, &mShArenaGL, 1, &target->glTexture, &general);
+        gl.WaitSemaphoreEXT(mShVKDoneGL, 2, gl_buffers, 1, &target->glTexture, &general);
         gl.CopyImageSubData(target->glTexture, GL_TEXTURE_2D, 0, 0, 0, 0, depth_texture, GL_TEXTURE_2D, 0, 0, 0, 0, w, h,
                             1);
         ++mShPassesNow;
         mShDrawsNow += mShDraws;
+        mShRiggedNow += rigged_draws;
         return true;
     }
 
@@ -3522,10 +3765,12 @@ struct QLVulkanPresenter::Impl
         {
             return mShNote;
         }
-        return llformat("%u maps, %u draws last frame | arena %.0f/%.0f MB, %.1f MB copied last frame, %u resets",
-                        mShPassesLast, mShDrawsLast, (double)(mShVertexTop + mShIndexTop) / (1 << 20),
-                        (double)(SH_ARENA_VERTEX_BYTES + SH_ARENA_INDEX_BYTES) / (1 << 20),
-                        (double)mShCopiedLast / (1 << 20), mShArenaResets);
+        return llformat("%u maps, %u draws (%u rigged) last frame | arenas %.0f/%.0f + %.0f/%.0f MB, %.1f MB copied, "
+                        "%u+%u resets, %u palettes",
+                        mShPassesLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
+                        (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
+                        (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20),
+                        mShStatic.resets, mShRigged.resets, mShPaletteCount);
     }
 
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
@@ -5065,6 +5310,35 @@ bool QLVulkanPresenter::shadowDraw(const float mvp[16], unsigned base_vertex, un
                                    unsigned index_count)
 {
     return sActive && sActive->shadowDraw(mvp, base_vertex, first_index, index_count);
+}
+
+// static
+bool QLVulkanPresenter::shadowArenaRigged(unsigned long long stamp, unsigned vertex_buffer, unsigned vertex_offset,
+                                          unsigned weight_offset, unsigned vertex_count, unsigned index_buffer,
+                                          unsigned index_count, unsigned& base_vertex, unsigned& base_index)
+{
+    U32 bv = 0, bi = 0;
+    if (!sActive || !sActive->shadowArenaRigged((U64)stamp, (GLuint)vertex_buffer, vertex_offset, weight_offset,
+                                                vertex_count, (GLuint)index_buffer, index_count, bv, bi))
+    {
+        return false;
+    }
+    base_vertex = bv;
+    base_index  = bi;
+    return true;
+}
+
+// static
+unsigned QLVulkanPresenter::shadowPalette(unsigned long long key, const float* floats, unsigned count)
+{
+    return sActive ? sActive->shadowPalette((U64)key, floats, count) : ~0u;
+}
+
+// static
+bool QLVulkanPresenter::shadowDrawRigged(const float mvp[16], unsigned palette, unsigned base_vertex,
+                                         unsigned first_index, unsigned index_count)
+{
+    return sActive && sActive->shadowDrawRigged(mvp, palette, base_vertex, first_index, index_count);
 }
 
 // static

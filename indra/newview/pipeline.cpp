@@ -13310,10 +13310,15 @@ static bool ql_vulkan_shadows_wanted()
 #endif
 }
 
-// Draws the unrigged casters of SHADOW_GEOMETRY_PASSES into the bound shadow map with Vulkan. True when it has:
-// drawShadow then leaves them out of its own pass and draws those Vulkan could not take, left in `leftovers`, with GL.
-static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, std::vector<LLDrawInfo*>& leftovers)
+// Draws the casters of SHADOW_GEOMETRY_PASSES into the bound shadow map with Vulkan: the unrigged ones, and, with
+// QuasarVulkanShadowsRigged, the rigged ones (their passes' type + 1), skinned by their avatars' palettes. True when it
+// has: drawShadow then leaves the unrigged out of its own pass, and the rigged too where `rigged` comes back set, and
+// draws those Vulkan could not take, left in `leftovers` and `rigged_leftovers`, with GL.
+static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, std::vector<LLDrawInfo*>& leftovers,
+                                     bool& rigged, std::vector<LLDrawInfo*>& rigged_leftovers)
 {
+    rigged = false;
+    rigged_leftovers.clear();
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
     if (!ql_vulkan_shadows_wanted() || gPipeline.resourceInputs().mShadowDetail > 2)
@@ -13381,10 +13386,87 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         }
     }
 
+    // The rigged casters, after every unrigged one: each mesh with its weights into the rigged arena, each draw with its
+    // avatar's palette for the skin, as LLRenderPass::uploadMatrixPalette finds it.
+    static LLCachedControl<bool> rigged_enabled(gSavedSettings, "QuasarVulkanShadowsRigged", true);
+    rigged = rigged_enabled();
+    if (rigged)
+    {
+        last_vb = nullptr;
+        last_in_arena = false;
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_skin = 0;
+        unsigned palette = ~0u;
+        bool skip_skin = true;
+        for (U32 type : SHADOW_GEOMETRY_PASSES)
+        {
+            const U32 rigged_type = type + 1;
+            auto* end = gPipeline.endRenderMap(rigged_type);
+            for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(rigged_type); i != end;)
+            {
+                LLDrawInfo* params = *i;
+                LLCullResult::increment_iterator(i, end);
+                if (!params || !params->mCount || !params->mAvatar || !params->mSkinInfo)
+                {
+                    continue;
+                }
+                LLVOAvatar* avatar = params->mAvatar.get();
+                const U64 skin = params->mSkinInfo->mHash;
+                if (avatar != last_avatar || skin != last_skin)
+                {
+                    last_avatar = avatar;
+                    last_skin   = skin;
+                    const LLVOAvatar::MatrixPaletteCache& mpc = avatar->updateSkinInfoMatrixPalette(params->mSkinInfo);
+                    // No palette yet (the skin not loaded): GL would not draw it either.
+                    skip_skin = mpc.mMatrixPalette.empty();
+                    const U64 key = (skin * 0x9E3779B97F4A7C15ull) ^ (U64)(uintptr_t)avatar;
+                    palette = skip_skin ? ~0u
+                                        : QLVulkanPresenter::shadowPalette(key, mpc.mGLMp.data(), (U32)mpc.mGLMp.size());
+                }
+                if (skip_skin)
+                {
+                    continue;
+                }
+                const LLVertexBuffer* vb = params->mVertexBuffer.get();
+                if (vb != last_vb)
+                {
+                    last_vb = vb;
+                    last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
+                                    vb->hasDataType(LLVertexBuffer::TYPE_WEIGHT4) &&
+                                    QLVulkanPresenter::shadowArenaRigged(
+                                        vb->getContentStamp(), LLNavShapeVBOManager::glBuffer(vb),
+                                        vb->getOffset(LLVertexBuffer::TYPE_VERTEX),
+                                        vb->getOffset(LLVertexBuffer::TYPE_WEIGHT4), vb->getNumVerts(),
+                                        LLNavShapeVBOManager::glIndices(vb), vb->getNumIndices(), base_vertex,
+                                        base_index);
+                }
+                bool drawn = false;
+                if (last_in_arena && palette != ~0u)
+                {
+                    LLMatrix4a modelview = view;
+                    if (params->mModelMatrix)
+                    {
+                        modelview.setMul(*params->mModelMatrix, modelview);
+                    }
+                    LLMatrix4a mvp;
+                    mvp.setMul(modelview, proj);
+                    drawn = QLVulkanPresenter::shadowDrawRigged(mvp.getF32ptr(), palette, base_vertex,
+                                                                base_index + params->mOffset, params->mCount);
+                }
+                if (!drawn)
+                {
+                    rigged_leftovers.push_back(params);
+                }
+            }
+        }
+    }
+
     gGL.flush();
     if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
     {
         leftovers.clear();
+        rigged = false;
+        rigged_leftovers.clear();
         return false;  // nothing drawn: GL draws them all
     }
     return true;
@@ -13500,8 +13582,10 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
 
     // Quasar: the unrigged opaque casters drawn by Vulkan, where it can (QuasarVulkanShadows); the few it could not
     // take are drawn with GL in the unrigged pass below.
-    static std::vector<LLDrawInfo*> vulkan_leftovers;
-    const bool vulkan_casters = ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers);
+    static std::vector<LLDrawInfo*> vulkan_leftovers, vulkan_rigged_leftovers;
+    bool vulkan_rigged = false;
+    const bool vulkan_casters =
+        ql_vulkan_shadow_casters(proj, depth_clamp, vulkan_leftovers, vulkan_rigged, vulkan_rigged_leftovers);
 
     for (int j = 0; j < 2; ++j) // 0 -- static, 1 -- rigged
     {
@@ -13522,7 +13606,26 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         LL_PROFILE_GPU_ZONE("shadow simple");
         gGL.getTextureSlot(0)->unbind();
 
-        if (rigged || !vulkan_casters)
+        if (rigged && vulkan_casters && vulkan_rigged)
+        {
+            // What Vulkan could not take of the rigged casters, as pushUntexturedRiggedBatches draws them.
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
+            const LLVOAvatar* last_avatar = nullptr;
+            U64 last_mesh = 0;
+            bool skip_last = false;
+            for (LLDrawInfo* params : vulkan_rigged_leftovers)
+            {
+                if (LLRenderPass::uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh,
+                                                      skip_last))
+                {
+                    mSimplePool->pushUntexturedBatch(*params);
+                }
+            }
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            gGLLastMatrix = NULL;
+        }
+        else if (rigged || !vulkan_casters)
         {
             for (U32 type : SHADOW_GEOMETRY_PASSES)
             {
