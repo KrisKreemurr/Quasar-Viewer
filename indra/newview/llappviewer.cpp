@@ -3716,26 +3716,7 @@ bool LLAppViewer::initWindow()
     gViewerWindow->initGLDefaults();
 
     // Quasar: the frames go to the screen through a Vulkan swapchain (QuasarVulkanPresent), where the window can.
-    bool vulkan_present = gSavedSettings.getBOOL("QuasarVulkanPresent");
-#if LL_WINDOWS
-    // Shift held as the viewer starts, with its own window in front, keeps Vulkan presentation off for this run alone:
-    // a way back from a black window. Not saved, and not taken from Shift pressed in another window (typing in a
-    // terminal while the viewer starts turned it off for good before).
-    if (vulkan_present && (GetAsyncKeyState(VK_SHIFT) & 0x8000))
-    {
-        DWORD foreground_process = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &foreground_process);
-        if (foreground_process == GetCurrentProcessId())
-        {
-            LL_WARNS("AppInit") << "Shift held at start-up: Vulkan presentation off for this run" << LL_ENDL;
-            vulkan_present = false;
-        }
-        else
-        {
-            LL_INFOS("AppInit") << "Shift held in another window at start-up: ignored" << LL_ENDL;
-        }
-    }
-#endif
+    const bool vulkan_present = gSavedSettings.getBOOL("QuasarVulkanPresent");
     if (vulkan_present && gViewerWindow->getWindow())
     {
 #if QL_VULKAN_PRESENTER
