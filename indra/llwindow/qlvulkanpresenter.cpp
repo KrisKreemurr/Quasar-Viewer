@@ -3853,7 +3853,7 @@ struct QLVulkanPresenter::Impl
         }
         else
         {
-            U64 oldest = U64_MAX;
+            U64 oldest = ~0ull;
             for (U32 i = 1; i < SH_TILES; ++i)
             {
                 if (mShTiles[i].lastPass != mShPassSerial && mShTiles[i].lastPass < oldest)
