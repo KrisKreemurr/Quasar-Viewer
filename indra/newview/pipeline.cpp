@@ -174,6 +174,7 @@
 #include "qlvulkanpresenter.h"
 #define QL_VULKAN_SHADOWS 1
 #endif
+#include "qlexternalstorage.h"  // Quasar: render targets in Vulkan's memory (QuasarVulkanTargets)
 #if LL_CLANG
 #pragma clang diagnostic pop
 #elif LL_GNUC
@@ -974,6 +975,24 @@ U32* LLPipeline::resourceTexture(ALRenderResourcePlan::Id id)
     }
 }
 
+// Quasar: whether a pack's targets are made in Vulkan's memory (QuasarVulkanTargets, read once: targets already made
+// are kept as they are, so a change needs a restart). The probe pack alone for now. Runs the presenter's render target
+// self-test the first time it is asked, before any target is made there.
+static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> pack)
+{
+#if QL_VULKAN_SHADOWS
+    static const bool wanted = gSavedSettings.getBOOL("QuasarVulkanTargets");
+    if (!wanted || !pack || *pack != ALRenderResourcePlan::Pack::Probe)
+    {
+        return false;
+    }
+    return QLVulkanPresenter::targetTest();
+#else
+    (void)pack;
+    return false;
+#endif
+}
+
 void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRenderResourcePlan::IdSet& ids,
                                  ResourceChanges& changes)
 {
@@ -1029,6 +1048,11 @@ void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRende
                 continue;
             }
 
+            // Quasar: the probe pack's targets in Vulkan's memory (QuasarVulkanTargets, read at start), once the
+            // presenter's render target self-test has passed: piece 1 of the probes and the main view in Vulkan. GL
+            // draws into them as ever; nothing changes on screen.
+            const bool vulkan_memory = ql_vulkan_targets_wanted(Plan::packOf(id));
+            QLExternalStorageScope vulkan_storage(vulkan_memory);
             const LLRenderTarget::EnsureResult result = resource.mDepthFrom
                 ? target.ensure(*resource.mDesc, *resourceTarget(*resource.mDepthFrom))
                 : target.ensure(*resource.mDesc);

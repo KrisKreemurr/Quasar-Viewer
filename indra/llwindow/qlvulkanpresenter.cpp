@@ -52,8 +52,12 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
+
+#include "qlexternalstorage.h"  // llrender: render targets in Vulkan's memory
 
 // GL_EXT_memory_object, GL_EXT_memory_object_win32, GL_EXT_semaphore, GL_EXT_semaphore_win32: the values from the
 // Khronos registry, where the GL headers in use do not carry them.
@@ -390,6 +394,8 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdPipelineBarrier);
     QL_VK_FN(vkCmdBlitImage);
     QL_VK_FN(vkCmdClearColorImage);
+    QL_VK_FN(vkCmdClearDepthStencilImage);
+    QL_VK_FN(vkFreeCommandBuffers);
     QL_VK_FN(vkCmdCopyImageToBuffer);
     QL_VK_FN(vkCreateBuffer);
     QL_VK_FN(vkDestroyBuffer);
@@ -643,6 +649,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdPipelineBarrier);
         QL_VK_DEVICE(vkCmdBlitImage);
         QL_VK_DEVICE(vkCmdClearColorImage);
+        QL_VK_DEVICE(vkCmdClearDepthStencilImage);
+        QL_VK_DEVICE(vkFreeCommandBuffers);
         QL_VK_DEVICE(vkCmdCopyImageToBuffer);
         QL_VK_DEVICE(vkCreateBuffer);
         QL_VK_DEVICE(vkDestroyBuffer);
@@ -2683,6 +2691,513 @@ struct QLVulkanPresenter::Impl
                            << " if turned over: " << (mDepthPassed ? "passed" : "FAILED") << LL_ENDL;
         cleanup();
         return mDepthPassed;
+    }
+
+    // ---- render targets in Vulkan's memory (QuasarVulkanTargets; step 1 of the probes and the main view) --------
+    //
+    // GL can use memory Vulkan allocates, Vulkan cannot use GL's: a render target both are to draw into or read is
+    // given storage from Vulkan's memory. llrender asks (QLExternalStorage, qlexternalstorage.h) as it allocates a
+    // target inside a QLExternalStorageScope; the presenter makes a Vulkan image of the target's format, size and
+    // levels, exports its memory and has GL take it as the texture's storage (glTextureStorageMem2DEXT). The formats
+    // are each tested once first (targetTest: Vulkan clears a small image of the format, GL reads it back), and only
+    // those that pass are given. A name GL deletes (LLImageGL's deferred ring, a few frames after its owner let it go)
+    // frees its image on the main thread, at the next present.
+    struct ExtFormat
+    {
+        GLenum   gl;
+        VkFormat vk;
+        U32      channels;  // colour channels read back (0: depth)
+        bool     depth;
+        bool     stencil;
+        bool     srgb;
+        const char* name;
+    };
+    static constexpr ExtFormat EXT_FORMATS[] = {
+        { GL_SRGB8_ALPHA8, VK_FORMAT_R8G8B8A8_SRGB, 4, false, false, true, "SRGB8_ALPHA8" },
+        { GL_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, 4, false, false, false, "RGBA8" },
+        { GL_RGB10_A2, VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4, false, false, false, "RGB10_A2" },
+        { GL_RGBA16, VK_FORMAT_R16G16B16A16_UNORM, 4, false, false, false, "RGBA16" },
+        { GL_R11F_G11F_B10F, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 3, false, false, false, "R11F_G11F_B10F" },
+        { GL_RGBA16F, VK_FORMAT_R16G16B16A16_SFLOAT, 4, false, false, false, "RGBA16F" },
+        { GL_RGBA32F, VK_FORMAT_R32G32B32A32_SFLOAT, 4, false, false, false, "RGBA32F" },
+        { GL_RG16F, VK_FORMAT_R16G16_SFLOAT, 2, false, false, false, "RG16F" },
+        { GL_RG8, VK_FORMAT_R8G8_UNORM, 2, false, false, false, "RG8" },
+        { GL_R8, VK_FORMAT_R8_UNORM, 1, false, false, false, "R8" },
+        { GL_DEPTH_COMPONENT32F, VK_FORMAT_D32_SFLOAT, 0, true, false, false, "DEPTH32F" },
+        { GL_DEPTH_COMPONENT24, VK_FORMAT_X8_D24_UNORM_PACK32, 0, true, false, false, "DEPTH24" },
+        { GL_DEPTH24_STENCIL8, VK_FORMAT_D24_UNORM_S8_UINT, 0, true, true, false, "DEPTH24_STENCIL8" },
+        { GL_DEPTH32F_STENCIL8, VK_FORMAT_D32_SFLOAT_S8_UINT, 0, true, true, false, "DEPTH32F_STENCIL8" },
+    };
+    static constexpr U32 EXT_FORMAT_COUNT = (U32)(sizeof(EXT_FORMATS) / sizeof(EXT_FORMATS[0]));
+
+    struct ExtTexture
+    {
+        VkImage        image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        HANDLE         handle = nullptr;
+        GLuint         glMemory = 0;
+        U32            format = 0;  // index into EXT_FORMATS
+        U32            width = 0, height = 0, levels = 0;
+    };
+
+    // What llrender talks to: allocation on the main thread, deletions from any (queued for the main thread).
+    class ExtStorage : public QLExternalStorage
+    {
+    public:
+        explicit ExtStorage(Impl& owner) : mOwner(owner) {}
+        bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height,
+                      int levels) override
+        {
+            return mOwner.extAllocate(texture, target, internal_format, width, height, levels);
+        }
+        void deleted(int count, const unsigned* textures) override
+        {
+            std::lock_guard<std::mutex> lock(mOwner.mExtMutex);
+            for (int i = 0; i < count; ++i)
+            {
+                if (mOwner.mExtTextures.count(textures[i]))
+                {
+                    mOwner.mExtDeleted.push_back(textures[i]);
+                }
+            }
+        }
+        bool owns(unsigned texture) const override
+        {
+            std::lock_guard<std::mutex> lock(mOwner.mExtMutex);
+            return mOwner.mExtTextures.count(texture) != 0;
+        }
+
+    private:
+        Impl& mOwner;
+    };
+
+    mutable std::mutex mExtMutex;
+    std::unordered_map<GLuint, ExtTexture> mExtTextures;
+    std::vector<GLuint> mExtDeleted;
+    bool        mExtFormatOK[EXT_FORMAT_COUNT] = {};
+    bool        mExtTested = false;
+    bool        mExtPassed = false;  // at least the G-buffer's formats passed
+    std::string mExtNote = "not tested yet (QuasarVulkanTargets)";
+    std::unique_ptr<ExtStorage> mExtStorage;
+    U64         mExtBytes = 0;
+
+    static S32 extFormatIndex(GLenum gl_format)
+    {
+        for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+        {
+            if (EXT_FORMATS[i].gl == gl_format)
+            {
+                return (S32)i;
+            }
+        }
+        return -1;
+    }
+
+    // Storage for texture from Vulkan's memory: an image of the format, exported, imported by GL as the texture's
+    // storage. False, with nothing left made, where it cannot be; GL then allocates as before.
+    bool extAllocate(GLuint texture, GLenum target, GLint internal_format, GLsizei width, GLsizei height,
+                     GLsizei levels, bool tested_only = true)
+    {
+        if (!mActive || !mDevice || target != GL_TEXTURE_2D || width <= 0 || height <= 0 || levels <= 0)
+        {
+            return false;
+        }
+        const S32 index = extFormatIndex((GLenum)internal_format);
+        if (index < 0 || (tested_only && !mExtFormatOK[index]))
+        {
+            return false;
+        }
+        const ExtFormat& format = EXT_FORMATS[index];
+        VkFormatProperties props = {};
+        vkGetPhysicalDeviceFormatProperties(mPhysical, format.vk, &props);
+        const VkFormatFeatureFlags needed = format.depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                                         : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        if ((props.optimalTilingFeatures & needed) != needed)
+        {
+            return false;
+        }
+        const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        ExtTexture ext;
+        ext.format = (U32)index;
+        ext.width  = (U32)width;
+        ext.height = (U32)height;
+        ext.levels = (U32)levels;
+        auto undo = [&]()
+        {
+            if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
+            if (ext.memory) vkFreeMemory(mDevice, ext.memory, nullptr);
+            if (ext.handle) CloseHandle(ext.handle);
+            return false;
+        };
+        VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+        external.handleTypes = handle_type;
+        VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        info.pNext         = &external;
+        info.imageType     = VK_IMAGE_TYPE_2D;
+        info.format        = format.vk;
+        info.extent        = { (U32)width, (U32)height, 1 };
+        info.mipLevels     = (U32)levels;
+        info.arrayLayers   = 1;
+        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                             (format.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                           : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mDevice, &info, nullptr, &ext.image) != VK_SUCCESS)
+        {
+            ext.image = VK_NULL_HANDLE;
+            return false;
+        }
+        VkMemoryRequirements req = {};
+        vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+        const U32 device_type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (device_type == U32_MAX)
+        {
+            return undo();
+        }
+        VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+        dedicated.image = ext.image;
+        VkExportMemoryAllocateInfo exported = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+        exported.pNext       = &dedicated;
+        exported.handleTypes = handle_type;
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.pNext           = &exported;
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = device_type;
+        if (vkAllocateMemory(mDevice, &alloc, nullptr, &ext.memory) != VK_SUCCESS)
+        {
+            ext.memory = VK_NULL_HANDLE;
+            return undo();
+        }
+        vkBindImageMemory(mDevice, ext.image, ext.memory, 0);
+        VkMemoryGetWin32HandleInfoKHR get = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+        get.memory     = ext.memory;
+        get.handleType = handle_type;
+        HANDLE handle  = nullptr;
+        if (vkGetMemoryWin32HandleKHR(mDevice, &get, &handle) != VK_SUCCESS || !handle)
+        {
+            return undo();
+        }
+        if (!mKMT)
+        {
+            ext.handle = handle;  // kept open while GL holds the import (a threaded driver imports on its own thread)
+        }
+        while (gl.GetError() != GL_NO_ERROR)
+        {
+        }
+        gl.CreateMemoryObjectsEXT(1, &ext.glMemory);
+        const GLint dedicated_flag = GL_TRUE;
+        gl.MemoryObjectParameterivEXT(ext.glMemory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated_flag);
+        gl.ImportMemoryWin32HandleEXT(ext.glMemory, req.size,
+                                      mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
+        gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, ext.glMemory, 0);
+        // Asked once an allocation, off the frame's path (render targets are made as the render inputs change).
+        const GLenum error = gl.GetError();
+        if (error != GL_NO_ERROR)
+        {
+            LL_WARNS("Vulkan") << "Vulkan memory for a " << width << "x" << height << " " << format.name
+                               << " texture: GL would not take it (0x" << std::hex << error << std::dec << ")" << LL_ENDL;
+            gl.DeleteMemoryObjectsEXT(1, &ext.glMemory);
+            ext.glMemory = 0;
+            return undo();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            mExtTextures[texture] = ext;
+        }
+        mExtBytes += req.size;
+        return true;
+    }
+
+    void extFree(ExtTexture& ext)
+    {
+        if (ext.glMemory) gl.DeleteMemoryObjectsEXT(1, &ext.glMemory);
+        if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
+        if (ext.memory) vkFreeMemory(mDevice, ext.memory, nullptr);
+        if (ext.handle) CloseHandle(ext.handle);
+        ext = ExtTexture();
+    }
+
+    // The images of the names GL has deleted, on the main thread (each present).
+    void extCollect()
+    {
+        std::vector<GLuint> deleted;
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            deleted.swap(mExtDeleted);
+        }
+        for (GLuint name : deleted)
+        {
+            ExtTexture ext;
+            {
+                std::lock_guard<std::mutex> lock(mExtMutex);
+                auto found = mExtTextures.find(name);
+                if (found == mExtTextures.end())
+                {
+                    continue;
+                }
+                ext = found->second;
+                mExtTextures.erase(found);
+            }
+            VkMemoryRequirements req = {};
+            vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+            mExtBytes -= llmin(mExtBytes, (U64)req.size);
+            extFree(ext);
+        }
+    }
+
+    // Each format, once: a small texture of it given Vulkan's memory, cleared by Vulkan to a known value, read back by
+    // GL. The formats that pass are the ones given from then on; llrender is offered the storage once the G-buffer's
+    // own pass (the sRGB albedo, RGBA8, a normals format and a depth-stencil format).
+    bool targetTest()
+    {
+        if (mExtTested)
+        {
+            return mExtPassed;
+        }
+        mExtTested = true;
+        if (!mActive || !mDevice)
+        {
+            mExtNote = "not tested: Vulkan does not present";
+            return false;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan render target self-test");
+        constexpr U32 SIZE = 16;
+        constexpr F32 CLEAR[4] = { 0.25f, 0.5f, 0.75f, 1.f };
+        constexpr F32 CLEAR_DEPTH = 0.5f;
+
+        GLuint textures[EXT_FORMAT_COUNT] = {};
+        bool made[EXT_FORMAT_COUNT] = {};
+        std::vector<GLuint> made_names;
+        for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+        {
+            gl.CreateTextures(GL_TEXTURE_2D, 1, &textures[i]);
+            made[i] = extAllocate(textures[i], GL_TEXTURE_2D, (GLint)EXT_FORMATS[i].gl, SIZE, SIZE, 1, false);
+            if (made[i])
+            {
+                made_names.push_back(textures[i]);
+            }
+        }
+        VkSemaphore gl_done_vk = VK_NULL_HANDLE, vk_done_vk = VK_NULL_HANDLE;
+        GLuint gl_done_gl = 0, vk_done_gl = 0;
+        HANDLE gl_done_handle = nullptr, vk_done_handle = nullptr;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        auto cleanup = [&]()
+        {
+            if (fence) vkDestroyFence(mDevice, fence, nullptr);
+            if (cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cmd);
+            if (gl_done_gl) gl.DeleteSemaphoresEXT(1, &gl_done_gl);
+            if (vk_done_gl) gl.DeleteSemaphoresEXT(1, &vk_done_gl);
+            if (gl_done_vk) vkDestroySemaphore(mDevice, gl_done_vk, nullptr);
+            if (vk_done_vk) vkDestroySemaphore(mDevice, vk_done_vk, nullptr);
+            if (gl_done_handle) CloseHandle(gl_done_handle);
+            if (vk_done_handle) CloseHandle(vk_done_handle);
+            gl.Finish();
+            for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+            {
+                if (textures[i])
+                {
+                    gl.DeleteTextures(1, &textures[i]);
+                }
+                ExtTexture ext;
+                bool had = false;
+                {
+                    std::lock_guard<std::mutex> lock(mExtMutex);
+                    auto found = mExtTextures.find(textures[i]);
+                    if (found != mExtTextures.end())
+                    {
+                        ext = found->second;
+                        mExtTextures.erase(found);
+                        had = true;
+                    }
+                }
+                if (had)
+                {
+                    VkMemoryRequirements req = {};
+                    vkGetImageMemoryRequirements(mDevice, ext.image, &req);
+                    mExtBytes -= llmin(mExtBytes, (U64)req.size);
+                    extFree(ext);
+                }
+            }
+        };
+        auto fail = [&](const std::string& why)
+        {
+            mExtNote = "failed: " + why;
+            LL_WARNS("Vulkan") << "Render target self-test " << mExtNote << LL_ENDL;
+            vkDeviceWaitIdle(mDevice);
+            cleanup();
+            return false;
+        };
+        if (made_names.empty())
+        {
+            return fail("no format could be given Vulkan's memory");
+        }
+        if (!createSharedSemaphore(gl_done_vk, gl_done_gl, gl_done_handle) ||
+            !createSharedSemaphore(vk_done_vk, vk_done_gl, vk_done_handle))
+        {
+            return fail("its semaphores could not be shared");
+        }
+        VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cmd_info.commandPool        = mCommandPool;
+        cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkAllocateCommandBuffers(mDevice, &cmd_info, &cmd) != VK_SUCCESS ||
+            vkCreateFence(mDevice, &fence_info, nullptr, &fence) != VK_SUCCESS)
+        {
+            return fail("no command buffer");
+        }
+
+        // GL hands them all over; Vulkan clears each and gives them back.
+        const std::vector<GLenum> layouts(made_names.size(), GL_LAYOUT_GENERAL_EXT);
+        gl.SignalSemaphoreEXT(gl_done_gl, 0, nullptr, (GLuint)made_names.size(), made_names.data(), layouts.data());
+        gl.Flush();
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+        for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+        {
+            if (!made[i])
+            {
+                continue;
+            }
+            const ExtFormat& format = EXT_FORMATS[i];
+            VkImage image = VK_NULL_HANDLE;
+            {
+                std::lock_guard<std::mutex> lock(mExtMutex);
+                image = mExtTextures[textures[i]].image;
+            }
+            const VkImageAspectFlags aspect = format.depth
+                ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT | (format.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
+                : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT;
+            VkImageMemoryBarrier acquire = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            acquire.srcAccessMask       = 0;
+            acquire.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            acquire.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+            acquire.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            acquire.dstQueueFamilyIndex = mQueueFamily;
+            acquire.image               = image;
+            acquire.subresourceRange    = { aspect, 0, 1, 0, 1 };
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &acquire);
+            const VkImageSubresourceRange range = { aspect, 0, 1, 0, 1 };
+            if (format.depth)
+            {
+                const VkClearDepthStencilValue value = { CLEAR_DEPTH, 0x5A };
+                vkCmdClearDepthStencilImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+            }
+            else
+            {
+                VkClearColorValue value = {};
+                memcpy(value.float32, CLEAR, sizeof(CLEAR));
+                vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+            }
+            VkImageMemoryBarrier release = acquire;
+            release.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            release.dstAccessMask       = 0;
+            release.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            release.srcQueueFamilyIndex = mQueueFamily;
+            release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &release);
+        }
+        vkEndCommandBuffer(cmd);
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &gl_done_vk;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &vk_done_vk;
+        if (vkQueueSubmit(mQueue, 1, &submit, fence) != VK_SUCCESS)
+        {
+            return fail("the clears could not be submitted");
+        }
+        vkWaitForFences(mDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+        gl.WaitSemaphoreEXT(vk_done_gl, 0, nullptr, (GLuint)made_names.size(), made_names.data(), layouts.data());
+
+        // Each read back where GL's texel (8, 8) is: colour as floats, depth as a float. An sRGB format may come back
+        // as stored or decoded: either passes.
+        std::string results;
+        U32 passed = 0;
+        for (U32 i = 0; i < EXT_FORMAT_COUNT; ++i)
+        {
+            const ExtFormat& format = EXT_FORMATS[i];
+            bool ok = false;
+            std::string got;
+            if (made[i])
+            {
+                if (format.depth)
+                {
+                    F32 depth = -1.f;
+                    gl.GetTextureSubImage(textures[i], 0, (GLint)SIZE / 2, (GLint)SIZE / 2, 0, 1, 1, 1,
+                                          GL_DEPTH_COMPONENT, GL_FLOAT, sizeof(depth), &depth);
+                    ok = std::fabs(depth - CLEAR_DEPTH) < 1e-3f;
+                    got = llformat("%.4f", depth);
+                }
+                else
+                {
+                    F32 rgba[4] = { -1.f, -1.f, -1.f, -1.f };
+                    gl.GetTextureSubImage(textures[i], 0, (GLint)SIZE / 2, (GLint)SIZE / 2, 0, 1, 1, 1, GL_RGBA,
+                                          GL_FLOAT, sizeof(rgba), rgba);
+                    auto close = [&](const F32* want, F32 tolerance)
+                    {
+                        for (U32 c = 0; c < format.channels; ++c)
+                        {
+                            if (std::fabs(rgba[c] - want[c]) > tolerance)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+                    // The clear's linear values as an sRGB format stores them.
+                    auto encode = [](F32 v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.f / 2.4f) - 0.055f; };
+                    const F32 encoded[4] = { encode(CLEAR[0]), encode(CLEAR[1]), encode(CLEAR[2]), CLEAR[3] };
+                    ok = close(CLEAR, 0.01f) || (format.srgb && close(encoded, 0.01f));
+                    got = llformat("%.3f %.3f %.3f %.3f", rgba[0], rgba[1], rgba[2], rgba[3]);
+                }
+            }
+            mExtFormatOK[i] = ok;
+            passed += ok ? 1 : 0;
+            results += llformat("%s%s %s", results.empty() ? "" : ", ", format.name,
+                                !made[i] ? "not made" : (ok ? "ok" : ("WRONG (" + got + ")").c_str()));
+        }
+        logGLErrors("the render target self-test");
+
+        auto ok = [&](GLenum f) { const S32 i = extFormatIndex(f); return i >= 0 && mExtFormatOK[i]; };
+        mExtPassed = ok(GL_SRGB8_ALPHA8) && ok(GL_RGBA8) && (ok(GL_RGB10_A2) || ok(GL_RGBA16)) &&
+                     (ok(GL_DEPTH24_STENCIL8) || ok(GL_DEPTH32F_STENCIL8));
+        mExtNote = llformat("%s, %u of %u formats", mExtPassed ? "self-test passed" : "self-test FAILED", passed,
+                            EXT_FORMAT_COUNT);
+        LL_INFOS("Vulkan") << "Render target self-test (Vulkan's memory, cleared by Vulkan, read by GL): " << results
+                           << ": " << (mExtPassed ? "passed" : "FAILED") << LL_ENDL;
+        cleanup();
+        if (mExtPassed)
+        {
+            mExtStorage = std::make_unique<ExtStorage>(*this);
+            gQLExternalStorage = mExtStorage.get();
+        }
+        return mExtPassed;
+    }
+
+    std::string targetInfo() const
+    {
+        if (!mExtPassed)
+        {
+            return "targets: " + mExtNote;
+        }
+        std::lock_guard<std::mutex> lock(mExtMutex);
+        return llformat("targets: %s, %u in Vulkan's memory (%.0f MB)", mExtNote.c_str(), (U32)mExtTextures.size(),
+                        (double)mExtBytes / (1 << 20));
     }
 
     // ---- step 2 of geometry in Vulkan: shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------
@@ -5458,6 +5973,11 @@ struct QLVulkanPresenter::Impl
 
     void shutdown()
     {
+        // Render targets made from now on are GL's own; those already in Vulkan's memory keep GL's hold on it.
+        if (mExtStorage && gQLExternalStorage == mExtStorage.get())
+        {
+            gQLExternalStorage = nullptr;
+        }
 #if QL_HAS_STREAMLINE
         if (mFGOn)
         {
@@ -5901,6 +6421,7 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
+        extCollect();  // the images of render targets GL has deleted
 #if QL_HAS_STREAMLINE
         mark(sl::PCLMarker::eRenderSubmitEnd);
 #endif
@@ -6335,6 +6856,18 @@ std::string QLVulkanPresenter::shadowInfo()
 bool QLVulkanPresenter::depthTest()
 {
     return sActive && sActive->depthTest();
+}
+
+// static
+bool QLVulkanPresenter::targetTest()
+{
+    return sActive && sActive->targetTest();
+}
+
+// static
+std::string QLVulkanPresenter::targetInfo()
+{
+    return sActive ? sActive->targetInfo() : std::string("targets: needs Vulkan presentation");
 }
 
 // static

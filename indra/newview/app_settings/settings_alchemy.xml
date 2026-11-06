@@ -2916,6 +2916,17 @@
             <key>Value</key>
             <integer>1</integer>
         </map>
+        <key>QuasarVulkanTargets</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, restart): the reflection probes' render targets (their G-buffer, depth and shadow maps) are made in Vulkan's memory, which GL draws into as before, once a self-test of each format has passed. Nothing changes on screen: groundwork for drawing probes and the main view with Vulkan. Status: the "Quasar Vulkan geometry" line.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanShadowsMasked</key>
         <map>
             <key>Comment</key>

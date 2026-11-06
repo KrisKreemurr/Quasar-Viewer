@@ -50,6 +50,28 @@
 #include <bit>
 #include <boost/unordered_map.hpp>
 
+#include "qlexternalstorage.h"
+
+// Quasar: the provider of storage from another API's memory (qlexternalstorage.h), and where it is asked.
+QLExternalStorage* gQLExternalStorage = nullptr;
+static thread_local bool sQLExternalStorageWanted = false;
+
+QLExternalStorageScope::QLExternalStorageScope(bool wanted) : mPrevious(sQLExternalStorageWanted)
+{
+    sQLExternalStorageWanted = wanted;
+}
+
+QLExternalStorageScope::~QLExternalStorageScope()
+{
+    sQLExternalStorageWanted = mPrevious;
+}
+
+// static
+bool QLExternalStorageScope::active()
+{
+    return sQLExternalStorageWanted && gQLExternalStorage;
+}
+
 extern LL_COMMON_API bool on_main_thread();
 
 #if !LL_IMAGEGL_THREAD_CHECK
@@ -471,6 +493,10 @@ void LLImageGL::cleanupClass()
             if (gl_alive)
             {
                 glDeleteTextures((GLsizei)sFreeList[i].size(), sFreeList[i].data());
+                if (gQLExternalStorage)
+                {
+                    gQLExternalStorage->deleted((S32)sFreeList[i].size(), sFreeList[i].data());
+                }
             }
             sFreeList[i].resize(0);
         }
@@ -1955,6 +1981,11 @@ void LLImageGL::updateClass()
         gGL.forgetTextures((S32)sFreeList[idx].size(), sFreeList[idx].data());
         forget_tex_images((U32)sFreeList[idx].size(), sFreeList[idx].data());
         glDeleteTextures((GLsizei)sFreeList[idx].size(), sFreeList[idx].data());
+        if (gQLExternalStorage)
+        {
+            // Quasar: storage another API gave these names goes with them.
+            gQLExternalStorage->deleted((S32)sFreeList[idx].size(), sFreeList[idx].data());
+        }
         sFreeList[idx].resize(0);
     }
 
@@ -2083,6 +2114,21 @@ void LLImageGL::allocateTexture2D(U32 target, S32 intformat, S32 width, S32 heig
     free_cur_tex_image();
 
     assertStorageAllocatable(target, intformat);
+
+    // Quasar: storage from the external provider's memory, where a scope asks for it and the provider can give it
+    // (no pixels: render targets, whose contents are drawn).
+    if (pixels == nullptr && target == GL_TEXTURE_2D && QLExternalStorageScope::active() &&
+        gGL.getCurrentTexUnitIndex() == 0)
+    {
+        const U32 name = gGL.getTextureSlot(0)->getCurrTexture();
+        if (name && gQLExternalStorage->allocate(name, target, intformat, width, height, levels))
+        {
+            skipSRGBDecode(target);
+            alloc_tex_image(width, height, intformat, 1, levels, cls);
+            stop_glerror();
+            return;
+        }
+    }
 
     {
         LL_PROFILE_ZONE_NAMED("glTexStorage2D");

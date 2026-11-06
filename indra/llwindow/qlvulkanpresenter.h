@@ -177,6 +177,12 @@ public:
 
     static std::string depthInfo();
 
+    /// Render targets in Vulkan's memory (QuasarVulkanTargets): each format llrender's targets use is tested once
+    /// (Vulkan clears a small one, GL reads it back); once the G-buffer's pass, llrender's allocations inside a
+    /// QLExternalStorageScope are given Vulkan's memory. True when they passed. On the main thread, GL current.
+    static bool targetTest();
+    static std::string targetInfo();
+
     // ---- Shadow casters drawn by Vulkan (QuasarVulkanShadows) ---------------------------------------------------
 
     /// A shadow map's unrigged opaque casters, drawn by Vulkan into GL's map in one indirect draw. On the main thread,

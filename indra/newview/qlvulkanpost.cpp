@@ -191,7 +191,8 @@ void QLVulkanPost::tick()
 std::string QLVulkanPost::geometryLine()
 {
 #if QL_VULKAN_PRESENTER
-    return QLVulkanPresenter::geometryInfo() + " | " + QLVulkanPresenter::depthInfo();
+    return QLVulkanPresenter::targetInfo() + " | " + QLVulkanPresenter::geometryInfo() + " | " +
+           QLVulkanPresenter::depthInfo();
 #else
     return "not on this platform";
 #endif
