@@ -3685,6 +3685,44 @@ static void ql_cull_partitions_parallel(const std::vector<LLSpatialPartition*>& 
                                         LLCullResult& result);
 static bool ql_mark_drawable_groups_parallel(LLCamera& camera, LLCullResult& result);
 
+// Quasar: a reflection probe face's cull leaves out what it could hardly show (QuasarProbeCullPixels,
+// QuasarProbeCullDistance): groups whose bounds would cover fewer pixels of the face than the setting, or lie farther
+// than the distance. Set on the main thread by updateCull for each probe face's camera, read by the cull's workers.
+struct QLProbeCull
+{
+    bool       active = false;
+    LLVector4a origin;
+    F32        resolution = 0.f;  // the face's width in pixels
+    F32        min_pixels = 0.f;
+    F32        max_distance = 0.f;  // 0: no limit
+};
+static QLProbeCull sQLProbeCull;
+static std::atomic<U32> sQLProbeCullSkipped{ 0 };
+U32 gQLProbeCullSkippedLast = 0;  // the last frame's, for the status line
+
+static bool ql_probe_cull_skips(const LLSpatialGroup* group)
+{
+    const QLProbeCull& cull = sQLProbeCull;
+    const LLVector4a* bounds = group->getObjectBounds();
+    LLVector4a delta;
+    delta.setSub(bounds[0], cull.origin);
+    const F32 distance = sqrtf(delta.dot3(delta).getF32());
+    const F32 radius   = group->mObjectBoxSize;
+    if (distance <= radius)
+    {
+        return false;  // around the probe
+    }
+    // Its width in the face: 2 r / d of a 90 degree face, at resolution / 2 pixels a unit of tangent.
+    const bool tiny    = radius * cull.resolution < cull.min_pixels * distance;
+    const bool distant = cull.max_distance > 0.f && distance - radius > cull.max_distance;
+    if (tiny || distant)
+    {
+        sQLProbeCullSkipped.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
+}
+
 void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
@@ -3840,44 +3878,6 @@ void LLPipeline::updateCull(LLCamera& camera, LLCullResult& result)
     {
         mHiZCull.endCull();
     }
-}
-
-// Quasar: a reflection probe face's cull leaves out what it could hardly show (QuasarProbeCullPixels,
-// QuasarProbeCullDistance): groups whose bounds would cover fewer pixels of the face than the setting, or lie farther
-// than the distance. Set on the main thread by updateCull for each probe face's camera, read by the cull's workers.
-struct QLProbeCull
-{
-    bool       active = false;
-    LLVector4a origin;
-    F32        resolution = 0.f;  // the face's width in pixels
-    F32        min_pixels = 0.f;
-    F32        max_distance = 0.f;  // 0: no limit
-};
-static QLProbeCull sQLProbeCull;
-static std::atomic<U32> sQLProbeCullSkipped{ 0 };
-U32 gQLProbeCullSkippedLast = 0;  // the last frame's, for the status line
-
-static bool ql_probe_cull_skips(const LLSpatialGroup* group)
-{
-    const QLProbeCull& cull = sQLProbeCull;
-    const LLVector4a* bounds = group->getObjectBounds();
-    LLVector4a delta;
-    delta.setSub(bounds[0], cull.origin);
-    const F32 distance = sqrtf(delta.dot3(delta).getF32());
-    const F32 radius   = group->mObjectBoxSize;
-    if (distance <= radius)
-    {
-        return false;  // around the probe
-    }
-    // Its width in the face: 2 r / d of a 90 degree face, at resolution / 2 pixels a unit of tangent.
-    const bool small = radius * cull.resolution < cull.min_pixels * distance;
-    const bool far   = cull.max_distance > 0.f && distance - radius > cull.max_distance;
-    if (small || far)
-    {
-        sQLProbeCullSkipped.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-    return false;
 }
 
 void LLPipeline::markNotCulled(LLSpatialGroup* group, LLCamera& camera)
