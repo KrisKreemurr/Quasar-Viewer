@@ -14170,8 +14170,9 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
 
     // The masked casters (step 3), after every opaque one, unrigged then rigged: each texture's alpha into the atlas,
     // each mesh with its texture coordinates and colours into a masked arena, each draw with its tile, texture matrix,
-    // cutoff and test, as pushMaskBatches and pushBatch bind them for GL. GL keeps what Vulkan cannot take (a batch of
-    // several textures, a texture it cannot blit, no colours where the test reads them, a full atlas or arena).
+    // cutoff and test, as pushMaskBatches and pushBatch bind them for GL; a batch of several textures with a tile for
+    // each. GL keeps what Vulkan cannot take (a texture it cannot blit, no colours where the test reads them, a full
+    // atlas, arena or tile tables).
     static LLCachedControl<bool> masked_enabled(gSavedSettings, "QuasarVulkanShadowsMasked", true);
     masked_leftovers.mTaken = masked_enabled();
     if (masked_leftovers.mTaken)
@@ -14348,7 +14349,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     }
                     LLMatrix4a mvp;
                     mvp.setMul(modelview, proj);
-                    const F32* texture_matrix = (params->mTextureMatrix && texture_matrices)
+                    // A batch draws without one (pushBatch's indexed path loads none).
+                    const F32* texture_matrix = (params->mTextureMatrix && texture_matrices && !batch_count)
                                                     ? (const F32*)params->mTextureMatrix->mMatrix
                                                     : nullptr;
                     if (!QLVulkanPresenter::shadowDrawMasked(mvp.getF32ptr(), rig ? palette : ~0u, tile, texture_matrix,

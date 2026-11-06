@@ -28,7 +28,7 @@ layout(std430, set = 0, binding = 3) readonly buffer Masks
     Mask mask[];
 };
 
-// A draw of several textures: its tiles, by the texture index its vertices carry (16 a draw; Mask.tile.w set).
+// A draw of several textures: its tiles, by the texture index its vertices carry (16 a table; Mask.tile.w its table + 1).
 layout(std430, set = 0, binding = 5) readonly buffer Tiles
 {
     uint tiles[];
@@ -65,7 +65,7 @@ void main()
     vec3 tile = m.tile.xyz;
     if (m.tile.w > 0.5)
     {
-        uint t = tiles[uint(gl_InstanceIndex) * 16u + uint(clamp(texture_index, 0, 15))];
+        uint t = tiles[(uint(m.tile.w + 0.5) - 1u) * 16u + uint(clamp(texture_index, 0, 15))];
         tile.xy = vec2(float((t % SH_TILES_ACROSS) * SH_TILE), float((t / SH_TILES_ACROSS) * SH_TILE));
     }
     vary_tile = vec4(tile, m.s.w);

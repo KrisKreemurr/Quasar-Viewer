@@ -3678,7 +3678,8 @@ struct QLVulkanPresenter::Impl
     U32  mTexGiven = 0, mTexDeclined = 0, mTexRefused = 0, mTexWasteful = 0;
     U64  mTexBytes = 0;
     U64  mTexBlockBytes = 0;  // every live block's size
-    std::unordered_map<U64, U64> mTexWastefulShapes;  // format, levels and size of images found wasteful: their count
+    std::unordered_map<U64, U64> mTexWastefulShapes;  // format, levels and size of images found wasteful: the largest
+                                                      // count they were found wasteful at
     U64  mTexCounted = 0;     // what the budget counts the textures in them as
     // A texture whose image would take more than this times what the budget counts it as stays GL's: small ones, which
     // NVIDIA's alignment rounds up to far more than their size.
@@ -3922,7 +3923,7 @@ struct QLVulkanPresenter::Impl
         // An image's size is the same for the same format, size and levels: a wasteful one is known without making it.
         const U64 shape = (U64)index | ((U64)levels << 5) | ((U64)(width & 0xFFFF) << 10) | ((U64)(height & 0xFFFF) << 26);
         const auto known = mTexWastefulShapes.find(shape);
-        if (counted_bytes && known != mTexWastefulShapes.end() && known->second == counted_bytes)
+        if (counted_bytes && known != mTexWastefulShapes.end() && counted_bytes <= known->second)
         {
             ++mTexWasteful;
             return false;
@@ -3942,7 +3943,8 @@ struct QLVulkanPresenter::Impl
         {
             vkDestroyImage(mDevice, ext.image, nullptr);
             ++mTexWasteful;
-            mTexWastefulShapes[shape] = counted_bytes;
+            U64& largest = mTexWastefulShapes[shape];
+            largest = llmax(largest, counted_bytes);  // the image is the same: any smaller count is as wasteful
             return false;  // GL's: Vulkan would take far more for it than it is counted as
         }
         // A block with room, in a memory type the image can use, or a new one.
@@ -4134,7 +4136,8 @@ struct QLVulkanPresenter::Impl
     // A masked draw of several textures (a batch GL draws through the indexed lookup): each texture's tile, by the index
     // each vertex carries (position.w's bits), SH_TABLE_ENTRIES a draw (qlshadowmask.vert's Tiles).
     static constexpr U32          SH_TABLE_ENTRIES = 16;
-    static constexpr VkDeviceSize SH_TABLE_BYTES = (VkDeviceSize)SH_MAX_DRAWS * SH_TABLE_ENTRIES * 4;
+    static constexpr U32          SH_MAX_TABLES = 1024;  // a slot's batched masked draws; past them, GL's
+    static constexpr VkDeviceSize SH_TABLE_BYTES = (VkDeviceSize)SH_MAX_TABLES * SH_TABLE_ENTRIES * 4;
     static constexpr VkDeviceSize SH_SLOT_BYTES =
         ((SH_MVP_BYTES + SH_CMD_BYTES + SH_PALBASE_BYTES + SH_MASK_BYTES + SH_TABLE_BYTES) + 255) & ~(VkDeviceSize)255;
     static_assert((SH_MVP_BYTES + SH_CMD_BYTES) % 256 == 0, "each slot's palette bases start on a storage offset");
@@ -4317,6 +4320,7 @@ struct QLVulkanPresenter::Impl
     bool     mShInPass = false;
     U32      mShSlot = 0;
     U32      mShDraws = 0;
+    U32      mShTables = 0;  // the slot's tile tables given out (batched masked draws)
     U32      mShKind = SH_KIND_STATIC;  // the kind of the draws being written; a map's draws come kind by kind
     U32      mShKindFirst[SH_KINDS + 1] = {};
     U32      mShWidth = 0, mShHeight = 0;
@@ -5264,6 +5268,7 @@ struct QLVulkanPresenter::Impl
         mShNextSlot = (mShNextSlot + 1) % SH_SLOTS;
         mShInPass     = true;
         mShDraws      = 0;
+        mShTables     = 0;
         mShKind       = SH_KIND_STATIC;
         for (U32& first : mShKindFirst)
         {
@@ -5661,7 +5666,7 @@ struct QLVulkanPresenter::Impl
                           U32 tile_count = 0)
     {
         const bool rigged = palette_base != U32_MAX;
-        if (tile_count > SH_TABLE_ENTRIES)
+        if (tile_count > SH_TABLE_ENTRIES || (tile_count && mShTables >= SH_MAX_TABLES))
         {
             return false;
         }
@@ -5687,8 +5692,9 @@ struct QLVulkanPresenter::Impl
             {
                 table[i] = tiles[i < tile_count ? i : 0];
             }
-            memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_TABLE_START + (size_t)mShDraws * sizeof(table), table,
+            memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_TABLE_START + (size_t)mShTables * sizeof(table), table,
                    sizeof(table));
+            ++mShTables;
         }
         // The texture matrix's rows for x and y over (u, v, 1), as GL's texture_matrix0 * vec4(uv, 0, 1) takes them
         // (column major: element [column * 4 + row]).
@@ -5697,7 +5703,7 @@ struct QLVulkanPresenter::Impl
         const float mask[12] = { m[0], m[4], m[12], cutoff,
                                  m[1], m[5], m[13], (float)test,
                                  (float)((tile % SH_TILES_ACROSS) * SH_TILE), (float)((tile / SH_TILES_ACROSS) * SH_TILE),
-                                 (float)SH_TILE, tile_count ? 1.f : 0.f };  // w: the draw's tiles are in its table
+                                 (float)SH_TILE, tile_count ? (float)mShTables : 0.f };  // w: its table + 1, or 0
         memcpy(mShHostMapped + SH_SLOT_BYTES * mShSlot + SH_MASK_START + (size_t)mShDraws * sizeof(mask), mask,
                sizeof(mask));
         writeShadowDraw(mvp, base_vertex, first_index, index_count, rigged ? palette_base : 0);

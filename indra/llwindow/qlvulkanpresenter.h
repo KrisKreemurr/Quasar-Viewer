@@ -283,7 +283,7 @@ public:
                                  float cutoff, unsigned test, unsigned base_vertex, unsigned first_index,
                                  unsigned index_count, const unsigned* tiles = nullptr, unsigned tile_count = 0);
     /// A masked draw of several textures (tiles: each texture's tile, by the texture index its vertices carry, at most
-    /// shadowMaskTableEntries of them) passes tiles and tile_count in place of tile.
+    /// 16 of them) passes tiles and tile_count in place of tile.
 
     /// Queues the map: Vulkan draws its casters over the map at the next shadowFlush, once GL has drawn the rest of
     /// it. False: none of the map's casters are Vulkan's, and GL draws them all.
