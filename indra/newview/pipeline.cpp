@@ -13877,6 +13877,31 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     }
     gQLVulkanSimpleLeftovers = &sQLProbeLeftovers;
 
+    // A rigged draw's palette, as uploadMatrixPalette finds it (the shadows' palettes, this frame's): ~0u where its
+    // skin has none yet (GL would draw nothing of it either) or Vulkan keeps none.
+    const LLVOAvatar* last_avatar = nullptr;
+    U64 last_skin = 0;
+    unsigned last_palette = ~0u;
+    bool last_skip = true;
+    const auto palette_of = [&](LLDrawInfo& params, bool& skip)
+    {
+        LLVOAvatar* avatar = params.mAvatar.get();
+        const U64 skin = params.mSkinInfo->mHash;
+        if (avatar != last_avatar || skin != last_skin)
+        {
+            last_avatar = avatar;
+            last_skin   = skin;
+            const LLVOAvatar::MatrixPaletteCache& mpc = avatar->updateSkinInfoMatrixPalette(params.mSkinInfo);
+            last_skip    = mpc.mMatrixPalette.empty();
+            last_palette = last_skip ? ~0u
+                                     : QLVulkanPresenter::shadowPalette((U64)(uintptr_t)avatar, skin, mpc.mGLMp.data(),
+                                                                        (U32)mpc.mGLMp.size());
+        }
+        skip = last_skip;
+        return last_palette;
+    };
+    const bool rigged_draws = rigged_wanted() && vulkan_shadows();
+    U64 rig_draws = 0, rig_kept = 0;
     // PBR, opaque and unrigged, one material a draw (QuasarVulkanPBRDraws): as LLFetchedGLTFMaterial::bind binds it.
     if (pbr_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PASS_GLTF_PBR))
     {
@@ -14004,31 +14029,6 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         gQLVulkanPBRLeftovers = &sQLPBRLeftovers;
     }
 
-    // A rigged draw's palette, as uploadMatrixPalette finds it (the shadows' palettes, this frame's): ~0u where its
-    // skin has none yet (GL would draw nothing of it either) or Vulkan keeps none.
-    const LLVOAvatar* last_avatar = nullptr;
-    U64 last_skin = 0;
-    unsigned last_palette = ~0u;
-    bool last_skip = true;
-    const auto palette_of = [&](LLDrawInfo& params, bool& skip)
-    {
-        LLVOAvatar* avatar = params.mAvatar.get();
-        const U64 skin = params.mSkinInfo->mHash;
-        if (avatar != last_avatar || skin != last_skin)
-        {
-            last_avatar = avatar;
-            last_skin   = skin;
-            const LLVOAvatar::MatrixPaletteCache& mpc = avatar->updateSkinInfoMatrixPalette(params.mSkinInfo);
-            last_skip    = mpc.mMatrixPalette.empty();
-            last_palette = last_skip ? ~0u
-                                     : QLVulkanPresenter::shadowPalette((U64)(uintptr_t)avatar, skin, mpc.mGLMp.data(),
-                                                                        (U32)mpc.mGLMp.size());
-        }
-        skip = last_skip;
-        return last_palette;
-    };
-    const bool rigged_draws = rigged_wanted() && vulkan_shadows();
-    U64 rig_draws = 0, rig_kept = 0;
     if (rigged_draws)
     {
         // Simple, rigged (PASS_SIMPLE_RIGGED), as pushRiggedBatches draws it.

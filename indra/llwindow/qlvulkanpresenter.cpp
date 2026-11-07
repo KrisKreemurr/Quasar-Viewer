@@ -5177,6 +5177,18 @@ struct QLVulkanPresenter::Impl
             return;
         }
         vkDeviceWaitIdle(mDevice);
+        // The G-buffer's sets name the palettes: the stand-in, before they go (every slot is idle now).
+        for (U32 i = 0; i < GB_SLOTS; ++i)
+        {
+            if (mGbSlots[i].set && mGbSlots[i].palettes)
+            {
+                gbWritePalettes(i, false);
+            }
+        }
+        for (auto& readers : mGbPaletteReaders)
+        {
+            readers.clear();
+        }
         if (gl.Finish)
         {
             gl.Finish();
@@ -5566,6 +5578,16 @@ struct QLVulkanPresenter::Impl
                 pollShadowSubmissions();
             }
             mShPaletteSegmentFree = last <= mShDoneSerial;
+            // The G-buffer submissions that read it too (rigged draws), never waited for either.
+            auto& readers = mGbPaletteReaders[mShFrame % SH_PALETTE_SEGMENTS];
+            for (auto it = readers.begin(); it != readers.end();)
+            {
+                const GbSlot& reader = mGbSlots[it->first];
+                const bool done = !reader.submitted || reader.serial != it->second ||
+                                  vkGetFenceStatus(mDevice, reader.fence) == VK_SUCCESS;
+                it = done ? readers.erase(it) : std::next(it);
+            }
+            mShPaletteSegmentFree = mShPaletteSegmentFree && readers.empty();
         }
         if (!mShPaletteSegmentFree)
         {
@@ -6246,6 +6268,8 @@ struct QLVulkanPresenter::Impl
         VkFence         fence = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
         bool            submitted = false;
+        bool            palettes = false;  // set 0's binding 1 is the shadows' palettes, not the stand-in
+        U64             serial = 0;        // its submission's
     };
     struct GbTarget
     {
@@ -6301,7 +6325,28 @@ struct QLVulkanPresenter::Impl
     std::vector<GLuint>   mGbPassTextures;        // the textures the pass draws with, each once, for the hand-over
     std::vector<VkImage>  mGbPassImages;
     GbDefault             mGbWhite, mGbFlat;
-    bool                  mGbPalettes = false;  // set 0's palettes are the shadows': rigged draws can be taken
+    bool                  mGbPassRigged = false;  // the open pass took a rigged draw
+    U64                   mGbSubmitSerial = 0;
+    // The G-buffer submissions that read a palette segment (slot, serial): shadowPalette reuses the segment only once
+    // they are done.
+    std::vector<std::pair<U32, U64>> mGbPaletteReaders[4];
+
+    // A slot's set 0 binding 1: the shadows' palettes, or a stand-in (its own draws' buffer) where there are none. Only
+    // while the slot is idle.
+    void gbWritePalettes(U32 i, bool palettes)
+    {
+        GbSlot& slot = mGbSlots[i];
+        const VkDescriptorBufferInfo info = palettes ? VkDescriptorBufferInfo{ mShPalettes, 0, VK_WHOLE_SIZE }
+                                                     : VkDescriptorBufferInfo{ mGbHost, GB_SLOT_BYTES * i, GB_DRAW_BYTES };
+        VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        write.dstSet          = slot.set;
+        write.dstBinding      = 1;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo     = &info;
+        vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+        slot.palettes = palettes;
+    }
     std::map<GbMatKey, VkDescriptorSet> mGbMatSets;  // a set for each four images drawn with together
     std::unordered_multimap<VkImage, GbMatKey> mGbMatUse;  // the sets an image is in
     // For the status line: this frame's and the last whole frame's.
@@ -6341,8 +6386,6 @@ struct QLVulkanPresenter::Impl
             mGbNote = "needs QuasarVulkanTargets and QuasarVulkanTextures, their self-tests passed";
             return false;
         }
-        // Rigged draws skin with the shadows' palettes (shadowPalette): their objects first, where they can be made.
-        const bool palettes = createShadowObjects() && mShPalettes != VK_NULL_HANDLE;
         if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, true, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true,
                          true, true))
         {
@@ -6492,11 +6535,11 @@ struct QLVulkanPresenter::Impl
             {
                 return gbFail("no command buffers or sets");
             }
+            // Binding 1 starts as the stand-in (the slot's own draws' buffer); gbufferBegin points it at the shadows'
+            // palettes once they exist (rigged draws need them).
             const VkDescriptorBufferInfo infos[2] = {
                 { mGbHost, GB_SLOT_BYTES * i, (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES },
-                // Without the shadows' palettes, a draw's own buffer stands in: no rigged draw is taken then.
-                palettes ? VkDescriptorBufferInfo{ mShPalettes, 0, VK_WHOLE_SIZE }
-                         : VkDescriptorBufferInfo{ mGbHost, GB_SLOT_BYTES * i, GB_DRAW_BYTES },
+                { mGbHost, GB_SLOT_BYTES * i, GB_DRAW_BYTES },
             };
             VkWriteDescriptorSet writes[2] = {};
             for (U32 b = 0; b < 2; ++b)
@@ -6509,8 +6552,8 @@ struct QLVulkanPresenter::Impl
                 writes[b].pBufferInfo     = &infos[b];
             }
             vkUpdateDescriptorSets(mDevice, 2, writes, 0, nullptr);
+            slot.palettes = false;
         }
-        mGbPalettes = palettes;
         if (!createSharedSemaphore(mGbGLDoneVK, mGbGLDoneGL, mGbGLDoneHandle) ||
             !createSharedSemaphore(mGbVKDoneVK, mGbVKDoneGL, mGbVKDoneHandle))
         {
@@ -7165,6 +7208,12 @@ struct QLVulkanPresenter::Impl
             }
             slot.submitted = false;
         }
+        // The idle slot's palettes: the shadows', where they exist now, or the stand-in.
+        const bool palettes = mShReady && mShPalettes != VK_NULL_HANDLE;
+        if (slot.palettes != palettes)
+        {
+            gbWritePalettes(mGbNextSlot, palettes);
+        }
         const S32 target = gbTarget(colors, color_count, depth, width, height);
         if (target < 0)
         {
@@ -7184,6 +7233,7 @@ struct QLVulkanPresenter::Impl
         mGbDraws.clear();
         mGbPassTextures.clear();
         mGbPassImages.clear();
+        mGbPassRigged = false;
         mGbInPass   = true;
         return true;
     }
@@ -7205,7 +7255,7 @@ struct QLVulkanPresenter::Impl
     bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
     {
         if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_MATERIAL ||
-            (d.palette != ~0u && (!mGbPalettes || d.palette >= (1u << 24))))
+            (d.palette != ~0u && (!mGbSlots[mGbSlot].palettes || d.palette >= (1u << 24))))
         {
             return false;
         }
@@ -7265,6 +7315,7 @@ struct QLVulkanPresenter::Impl
         cmd.firstInstance = index;
         memcpy(slot + (size_t)GB_MAX_DRAWS * GB_DRAW_BYTES + (size_t)index * sizeof(cmd), &cmd, sizeof(cmd));
         mGbDraws.push_back({ set, index, d.double_sided ? 1u : 0u });
+        mGbPassRigged = mGbPassRigged || d.palette != ~0u;
         for (U32 i = 0; i < 4; ++i)
         {
             if (textures[i] &&
@@ -7453,6 +7504,11 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         slot.submitted = true;
+        slot.serial    = ++mGbSubmitSerial;
+        if (mGbPassRigged)
+        {
+            mGbPaletteReaders[mShFrame % SH_PALETTE_SEGMENTS].emplace_back(mGbSlot, slot.serial);
+        }
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl wait");
             gl.WaitSemaphoreEXT(mGbVKDoneGL, 1, &mGbArena.gl, (GLuint)textures.size(), textures.data(), layouts.data());
