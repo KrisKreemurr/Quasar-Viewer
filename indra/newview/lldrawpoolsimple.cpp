@@ -136,6 +136,7 @@ S32 LLDrawPoolSimple::getNumDeferredPasses()
 // Quasar: while set, a reflection probe face's simple prims Vulkan could not take (pipeline.cpp,
 // QuasarVulkanProbeDraws): drawn here in place of the pass, which Vulkan draws the rest of.
 extern std::vector<LLDrawInfo*>* gQLVulkanSimpleLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanSimpleRiggedLeftovers;  // the rigged pass's (QuasarVulkanRiggedDraws)
 
 void LLDrawPoolSimple::renderDeferred(S32 pass)
 {
@@ -163,7 +164,23 @@ void LLDrawPoolSimple::renderDeferred(S32 pass)
 
     //render rigged
     shader->bind(true);
-    pushRiggedBatches(LLRenderPass::PASS_SIMPLE_RIGGED, true, true);
+    if (gQLVulkanSimpleRiggedLeftovers)
+    {
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_mesh = 0;
+        bool skip_last = false;
+        for (LLDrawInfo* params : *gQLVulkanSimpleRiggedLeftovers)
+        {
+            if (uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh, skip_last))
+            {
+                pushBatch(*params, true, true);
+            }
+        }
+    }
+    else
+    {
+        pushRiggedBatches(LLRenderPass::PASS_SIMPLE_RIGGED, true, true);
+    }
 }
 
 void LLDrawPoolAlphaMask::renderDeferred(S32 pass)

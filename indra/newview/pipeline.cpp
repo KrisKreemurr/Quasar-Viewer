@@ -5596,8 +5596,12 @@ struct QLVulkanLost
 {
     const std::vector<LLDrawInfo*>* simple = nullptr;
     const std::vector<LLDrawInfo*>* pbr = nullptr;
-    std::vector<LLDrawInfo*>*       materials = nullptr;  // QL_MATERIAL_PASSES of them
+    std::vector<LLDrawInfo*>*       materials = nullptr;  // QL_MATERIAL_PASSES of them, or twice that (rigged too)
+    bool                            rigged_materials = false;
+    const std::vector<LLDrawInfo*>* simple_rigged = nullptr;
+    const std::vector<LLDrawInfo*>* pbr_rigged = nullptr;
 };
+extern bool gQLVulkanRiggedMaterials;
 static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrigged passes
 extern std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers;
 extern bool gQLVulkanMaterialFallback;
@@ -5792,7 +5796,8 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             // The pool draws Vulkan's draws of each pass as it draws its own, without its indexed sweep (drawn already).
             gQLVulkanMaterialLeftovers = lost.materials;
             gQLVulkanMaterialFallback  = true;
-            for (U32 m = 0; m < QL_MATERIAL_PASS_COUNT; ++m)
+            gQLVulkanRiggedMaterials   = lost.rigged_materials;
+            for (U32 m = 0; m < QL_MATERIAL_PASS_COUNT * (lost.rigged_materials ? 2 : 1); ++m)
             {
                 if (!lost.materials[m].empty())
                 {
@@ -5803,6 +5808,42 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             }
             gQLVulkanMaterialLeftovers = nullptr;
             gQLVulkanMaterialFallback  = false;
+            gQLVulkanRiggedMaterials   = false;
+        }
+        if ((lost.simple_rigged && !lost.simple_rigged->empty()) || (lost.pbr_rigged && !lost.pbr_rigged->empty()))
+        {
+            // The rigged draws Vulkan was to draw, as pushRiggedBatches and pushRiggedGLTFBatches draw them.
+            LLGLDisable blend(GL_BLEND);
+            const LLVOAvatar* last_avatar = nullptr;
+            U64 last_mesh = 0;
+            bool skip_last = false;
+            if (lost.simple_rigged && !lost.simple_rigged->empty())
+            {
+                gDeferredDiffuseProgram.selectVariant()->bind(true);
+                for (LLDrawInfo* params : *lost.simple_rigged)
+                {
+                    if (LLRenderPass::uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh,
+                                                          skip_last))
+                    {
+                        mSimplePool->pushBatch(*params, true, true);
+                    }
+                }
+            }
+            if (lost.pbr_rigged && !lost.pbr_rigged->empty())
+            {
+                gDeferredPBROpaqueProgram.selectVariant()->bind(true);
+                last_avatar = nullptr;
+                last_mesh   = 0;
+                skip_last   = false;
+                LLFetchedGLTFMaterial* last_mat = nullptr;
+                LLViewerTexture* last_tex = nullptr;
+                for (LLDrawInfo* params : *lost.pbr_rigged)
+                {
+                    LLRenderPass::pushRiggedGLTFBatch(*params, last_avatar, last_mesh, skip_last, last_mat, last_tex);
+                }
+            }
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
         }
         if (lost.simple || lost.pbr)
         {
@@ -13621,8 +13662,16 @@ std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers = nullptr;  // lldrawpoolpbropaq
 // what Vulkan left, which the pool draws in place of each pass's scalar draws while it is set (its indexed sweep of
 // multi-material batches as ever), and what it took, which the pool draws instead if the hand-over fails.
 static constexpr U32 QL_MATERIAL_PASSES = 12;
-static std::vector<LLDrawInfo*> sQLMatLeftovers[QL_MATERIAL_PASSES];
-static std::vector<LLDrawInfo*> sQLMatTaken[QL_MATERIAL_PASSES];
+// [0, 12) the unrigged passes, [12, 24) the rigged (QuasarVulkanRiggedDraws), as the pool numbers its passes.
+static std::vector<LLDrawInfo*> sQLMatLeftovers[QL_MATERIAL_PASSES * 2];
+static std::vector<LLDrawInfo*> sQLMatTaken[QL_MATERIAL_PASSES * 2];
+// The rigged simple and PBR draws (QuasarVulkanRiggedDraws): left to GL, and taken.
+static std::vector<LLDrawInfo*> sQLSimpleRiggedLeftovers, sQLSimpleRiggedTaken;
+static std::vector<LLDrawInfo*> sQLPBRRiggedLeftovers, sQLPBRRiggedTaken;
+std::vector<LLDrawInfo*>* gQLVulkanSimpleRiggedLeftovers = nullptr;  // lldrawpoolsimple.cpp
+std::vector<LLDrawInfo*>* gQLVulkanPBRRiggedLeftovers = nullptr;     // lldrawpoolpbropaque.cpp
+bool gQLVulkanRiggedMaterials = false;  // lldrawpoolmaterials.cpp: the rigged passes' leftovers are set too
+static U64 sQLRigLastDraws = 0, sQLRigLastKept = 0, sQLRigDraws = 0, sQLRigKept = 0;
 std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers = nullptr;  // lldrawpoolmaterials.cpp
 bool gQLVulkanMaterialFallback = false;                          // lldrawpoolmaterials.cpp: no indexed sweep
 static U64 sQLMatLastDraws = 0, sQLMatLastKept = 0, sQLMatDraws = 0, sQLMatKept = 0;
@@ -13673,9 +13722,14 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
     gQLVulkanMaterialLeftovers = nullptr;
+    gQLVulkanSimpleRiggedLeftovers = nullptr;
+    gQLVulkanPBRRiggedLeftovers = nullptr;
+    gQLVulkanRiggedMaterials = false;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
     static LLCachedControl<bool> material_wanted(gSavedSettings, "QuasarVulkanMaterialDraws", false);
+    static LLCachedControl<bool> rigged_wanted(gSavedSettings, "QuasarVulkanRiggedDraws", false);
+    static LLCachedControl<bool> vulkan_shadows(gSavedSettings, "QuasarVulkanShadows", false);
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
     static LLCachedControl<bool> pbr_wanted(gSavedSettings, "QuasarVulkanPBRDraws", false);
     if (!main_view && !wanted())
@@ -13704,13 +13758,17 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     sQLProbeTaken.clear();
     sQLPBRLeftovers.clear();
     sQLPBRTaken.clear();
-    for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+    for (U32 m = 0; m < QL_MATERIAL_PASSES * 2; ++m)
     {
         sQLMatLeftovers[m].clear();
         sQLMatTaken[m].clear();
     }
+    sQLSimpleRiggedLeftovers.clear();
+    sQLSimpleRiggedTaken.clear();
+    sQLPBRRiggedLeftovers.clear();
+    sQLPBRRiggedTaken.clear();
     const LLVertexBuffer* last_vb = nullptr;
-    bool last_in_arena = false, last_tangents = false, last_uv1 = false, last_uv2 = false;
+    bool last_in_arena = false, last_tangents = false, last_uv1 = false, last_uv2 = false, last_weights = false;
     unsigned base_vertex = 0, base_index = 0;
     // The mesh in the arena (positions, normals, texture coordinates, colours, tangents where it has them).
     const auto place = [&](const LLVertexBuffer* vb)
@@ -13721,6 +13779,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             last_tangents = vb && vb->hasDataType(LLVertexBuffer::TYPE_TANGENT);
             last_uv1      = vb && vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD1);
             last_uv2      = vb && vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD2);
+            last_weights  = vb && vb->hasDataType(LLVertexBuffer::TYPE_WEIGHT4);
             last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
                             vb->hasDataType(LLVertexBuffer::TYPE_NORMAL) &&
                             vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD0) &&
@@ -13733,7 +13792,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                                 base_index,
                                 last_tangents ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TANGENT) : ~0u,
                                 last_uv1 ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD1) : ~0u,
-                                last_uv2 ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD2) : ~0u);
+                                last_uv2 ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD2) : ~0u,
+                                last_weights ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_WEIGHT4) : ~0u);
         }
         return last_in_arena;
     };
@@ -13749,7 +13809,24 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         LLMatrix4a mvp;
         mvp.setMul(modelview, proj);
         memcpy(d.mvp, mvp.getF32ptr(), sizeof(d.mvp));
-        ql_normal_matrix(modelview, d.normal_matrix);
+        if (params.mAvatar.notNull() && params.mSkinInfo)
+        {
+            // Rigged: the model-view's upper 3x3; the skin's cofactor turns the normal first (gbufferDraw's palette).
+            const F32* m = modelview.getF32ptr();
+            memset(d.normal_matrix, 0, sizeof(d.normal_matrix));
+            for (int c = 0; c < 3; ++c)
+            {
+                for (int r = 0; r < 3; ++r)
+                {
+                    d.normal_matrix[c * 4 + r] = m[c * 4 + r];
+                }
+            }
+            d.normal_matrix[15] = 1.f;
+        }
+        else
+        {
+            ql_normal_matrix(modelview, d.normal_matrix);
+        }
         if (main_view && params.mTextureMatrix)
         {
             memcpy(d.texture_matrix, params.mTextureMatrix->mMatrix, sizeof(d.texture_matrix));
@@ -13854,6 +13931,69 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             (drawn ? sQLPBRTaken : sQLPBRLeftovers).push_back(params);
             ++(drawn ? pbr_draws : pbr_kept);
         }
+        // Rigged (PASS_GLTF_PBR_RIGGED), as pushRiggedGLTFBatch draws it.
+        if (rigged_draws)
+        {
+            auto* rig_end = gPipeline.endRenderMap(LLRenderPass::PASS_GLTF_PBR_RIGGED);
+            for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_GLTF_PBR_RIGGED);
+                 i != rig_end;)
+            {
+                LLDrawInfo* params = *i;
+                LLCullResult::increment_iterator(i, rig_end);
+                if (!params)
+                {
+                    continue;
+                }
+                LLFetchedGLTFMaterial* mat = params->mGLTFMaterial.get();
+                bool drawn = false;
+                if (mat && params->mCount && params->mGLTFMaterialList.size() <= 1 && params->mTexture.isNull() &&
+                    params->mAvatar.notNull() && params->mSkinInfo && place(params->mVertexBuffer.get()) &&
+                    last_tangents && last_weights)
+                {
+                    bool skip = false;
+                    const unsigned palette = palette_of(*params, skip);
+                    if (skip)
+                    {
+                        continue;
+                    }
+                    QLVulkanPresenter::GbDraw d;
+                    matrices(*params, d);
+                    d.kind         = QLVulkanPresenter::GB_PBR;
+                    d.palette      = palette;
+                    d.double_sided = mat->mDoubleSided;
+                    LLViewerTexture* normal = mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL);
+                    if (normal && normal->getDiscardLevel() > 4)
+                    {
+                        normal = nullptr;
+                    }
+                    const bool textured =
+                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), false,
+                                        d.textures[0], d.levels[0]) &&
+                        ql_slot_texture(normal, true, d.textures[1], d.levels[1]) &&
+                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS),
+                                        false, d.textures[2], d.levels[2]) &&
+                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), false,
+                                        d.textures[3], d.levels[3]);
+                    if (textured && palette != ~0u)
+                    {
+                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR].getPacked(d.transforms[0]);
+                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL].getPacked(d.transforms[1]);
+                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS].getPacked(
+                            d.transforms[2]);
+                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].getPacked(d.transforms[3]);
+                        d.emissive[0] = mat->mEmissiveColor.mV[VRED];
+                        d.emissive[1] = mat->mEmissiveColor.mV[VGREEN];
+                        d.emissive[2] = mat->mEmissiveColor.mV[VBLUE];
+                        d.metallic    = mat->mMetallicFactor;
+                        d.roughness   = mat->mRoughnessFactor;
+                        drawn         = QLVulkanPresenter::gbufferDraw(d);
+                    }
+                }
+                (drawn ? sQLPBRRiggedTaken : sQLPBRRiggedLeftovers).push_back(params);
+                ++(drawn ? rig_draws : rig_kept);
+            }
+            gQLVulkanPBRRiggedLeftovers = &sQLPBRRiggedLeftovers;
+        }
         sQLPBRDraws += pbr_draws;
         sQLPBRKept += pbr_kept;
         if (main_view)
@@ -13862,6 +14002,71 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             sQLPBRLastKept  = pbr_kept;
         }
         gQLVulkanPBRLeftovers = &sQLPBRLeftovers;
+    }
+
+    // A rigged draw's palette, as uploadMatrixPalette finds it (the shadows' palettes, this frame's): ~0u where its
+    // skin has none yet (GL would draw nothing of it either) or Vulkan keeps none.
+    const LLVOAvatar* last_avatar = nullptr;
+    U64 last_skin = 0;
+    unsigned last_palette = ~0u;
+    bool last_skip = true;
+    const auto palette_of = [&](LLDrawInfo& params, bool& skip)
+    {
+        LLVOAvatar* avatar = params.mAvatar.get();
+        const U64 skin = params.mSkinInfo->mHash;
+        if (avatar != last_avatar || skin != last_skin)
+        {
+            last_avatar = avatar;
+            last_skin   = skin;
+            const LLVOAvatar::MatrixPaletteCache& mpc = avatar->updateSkinInfoMatrixPalette(params.mSkinInfo);
+            last_skip    = mpc.mMatrixPalette.empty();
+            last_palette = last_skip ? ~0u
+                                     : QLVulkanPresenter::shadowPalette((U64)(uintptr_t)avatar, skin, mpc.mGLMp.data(),
+                                                                        (U32)mpc.mGLMp.size());
+        }
+        skip = last_skip;
+        return last_palette;
+    };
+    const bool rigged_draws = rigged_wanted() && vulkan_shadows();
+    U64 rig_draws = 0, rig_kept = 0;
+    if (rigged_draws)
+    {
+        // Simple, rigged (PASS_SIMPLE_RIGGED), as pushRiggedBatches draws it.
+        auto* rig_end = gPipeline.endRenderMap(LLRenderPass::PASS_SIMPLE_RIGGED);
+        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_SIMPLE_RIGGED); i != rig_end;)
+        {
+            LLDrawInfo* params = *i;
+            LLCullResult::increment_iterator(i, rig_end);
+            if (!params)
+            {
+                continue;
+            }
+            bool drawn = false;
+            const LLImageGL* image = (params->mTextureList.size() <= 1 && params->mTexture.notNull())
+                                         ? params->mTexture->getGLTexture()
+                                         : nullptr;
+            const U32 texture = image ? image->getTexName() : 0;
+            if (params->mCount && params->mAvatar.notNull() && params->mSkinInfo && texture &&
+                place(params->mVertexBuffer.get()) && last_weights)
+            {
+                bool skip = false;
+                const unsigned palette = palette_of(*params, skip);
+                if (skip)
+                {
+                    continue;  // as uploadMatrixPalette's refusal: drawn by neither
+                }
+                QLVulkanPresenter::GbDraw d;
+                matrices(*params, d);
+                d.kind        = QLVulkanPresenter::GB_SIMPLE;
+                d.palette     = palette;
+                d.textures[0] = texture;
+                d.levels[0]   = ql_sampled_levels(image);
+                drawn         = palette != ~0u && QLVulkanPresenter::gbufferDraw(d);
+            }
+            (drawn ? sQLSimpleRiggedTaken : sQLSimpleRiggedLeftovers).push_back(params);
+            ++(drawn ? rig_draws : rig_kept);
+        }
+        gQLVulkanSimpleRiggedLeftovers = &sQLSimpleRiggedLeftovers;
     }
 
     // Legacy materials, not blended, unrigged, one material a draw (QuasarVulkanMaterialDraws), as
@@ -13876,10 +14081,11 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             levels = name ? ql_sampled_levels(image) : 1;
             return name != 0;
         };
-        for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+        for (U32 m = 0; m < QL_MATERIAL_PASSES * (rigged_draws ? 2 : 1); ++m)
         {
-            const U32 type        = QL_MATERIAL_PASS_TYPES[m];
-            const U32 shader_idx  = QL_MATERIAL_SHADER_IDX[m];
+            const bool rig        = m >= QL_MATERIAL_PASSES;
+            const U32 type        = QL_MATERIAL_PASS_TYPES[m % QL_MATERIAL_PASSES] + (rig ? 1 : 0);
+            const U32 shader_idx  = QL_MATERIAL_SHADER_IDX[m % QL_MATERIAL_PASSES];
             const bool normal_map = (shader_idx & 0x8) != 0;
             const bool spec_map   = (shader_idx & 0x4) != 0;
             auto* mat_end = gPipeline.endRenderMap(type);
@@ -13893,10 +14099,22 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                 }
                 bool drawn = false;
                 if (params->mCount && params->mMaterialSlotList.size() <= 1 && place(params->mVertexBuffer.get()) &&
-                    (!normal_map || (last_tangents && last_uv1)) && (!spec_map || last_uv2))
+                    (!normal_map || (last_tangents && last_uv1)) && (!spec_map || last_uv2) &&
+                    (!rig || (params->mAvatar.notNull() && params->mSkinInfo && last_weights)))
                 {
+                    unsigned palette = ~0u;
+                    if (rig)
+                    {
+                        bool skip = false;
+                        palette = palette_of(*params, skip);
+                        if (skip)
+                        {
+                            continue;
+                        }
+                    }
                     QLVulkanPresenter::GbDraw d;
                     matrices(*params, d);
+                    d.palette = palette;
                     d.kind             = QLVulkanPresenter::GB_MATERIAL;
                     d.has_normal_map   = normal_map;
                     d.has_specular_map = spec_map;
@@ -13908,7 +14126,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                     const bool textured = map_texture(params->mTexture.get(), d.textures[0], d.levels[0]) &&
                                           (!normal_map || map_texture(params->mNormalMap.get(), d.textures[1], d.levels[1])) &&
                                           (!spec_map || map_texture(params->mSpecularMap.get(), d.textures[2], d.levels[2]));
-                    drawn = textured && QLVulkanPresenter::gbufferDraw(d);
+                    drawn = textured && (!rig || palette != ~0u) && QLVulkanPresenter::gbufferDraw(d);
                 }
                 (drawn ? sQLMatTaken[m] : sQLMatLeftovers[m]).push_back(params);
                 ++(drawn ? mat_draws : mat_kept);
@@ -13922,6 +14140,14 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             sQLMatLastKept  = mat_kept;
         }
         gQLVulkanMaterialLeftovers = sQLMatLeftovers;
+        gQLVulkanRiggedMaterials   = rigged_draws;
+    }
+    sQLRigDraws += rig_draws;
+    sQLRigKept += rig_kept;
+    if (main_view)
+    {
+        sQLRigLastDraws = rig_draws;
+        sQLRigLastKept  = rig_kept;
     }
 
     if (main_view)
@@ -13944,7 +14170,11 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
     const bool materials_taken = gQLVulkanMaterialLeftovers != nullptr;
+    const bool rigged_materials = materials_taken && gQLVulkanRiggedMaterials;
     gQLVulkanMaterialLeftovers = nullptr;
+    gQLVulkanSimpleRiggedLeftovers = nullptr;
+    gQLVulkanPBRRiggedLeftovers = nullptr;
+    gQLVulkanRiggedMaterials = false;
     if (!sQLProbeDrawsOpen)
     {
         return {};
@@ -13955,19 +14185,46 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     if (!QLVulkanPresenter::gbufferEnd())
     {
         bool any_material = false;
-        for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+        for (U32 m = 0; m < QL_MATERIAL_PASSES * (rigged_materials ? 2 : 1); ++m)
         {
             any_material = any_material || (materials_taken && !sQLMatTaken[m].empty());
         }
-        if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material)
+        if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material || !sQLSimpleRiggedTaken.empty() ||
+            !sQLPBRRiggedTaken.empty())
         {
             ++sQLProbeHandOversFailed;
             // GL draws them (renderGeomDeferred); cleared at the next begin
-            return { &sQLProbeTaken, &sQLPBRTaken, any_material ? sQLMatTaken : nullptr };
+            QLVulkanLost lost = { &sQLProbeTaken, &sQLPBRTaken, any_material ? sQLMatTaken : nullptr };
+            lost.rigged_materials = rigged_materials;
+            lost.simple_rigged    = &sQLSimpleRiggedTaken;
+            lost.pbr_rigged       = &sQLPBRRiggedTaken;
+            return lost;
         }
     }
 #endif
     return {};
+}
+
+std::string ql_vulkan_rigged_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanRiggedDraws", false);
+    static LLCachedControl<bool> shadows(gSavedSettings, "QuasarVulkanShadows", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanRiggedDraws)";
+    }
+    if (!shadows())
+    {
+        return "needs QuasarVulkanShadows (its skin palettes)";
+    }
+    return llformat("main view last frame %llu Vulkan, %llu GL (simple and PBR; materials' rigged count there) | since "
+                    "start %llu Vulkan, %llu GL",
+                    (unsigned long long)sQLRigLastDraws, (unsigned long long)sQLRigLastKept,
+                    (unsigned long long)sQLRigDraws, (unsigned long long)sQLRigKept);
+#else
+    return "not on this platform";
+#endif
 }
 
 std::string ql_vulkan_material_draws_info()

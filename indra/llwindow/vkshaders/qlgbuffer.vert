@@ -19,6 +19,7 @@ layout(location = 3) in vec4 diffuse_color;
 layout(location = 4) in vec4 tangent;
 layout(location = 5) in vec2 texcoord1;  // a legacy material's normal map's
 layout(location = 6) in vec2 texcoord2;  // and its specular map's
+layout(location = 7) in vec4 weight4;    // a rigged draw's joints and weights
 
 struct Draw
 {
@@ -30,7 +31,44 @@ struct Draw
     vec4 emissive;
     vec4 specular;
     vec4 material;
+    vec4 rig;  // palette's first vec4, whether it skins
 };
+
+// The skins' palettes (the shadows'): a skin's origin, then three vec4s a joint (objectSkinV.glsl's matrixPalette).
+layout(std430, set = 0, binding = 1) readonly buffer Palettes
+{
+    vec4 palette[];
+};
+
+const int MAX_JOINTS_PER_MESH_OBJECT = 110;
+
+mat3x4 joint(uint base, int i)
+{
+    uint at = base + 1u + uint(i) * 3u;
+    return mat3x4(palette[at], palette[at + 1u], palette[at + 2u]);
+}
+
+// objectSkinV.glsl's getSkinBlend.
+mat3x4 skinBlend(uint base)
+{
+    vec4 w = fract(weight4);
+    vec4 index = floor(weight4);
+    index = min(index, vec4(MAX_JOINTS_PER_MESH_OBJECT - 1));
+    index = max(index, vec4(0.0));
+    w *= 1.0 / (w.x + w.y + w.z + w.w);
+    mat3x4 b = joint(base, int(index.x)) * w.x;
+    b += joint(base, int(index.y)) * w.y;
+    b += joint(base, int(index.z)) * w.z;
+    b += joint(base, int(index.w)) * w.w;
+    return b;
+}
+
+// objectSkinV.glsl's skinNormal: through the blend's cofactor.
+vec3 skinNormal(mat3x4 b, vec3 n)
+{
+    mat3 m = mat3(b);
+    return mat3(cross(m[1], m[2]), cross(m[2], m[0]), cross(m[0], m[1])) * n;
+}
 
 layout(std430, set = 0, binding = 0) readonly buffer Draws
 {
@@ -112,13 +150,31 @@ void main()
 {
     Draw d = draws[gl_InstanceIndex];
     draw_index = uint(gl_InstanceIndex);
-    vec4 p = d.mvp * vec4(position, 1.0);
+    // A rigged draw (objectSkinV.glsl): the position skinned about the skin's origin, split as skinTransformH splits it;
+    // the normal through the blend's cofactor, the tangent through the blend, both then by the model-view.
+    bool rigged = d.rig.y > 0.5;
+    vec3 object_normal = normal;
+    vec3 object_tangent = tangent.xyz;
+    vec4 p;
+    if (rigged)
+    {
+        uint base = uint(d.rig.x + 0.5);
+        mat3x4 b = skinBlend(base);
+        vec3 local = mat3(b) * position + vec3(b[0].w, b[1].w, b[2].w);
+        p = d.mvp * vec4(local, 0.0) + d.mvp * vec4(palette[base].xyz, 1.0);
+        object_normal = skinNormal(b, normal);
+        object_tangent = mat3(b) * tangent.xyz;
+    }
+    else
+    {
+        p = d.mvp * vec4(position, 1.0);
+    }
     if (pc.flags.x > 0.5)
     {
         p.z = 0.5 * (p.z + p.w);
     }
     gl_Position = p;
-    vec3 n = normalize(mat3(d.normal_matrix) * normal);
+    vec3 n = normalize(mat3(d.normal_matrix) * object_normal);
     vary_normal = n;
     vertex_color = linearizeVertexTint(diffuse_color);
     if (d.pbr.z < 0.5)
@@ -136,7 +192,7 @@ void main()
         normal_texcoord = (d.texture_matrix * vec4(texcoord1, 0, 1)).xy;
         metallic_roughness_texcoord = (d.texture_matrix * vec4(texcoord2, 0, 1)).xy;
         emissive_texcoord = base_color_texcoord;
-        vary_tangent = normalize(mat3(d.normal_matrix) * tangent.xyz);
+        vary_tangent = normalize(mat3(d.normal_matrix) * object_tangent);
         vary_sign = tangent.w;
     }
     else
@@ -146,7 +202,7 @@ void main()
         normal_texcoord = texture_transform(texcoord0, d.transforms[2], d.transforms[3], d.texture_matrix);
         metallic_roughness_texcoord = texture_transform(texcoord0, d.transforms[4], d.transforms[5], d.texture_matrix);
         emissive_texcoord = texture_transform(texcoord0, d.transforms[6], d.transforms[7], d.texture_matrix);
-        vec3 t = mat3(d.normal_matrix) * tangent.xyz;
+        vec3 t = mat3(d.normal_matrix) * object_tangent;
         vec4 transformed_tangent = tangent_space_transform(vec4(t, tangent.w), n, d.transforms[2], d.texture_matrix);
         vary_tangent = normalize(transformed_tangent.xyz);
         vary_sign = transformed_tangent.w;

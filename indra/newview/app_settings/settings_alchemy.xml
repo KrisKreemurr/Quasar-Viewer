@@ -2949,6 +2949,17 @@
             <key>Value</key>
             <real>0.0</real>
         </map>
+        <key>QuasarVulkanRiggedDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanProbeDraws or QuasarVulkanMainDraws, and QuasarVulkanShadows for its skin palettes): rigged mesh (worn bodies, clothes, hair, animesh) of the kinds Vulkan already takes (simple, PBR, and legacy materials with QuasarVulkanMaterialDraws) is drawn into the G-buffer by Vulkan too, skinned as GL skins it. Live. Status: "Quasar Vulkan rigged draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanMaterialDraws</key>
         <map>
             <key>Comment</key>

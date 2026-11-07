@@ -51,6 +51,7 @@ S32 LLDrawPoolGLTFPBR::getNumDeferredPasses()
 
 // Quasar: the opaque pass's draws GL keeps while Vulkan draws the rest (QuasarVulkanPBRDraws; pipeline.cpp).
 extern std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanPBRRiggedLeftovers;  // the rigged pass's (QuasarVulkanRiggedDraws)
 
 void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
 {
@@ -106,7 +107,23 @@ void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
     }
 
     opaque->bind(true);
-    if (indexed)
+    if (!alpha_mask && gQLVulkanPBRRiggedLeftovers)
+    {
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_mesh = 0;
+        bool skip_last = false;
+        LLFetchedGLTFMaterial* last_mat = nullptr;
+        LLViewerTexture* last_tex = nullptr;
+        for (LLDrawInfo* params : *gQLVulkanPBRRiggedLeftovers)
+        {
+            if (indexed && params->mGLTFMaterialList.size() > 1)
+            {
+                continue;
+            }
+            pushRiggedGLTFBatch(*params, last_avatar, last_mesh, skip_last, last_mat, last_tex);
+        }
+    }
+    else if (indexed)
     {
         pushRiggedGLTFBatchesScalar(mRenderType + 1);
     }

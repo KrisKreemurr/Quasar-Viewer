@@ -200,7 +200,8 @@ public:
     static bool gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                              unsigned normal_offset, unsigned uv_offset, unsigned color_offset, unsigned vertex_count,
                              unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index,
-                             unsigned tangent_offset = ~0u, unsigned uv1_offset = ~0u, unsigned uv2_offset = ~0u);
+                             unsigned tangent_offset = ~0u, unsigned uv1_offset = ~0u, unsigned uv2_offset = ~0u,
+                             unsigned weight_offset = ~0u);
 
     /// One draw of the G-buffer pass. Simple: textures[0] alone (the diffuse), times the tint. PBR (GL's
     /// pbropaqueF.glsl, opaque, unrigged): base colour, normal, occlusion-roughness-metal and emissive textures, a 0 in
@@ -230,6 +231,10 @@ public:
         unsigned textures[4] = {};
         unsigned levels[4] = { 1, 1, 1, 1 };
         unsigned base_vertex = 0, first_index = 0, index_count = 0;
+        // A rigged draw: its skin's palette (shadowPalette, this frame's), ~0u for none. Its mesh needs weights
+        // (gbufferArena's weight_offset), and its normal_matrix is the model-view's upper 3x3 (the skin's own
+        // cofactor turns the normal first, as objectSkinV.glsl's skinNormal).
+        unsigned palette = ~0u;
     };
     static bool gbufferDraw(const GbDraw& draw);
     static bool gbufferEnd();

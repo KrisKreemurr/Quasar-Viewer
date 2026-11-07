@@ -28,6 +28,7 @@ struct Draw
     vec4 emissive;
     vec4 specular;  // a legacy material's specular colour (sRGB) and glossiness
     vec4 material;  // environment intensity, alpha cutoff, fullbright, alpha mode | normal map 4 | specular map 8
+    vec4 rig;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Draws

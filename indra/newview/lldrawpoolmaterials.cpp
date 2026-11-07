@@ -240,8 +240,9 @@ void LLDrawPoolMaterials::endDeferredPass(S32 pass)
 // Quasar (QuasarVulkanMaterialDraws, pipeline.cpp): while set, the unrigged passes' scalar draws GL keeps, by pass
 // index, Vulkan drawing the rest; while the fallback is set, they are the draws Vulkan was to draw, and the indexed
 // sweep (drawn already) is left out.
-extern std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers;  // [0, 12) unrigged, [12, 24) rigged where set below
 extern bool gQLVulkanMaterialFallback;
+extern bool gQLVulkanRiggedMaterials;
 
 void LLDrawPoolMaterials::renderDeferred(S32 pass)
 {
@@ -274,9 +275,9 @@ void LLDrawPoolMaterials::renderDeferred(S32 pass)
 
     LLCullResult::drawinfo_iterator begin = gPipeline.beginRenderMap(type);
     LLCullResult::drawinfo_iterator end = gPipeline.endRenderMap(type);
-    if (!rigged && gQLVulkanMaterialLeftovers)
+    if (gQLVulkanMaterialLeftovers && (!rigged || gQLVulkanRiggedMaterials))
     {
-        std::vector<LLDrawInfo*>& list = gQLVulkanMaterialLeftovers[pass];
+        std::vector<LLDrawInfo*>& list = gQLVulkanMaterialLeftovers[pass + (rigged ? 12 : 0)];
         begin = list.data();
         end   = list.data() + list.size();
     }
@@ -433,7 +434,7 @@ void LLDrawPoolMaterials::renderDeferred(S32 pass)
 
     // Draw the multi-material (indexed) batches for this pass with the indexed
     // program (its rigged variant for the rigged passes).
-    if (LLGLSLShader::sIndexedLegacyMaterials && !(gQLVulkanMaterialFallback && !rigged))
+    if (LLGLSLShader::sIndexedLegacyMaterials && !(gQLVulkanMaterialFallback && (!rigged || gQLVulkanRiggedMaterials)))
     {
         LLGLSLShader* indexed = gDeferredMaterialIndexedProgram[sMaterialShaderIdx[pass]].selectVariant();
         LLGLSLShader* prog = rigged ? indexed->mRiggedVariant : indexed;

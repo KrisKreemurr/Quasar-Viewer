@@ -5363,7 +5363,7 @@ struct QLVulkanPresenter::Impl
         }
         gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)vertex_offset, (GLintptr)arena.vertexTop,
                                   (GLsizeiptr)vertex_bytes);
-        if (arena.weightBytes)
+        if (arena.weightBytes && weight_offset != U32_MAX)
         {
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)weight_offset,
                                       (GLintptr)(arena.vertexBytes + arena.vertexTop), (GLsizeiptr)vertex_bytes);
@@ -6233,7 +6233,7 @@ struct QLVulkanPresenter::Impl
     static constexpr U32          GB_MAX_DRAWS = 8192;
     // A draw's data (qlgbuffer.vert's Draw): mvp, normal matrix, texture matrix, the four KHR transforms, the PBR
     // factors and kind, the emissive colour, and room for the legacy materials' to come.
-    static constexpr VkDeviceSize GB_DRAW_BYTES = 384;
+    static constexpr VkDeviceSize GB_DRAW_BYTES = 400;  // and a rigged draw's palette
     static constexpr VkDeviceSize GB_SLOT_BYTES =
         ((VkDeviceSize)GB_MAX_DRAWS * (GB_DRAW_BYTES + sizeof(VkDrawIndexedIndirectCommand)) + 255) & ~(VkDeviceSize)255;
     static constexpr VkDeviceSize GB_ARENA_VERTEX_BYTES = 64ull << 20;  // positions; normals the same, uvs half, colours a quarter
@@ -6301,6 +6301,7 @@ struct QLVulkanPresenter::Impl
     std::vector<GLuint>   mGbPassTextures;        // the textures the pass draws with, each once, for the hand-over
     std::vector<VkImage>  mGbPassImages;
     GbDefault             mGbWhite, mGbFlat;
+    bool                  mGbPalettes = false;  // set 0's palettes are the shadows': rigged draws can be taken
     std::map<GbMatKey, VkDescriptorSet> mGbMatSets;  // a set for each four images drawn with together
     std::unordered_multimap<VkImage, GbMatKey> mGbMatUse;  // the sets an image is in
     // For the status line: this frame's and the last whole frame's.
@@ -6340,7 +6341,9 @@ struct QLVulkanPresenter::Impl
             mGbNote = "needs QuasarVulkanTargets and QuasarVulkanTextures, their self-tests passed";
             return false;
         }
-        if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, false, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true,
+        // Rigged draws skin with the shadows' palettes (shadowPalette): their objects first, where they can be made.
+        const bool palettes = createShadowObjects() && mShPalettes != VK_NULL_HANDLE;
+        if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, true, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true,
                          true, true))
         {
             return gbFail("its arena");
@@ -6375,15 +6378,18 @@ struct QLVulkanPresenter::Impl
         }
         mGbHostMapped = static_cast<U8*>(mapped);
 
-        // Set 0: the slot's draws. Set 1: a texture.
-        VkDescriptorSetLayoutBinding draws_binding = {};
-        draws_binding.binding         = 0;
-        draws_binding.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        draws_binding.descriptorCount = 1;
-        draws_binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // both read it
+        // Set 0: the slot's draws, and the skins' palettes (the shadows', or a stand-in where there are none).
+        VkDescriptorSetLayoutBinding draws_bindings[2] = {};
+        draws_bindings[0].binding         = 0;
+        draws_bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        draws_bindings[0].descriptorCount = 1;
+        draws_bindings[0].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // both read it
+        draws_bindings[1]                 = draws_bindings[0];
+        draws_bindings[1].binding         = 1;
+        draws_bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
         VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        set_info.bindingCount = 1;
-        set_info.pBindings    = &draws_binding;
+        set_info.bindingCount = 2;
+        set_info.pBindings    = draws_bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mGbSetLayout) != VK_SUCCESS)
         {
             mGbSetLayout = VK_NULL_HANDLE;
@@ -6417,7 +6423,7 @@ struct QLVulkanPresenter::Impl
             mGbLayout = VK_NULL_HANDLE;
             return gbFail("vkCreatePipelineLayout");
         }
-        const VkDescriptorPoolSize slot_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, GB_SLOTS };
+        const VkDescriptorPoolSize slot_size = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, GB_SLOTS * 2 };
         VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pool_info.maxSets       = GB_SLOTS;
         pool_info.poolSizeCount = 1;
@@ -6486,15 +6492,25 @@ struct QLVulkanPresenter::Impl
             {
                 return gbFail("no command buffers or sets");
             }
-            const VkDescriptorBufferInfo draws = { mGbHost, GB_SLOT_BYTES * i, (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES };
-            VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            write.dstSet          = slot.set;
-            write.dstBinding      = 0;
-            write.descriptorCount = 1;
-            write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.pBufferInfo     = &draws;
-            vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+            const VkDescriptorBufferInfo infos[2] = {
+                { mGbHost, GB_SLOT_BYTES * i, (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES },
+                // Without the shadows' palettes, a draw's own buffer stands in: no rigged draw is taken then.
+                palettes ? VkDescriptorBufferInfo{ mShPalettes, 0, VK_WHOLE_SIZE }
+                         : VkDescriptorBufferInfo{ mGbHost, GB_SLOT_BYTES * i, GB_DRAW_BYTES },
+            };
+            VkWriteDescriptorSet writes[2] = {};
+            for (U32 b = 0; b < 2; ++b)
+            {
+                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[b].dstSet          = slot.set;
+                writes[b].dstBinding      = b;
+                writes[b].descriptorCount = 1;
+                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[b].pBufferInfo     = &infos[b];
+            }
+            vkUpdateDescriptorSets(mDevice, 2, writes, 0, nullptr);
         }
+        mGbPalettes = palettes;
         if (!createSharedSemaphore(mGbGLDoneVK, mGbGLDoneGL, mGbGLDoneHandle) ||
             !createSharedSemaphore(mGbVKDoneVK, mGbVKDoneGL, mGbVKDoneHandle))
         {
@@ -7029,24 +7045,26 @@ struct QLVulkanPresenter::Impl
         stages[1].pName  = "main";
         // Positions, normals (16 bytes a vertex, as LLVertexBuffer keeps both), texture coordinates, colours, tangents.
         // And the legacy materials' second and third texture coordinates (normal and specular maps).
-        const VkVertexInputBindingDescription bindings[7] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
+        const VkVertexInputBindingDescription bindings[8] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 1, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 2, 8, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 3, 4, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 4, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 5, 8, VK_VERTEX_INPUT_RATE_VERTEX },
-                                                              { 6, 8, VK_VERTEX_INPUT_RATE_VERTEX } };
-        const VkVertexInputAttributeDescription attributes[7] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+                                                              { 6, 8, VK_VERTEX_INPUT_RATE_VERTEX },
+                                                              { 7, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
+        const VkVertexInputAttributeDescription attributes[8] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 2, 2, VK_FORMAT_R32G32_SFLOAT, 0 },
                                                                   { 3, 3, VK_FORMAT_R8G8B8A8_UNORM, 0 },
                                                                   { 4, 4, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
                                                                   { 5, 5, VK_FORMAT_R32G32_SFLOAT, 0 },
-                                                                  { 6, 6, VK_FORMAT_R32G32_SFLOAT, 0 } };
+                                                                  { 6, 6, VK_FORMAT_R32G32_SFLOAT, 0 },
+                                                                  { 7, 7, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertex_input.vertexBindingDescriptionCount   = 7;
+        vertex_input.vertexBindingDescriptionCount   = 8;
         vertex_input.pVertexBindingDescriptions      = bindings;
-        vertex_input.vertexAttributeDescriptionCount = 7;
+        vertex_input.vertexAttributeDescriptionCount = 8;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -7104,6 +7122,12 @@ struct QLVulkanPresenter::Impl
 
     void gbufferFrame(U32 frame)
     {
+        // The rigged draws' palettes are the shadows', kept a frame at a time: the shadows' frame moves on too, where
+        // the G-buffer draws come first in it.
+        if (mShReady)
+        {
+            shadowFrame(frame);
+        }
         if (frame != mGbFrame)
         {
             mGbFrame = frame;
@@ -7166,20 +7190,22 @@ struct QLVulkanPresenter::Impl
 
     bool gbufferArena(U64 stamp, GLuint vertex_buffer, U32 position_offset, U32 normal_offset, U32 uv_offset,
                       U32 color_offset, U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex,
-                      U32& base_index, U32 tangent_offset, U32 uv1_offset, U32 uv2_offset)
+                      U32& base_index, U32 tangent_offset, U32 uv1_offset, U32 uv2_offset, U32 weight_offset)
     {
         if (!mGbInPass)
         {
             return false;
         }
-        return arenaPlace(mGbArena, stamp, vertex_buffer, position_offset, 0, vertex_count, index_buffer, index_count,
+        return arenaPlace(mGbArena, stamp, vertex_buffer, position_offset, weight_offset, vertex_count, index_buffer,
+                          index_count,
                           base_vertex, base_index, uv_offset, color_offset, normal_offset, true, tangent_offset,
                           uv1_offset, uv2_offset);
     }
 
     bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
     {
-        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_MATERIAL)
+        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_MATERIAL ||
+            (d.palette != ~0u && (!mGbPalettes || d.palette >= (1u << 24))))
         {
             return false;
         }
@@ -7226,6 +7252,11 @@ struct QLVulkanPresenter::Impl
         out[93] = d.alpha_cutoff;
         out[94] = d.fullbright;
         out[95] = (float)(d.alpha_mode | (d.has_normal_map ? 4u : 0u) | (d.has_specular_map ? 8u : 0u));
+        // A rigged draw: its palette's first vec4 (shadowPalette), and that it skins.
+        const bool rigged = d.palette != ~0u;
+        out[96] = rigged ? (float)d.palette : 0.f;
+        out[97] = rigged ? 1.f : 0.f;
+        out[98] = out[99] = 0.f;
         VkDrawIndexedIndirectCommand cmd = {};
         cmd.indexCount    = d.index_count;
         cmd.instanceCount = 1;
@@ -7337,11 +7368,12 @@ struct QLVulkanPresenter::Impl
         vkCmdPushConstants(slot.cmd, mGbLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(flags), flags);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 0, 1, &slot.set, 0, nullptr);
-        const VkBuffer buffers[7] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer,
-                                      mGbArena.buffer, mGbArena.buffer, mGbArena.buffer };
-        const VkDeviceSize offsets[7] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart(),
-                                          mGbArena.tangentStart(), mGbArena.uv1Start(), mGbArena.uv2Start() };
-        vkCmdBindVertexBuffers(slot.cmd, 0, 7, buffers, offsets);
+        const VkBuffer buffers[8] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer,
+                                      mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer };
+        const VkDeviceSize offsets[8] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart(),
+                                          mGbArena.tangentStart(), mGbArena.uv1Start(), mGbArena.uv2Start(),
+                                          mGbArena.vertexBytes };  // the weights follow the positions
+        vkCmdBindVertexBuffers(slot.cmd, 0, 8, buffers, offsets);
         vkCmdBindIndexBuffer(slot.cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
         const VkDeviceSize commands = GB_SLOT_BYTES * mGbSlot + (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES;
         const VkDrawIndexedIndirectCommand* cmds =
@@ -9120,11 +9152,11 @@ bool QLVulkanPresenter::gbufferArena(unsigned long long stamp, unsigned vertex_b
                                      unsigned normal_offset, unsigned uv_offset, unsigned color_offset,
                                      unsigned vertex_count, unsigned index_buffer, unsigned index_count,
                                      unsigned& base_vertex, unsigned& base_index, unsigned tangent_offset,
-                                     unsigned uv1_offset, unsigned uv2_offset)
+                                     unsigned uv1_offset, unsigned uv2_offset, unsigned weight_offset)
 {
     return sActive && sActive->gbufferArena((U64)stamp, vertex_buffer, position_offset, normal_offset, uv_offset,
                                             color_offset, vertex_count, index_buffer, index_count, base_vertex,
-                                            base_index, tangent_offset, uv1_offset, uv2_offset);
+                                            base_index, tangent_offset, uv1_offset, uv2_offset, weight_offset);
 }
 
 // static
