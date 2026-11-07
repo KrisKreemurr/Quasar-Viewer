@@ -1132,9 +1132,15 @@ struct QLVulkanPresenter::Impl
                 total   = budget.heapBudget[i];
             }
         }
-        gQLVideoMemoryUsedBytes.store(used, std::memory_order_relaxed);
+        // Windows counts the memory Vulkan exports and GL imports twice in the process's use (Task Manager's dedicated
+        // memory, the real figure, stays gigabytes under it): the texture budget is given the use with it counted once.
+        // Streamline reads the raw figure (QueryVideoMemoryInfo), which the status line shows too.
+        const U64 shared = mExtBytes + mTexBlockBytes;
+        mVramRawUsed = used;
+        gQLVideoMemoryUsedBytes.store(used > shared ? used - shared : 0, std::memory_order_relaxed);
         gQLVideoMemoryBudgetBytes.store(total, std::memory_order_relaxed);
     }
+    U64 mVramRawUsed = 0;
 
     bool createDevice()
     {
@@ -9322,11 +9328,14 @@ std::string QLVulkanPresenter::frameGenInfo()
     if (impl.mFGOn)
     {
         // The process's video memory against its budget first: over it, Streamline stops making frames.
-        const U64 vram_used   = gQLVideoMemoryUsedBytes.load(std::memory_order_relaxed);
+        // Raw: as Windows (and Streamline) count it, shared memory twice; real: shared memory once.
+        const U64 vram_real   = gQLVideoMemoryUsedBytes.load(std::memory_order_relaxed);
+        const U64 vram_raw    = impl.mVramRawUsed;
         const U64 vram_budget = gQLVideoMemoryBudgetBytes.load(std::memory_order_relaxed);
         const std::string vram =
-            vram_budget ? llformat("VRAM %.1f/%.1f GB%s, ", (double)vram_used / (1ull << 30),
-                                   (double)vram_budget / (1ull << 30), vram_used > vram_budget ? " OVER" : "")
+            vram_budget ? llformat("VRAM %.1f/%.1f GB%s (real %.1f), ", (double)vram_raw / (1ull << 30),
+                                   (double)vram_budget / (1ull << 30), vram_raw > vram_budget ? " OVER" : "",
+                                   (double)vram_real / (1ull << 30))
                         : std::string();
         // Streamline's own reason, where it stopped making frames while on.
         const std::string stopped = impl.mFGStatus != 0 ? " | " + impl.mFGNote : std::string();
