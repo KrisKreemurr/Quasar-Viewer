@@ -404,6 +404,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdClearColorImage);
     QL_VK_FN(vkCmdClearDepthStencilImage);
     QL_VK_FN(vkGetPhysicalDeviceImageFormatProperties2);  // optional (Vulkan 1.1): asked, never required
+    QL_VK_FN(vkGetPhysicalDeviceMemoryProperties2);       // optional (Vulkan 1.1): the memory budget
     QL_VK_FN(vkGetImageMemoryRequirements2);              // optional (Vulkan 1.1)
     QL_VK_FN(vkFreeCommandBuffers);
     QL_VK_FN(vkFreeDescriptorSets);
@@ -613,6 +614,8 @@ struct QLVulkanPresenter::Impl
         QL_VK_INSTANCE(vkGetPhysicalDeviceFeatures);
         vkGetPhysicalDeviceImageFormatProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties2>(
             vkGetInstanceProcAddr(mInstance, "vkGetPhysicalDeviceImageFormatProperties2"));
+        vkGetPhysicalDeviceMemoryProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(
+            vkGetInstanceProcAddr(mInstance, "vkGetPhysicalDeviceMemoryProperties2"));
         QL_VK_INSTANCE(vkEnumerateDeviceExtensionProperties);
         QL_VK_INSTANCE(vkCreateDevice);
         QL_VK_INSTANCE(vkGetDeviceProcAddr);
@@ -1103,6 +1106,32 @@ struct QLVulkanPresenter::Impl
     bool mHasDepthClamp = false;
     bool mHasAniso = false;
     bool mHasMultiIndirect = false;
+    bool mHasMemoryBudget = false;
+
+    // Every 30 frames: the process's video memory use and budget over the device-local heaps, for the texture budget
+    // (gQLVideoMemoryUsedBytes, gQLVideoMemoryBudgetBytes; LLViewerTexture::updateClass).
+    void pollMemoryBudget()
+    {
+        if (!mHasMemoryBudget || (mFrame % 30) != 0)
+        {
+            return;
+        }
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT };
+        VkPhysicalDeviceMemoryProperties2 props = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+        props.pNext = &budget;
+        vkGetPhysicalDeviceMemoryProperties2(mPhysical, &props);
+        U64 used = 0, total = 0;
+        for (U32 i = 0; i < props.memoryProperties.memoryHeapCount; ++i)
+        {
+            if (props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            {
+                used += budget.heapUsage[i];
+                total += budget.heapBudget[i];
+            }
+        }
+        gQLVideoMemoryUsedBytes.store(used, std::memory_order_relaxed);
+        gQLVideoMemoryBudgetBytes.store(total, std::memory_order_relaxed);
+    }
 
     bool createDevice()
     {
@@ -1122,6 +1151,16 @@ struct QLVulkanPresenter::Impl
             if (!found)
             {
                 return fail(std::string("device has no ") + name);
+            }
+        }
+        // Optional: the process's video memory use and the system's budget for it (pollMemoryBudget).
+        std::vector<const char*> enabled_extensions(std::begin(wanted), std::end(wanted));
+        for (const VkExtensionProperties& p : props)
+        {
+            if (strcmp(p.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0 && vkGetPhysicalDeviceMemoryProperties2)
+            {
+                enabled_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+                mHasMemoryBudget = true;
             }
         }
 
@@ -1147,8 +1186,8 @@ struct QLVulkanPresenter::Impl
         VkDeviceCreateInfo info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         info.queueCreateInfoCount    = 1;
         info.pQueueCreateInfos       = &queue;
-        info.enabledExtensionCount   = (U32)LL_ARRAY_SIZE(wanted);
-        info.ppEnabledExtensionNames = wanted;
+        info.enabledExtensionCount   = (U32)enabled_extensions.size();
+        info.ppEnabledExtensionNames = enabled_extensions.data();
         info.pEnabledFeatures        = &enabled;
 
         VkResult result = vkCreateDevice(mPhysical, &info, nullptr, &mDevice);
@@ -8818,6 +8857,7 @@ struct QLVulkanPresenter::Impl
         ++mFrame;
         ++mFramesSinceSwapchain;
         mFGInputsThisFrame = false;
+        pollMemoryBudget();
 #if QL_HAS_STREAMLINE
         pollFrameGen();
 #endif
@@ -8859,6 +8899,8 @@ void QLVulkanPresenter::shutdown()
     if (sActive == mImpl.get())
     {
         sActive = nullptr;
+        gQLVideoMemoryBudgetBytes.store(0, std::memory_order_relaxed);  // unknown again: the budget goes back to its own
+        gQLVideoMemoryUsedBytes.store(0, std::memory_order_relaxed);
     }
     mImpl->shutdown();
 }
@@ -9241,7 +9283,15 @@ std::string QLVulkanPresenter::frameGenInfo()
     }
     if (impl.mFGOn)
     {
-        return llformat("on, %u shown a frame drawn, inputs %ux%u", impl.mFGPresented, impl.mFGWidth, impl.mFGHeight);
+        // The process's video memory against its budget first: over it, Streamline stops making frames.
+        const U64 vram_used   = gQLVideoMemoryUsedBytes.load(std::memory_order_relaxed);
+        const U64 vram_budget = gQLVideoMemoryBudgetBytes.load(std::memory_order_relaxed);
+        const std::string vram =
+            vram_budget ? llformat("VRAM %.1f/%.1f GB%s, ", (double)vram_used / (1ull << 30),
+                                   (double)vram_budget / (1ull << 30), vram_used > vram_budget ? " OVER" : "")
+                        : std::string();
+        return llformat("on, %u shown a frame drawn, %sinputs %ux%u", impl.mFGPresented, vram.c_str(), impl.mFGWidth,
+                        impl.mFGHeight);
     }
     return impl.mFGNote;
 #endif

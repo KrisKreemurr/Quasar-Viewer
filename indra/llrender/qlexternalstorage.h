@@ -55,6 +55,13 @@ extern std::atomic<unsigned> gQLExternalTexturesOffThread;
 // textures really take. Set by the provider.
 extern std::atomic<unsigned long long> gQLExternalTextureOverheadBytes;
 
+// The video memory the whole process uses (GL's and Vulkan's alike, and the driver's for them) and the budget the
+// system gives it, in bytes, from Vulkan's memory budget (VK_EXT_memory_budget, the device-local heaps); 0 where
+// unknown. The texture budget keeps the real use under the real budget with room to spare (LLViewerTexture), since
+// what it counts itself leaves out Vulkan's own memory, Streamline's and the driver's. Set by the Vulkan presenter.
+extern std::atomic<unsigned long long> gQLVideoMemoryUsedBytes;
+extern std::atomic<unsigned long long> gQLVideoMemoryBudgetBytes;
+
 // While one stands on a thread, the render targets and textures that thread allocates are offered to the provider.
 class QLExternalStorageScope
 {

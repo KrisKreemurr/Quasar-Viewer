@@ -47,6 +47,7 @@
 
 // viewer includes
 #include "alvramusage.h"
+#include "qlexternalstorage.h"
 #include "llimagegl.h"
 #include "llviewerstats.h"
 #include "lldrawpool.h"
@@ -545,6 +546,27 @@ void LLViewerTexture::updateClass()
     F32 budget = 0.f;
     F32 target = 0.f;
     getVRAMBudget(budget, target);
+
+    // Quasar: what the viewer counts leaves out Vulkan's own memory, Streamline's and the driver's. Where the system's
+    // budget for the process is known (the Vulkan presenter), the target leaves the real use QL_VRAM_HEADROOM_MB under
+    // it: frame generation stops when the process goes over (Streamline's manageVRAM), and Windows starts paging.
+    {
+        constexpr F32 QL_VRAM_HEADROOM_MB = 1024.f;
+        const U64 real_budget = gQLVideoMemoryBudgetBytes.load(std::memory_order_relaxed);
+        const U64 real_used   = gQLVideoMemoryUsedBytes.load(std::memory_order_relaxed);
+        if (real_budget > 0)
+        {
+            const F32 headroom = (F32)(((F64)real_budget - (F64)real_used) / (1024.0 * 1024.0)) - QL_VRAM_HEADROOM_MB;
+            const F32 cap      = llmax(MIN_VRAM_BUDGET, used + headroom);
+            if (cap < target)
+            {
+                target = cap;
+                budget = llmin(budget, cap / 0.8f);
+            }
+            LL_PROFILE_PLOT("VRAM process used MB", (int64_t)(real_used >> 20));
+            LL_PROFILE_PLOT("VRAM process budget MB", (int64_t)(real_budget >> 20));
+        }
+    }
 
     sample(LLStatViewer::GL_TEX_MEM, F64Bytes((F64)usage.textures()));
     LL_PROFILE_PLOT("VRAM used MB", (int64_t)used);

@@ -56,6 +56,8 @@
 QLExternalStorage* gQLExternalStorage = nullptr;
 bool gQLExternalTexturesWanted = false;
 std::atomic<unsigned long long> gQLExternalTextureOverheadBytes{ 0 };
+std::atomic<unsigned long long> gQLVideoMemoryUsedBytes{ 0 };
+std::atomic<unsigned long long> gQLVideoMemoryBudgetBytes{ 0 };
 std::atomic<unsigned> gQLExternalTexturesOffered{ 0 };
 std::atomic<unsigned> gQLExternalTexturesOffThread{ 0 };
 static thread_local bool sQLExternalStorageWanted = false;
