@@ -12,6 +12,14 @@
 //     where the image is sRGB, as GL's colour samplers decode them; the normal and ORM maps are read undecoded, as GL's
 //     data samplers read them: where their view decodes, each texel is encoded back before it is filtered (trilinear,
 //     by hand: sampleRaw), since the view's own filtering would blend decoded values.
+//   - Cut-outs, in the pipeline built with MASKED (the draws of alpha mode MASK alone, so the opaque pipeline has no
+//     discard and keeps its early depth test): simple (deferred/diffuseAlphaMaskIndexedF.glsl: the texel times the tint,
+//     alpha included, dropped below the cutoff; no specular, no environment), PBR (pbropaqueF.glsl's HAS_ALPHA_MASK:
+//     the base colour's alpha against the material's cutoff), and the legacy materials' mask.
+
+// Set where the pipeline's draws are cut-outs; constant, so the opaque pipeline's stage holds no discard.
+layout(constant_id = 0) const bool MASKED = false;
+const float MASK_BIAS = 0.001953125;  // 1/512, half an 8-bit quantization, as GL's mask programs bias the cutoff
 
 layout(set = 1, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 1) uniform sampler2D bumpMap;
@@ -162,7 +170,7 @@ void writeMaterial(Draw d, uint srgb_bits)
     uint alpha_mode = flags & 3u;
     vec4 diffcol = texture(diffuseMap, base_color_texcoord);
     diffcol.rgb *= vertex_color.rgb;
-    if (alpha_mode == 2u && diffcol.a < d.material.y - 0.001953125)
+    if (MASKED && alpha_mode == 2u && diffcol.a < d.material.y - MASK_BIAS)
     {
         discard;
     }
@@ -209,6 +217,19 @@ void main()
         writeMaterial(d, uint(d.pbr.w + 0.5));
         return;
     }
+    if (d.pbr.z < 0.5 && MASKED)
+    {
+        vec4 col = texture(diffuseMap, base_color_texcoord) * vertex_color;
+        if (col.a < d.material.y - MASK_BIAS)
+        {
+            discard;
+        }
+        frag_data0 = vec4(col.rgb, 0.0);
+        frag_data1 = vec4(0.0);
+        frag_data2 = vec4(octEncode(normalize(vary_normal)), 0.0, GBUFFER_FLAG_HAS_ATMOS);
+        frag_data3 = vec4(0.0);
+        return;
+    }
     if (d.pbr.z < 0.5)
     {
         vec3 col = vertex_color.rgb * texture(diffuseMap, base_color_texcoord).rgb;
@@ -221,6 +242,10 @@ void main()
     }
     uint srgb_bits = uint(d.pbr.w + 0.5);
     vec4 basecolor = texture(diffuseMap, base_color_texcoord) * vertex_color;
+    if (MASKED && basecolor.a < d.material.y - MASK_BIAS)
+    {
+        discard;
+    }
     vec3 col = basecolor.rgb;
 
     vec3 normal_texel = (srgb_bits & 2u) != 0u ? sampleRaw(bumpMap, normal_texcoord).xyz

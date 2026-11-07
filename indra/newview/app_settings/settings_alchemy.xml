@@ -2960,6 +2960,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanMaskDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanProbeDraws or QuasarVulkanMainDraws): cut-outs (alpha-masked prims such as leaves, fences and hair cards, and PBR materials of alpha mode MASK with QuasarVulkanPBRDraws; rigged ones too with QuasarVulkanRiggedDraws) are drawn into the G-buffer by Vulkan, dropped below their cutoff as GL drops them. Live. Status: "Quasar Vulkan cut-out draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanMaterialDraws</key>
         <map>
             <key>Comment</key>

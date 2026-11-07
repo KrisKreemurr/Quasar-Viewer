@@ -137,6 +137,9 @@ S32 LLDrawPoolSimple::getNumDeferredPasses()
 // QuasarVulkanProbeDraws): drawn here in place of the pass, which Vulkan draws the rest of.
 extern std::vector<LLDrawInfo*>* gQLVulkanSimpleLeftovers;
 extern std::vector<LLDrawInfo*>* gQLVulkanSimpleRiggedLeftovers;  // the rigged pass's (QuasarVulkanRiggedDraws)
+// The cut-outs' (QuasarVulkanMaskDraws), unrigged and rigged: LLDrawPoolAlphaMask::renderDeferred's.
+extern std::vector<LLDrawInfo*>* gQLVulkanMaskLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanMaskRiggedLeftovers;
 
 void LLDrawPoolSimple::renderDeferred(S32 pass)
 {
@@ -191,11 +194,41 @@ void LLDrawPoolAlphaMask::renderDeferred(S32 pass)
 
     //render static
     shader->bind();
-    pushMaskBatches(LLRenderPass::PASS_ALPHA_MASK, true, true);
+    if (gQLVulkanMaskLeftovers)
+    {
+        // Quasar: Vulkan draws the cut-outs it could take (QuasarVulkanMaskDraws, pipeline.cpp); GL draws the rest, as
+        // pushMaskBatches would (multi-material batches were never in the list).
+        for (LLDrawInfo* params : *gQLVulkanMaskLeftovers)
+        {
+            LLGLSLShader::sCurBoundShaderPtr->setMinimumAlpha(params->mAlphaMaskCutoff);
+            pushBatch(*params, true, true);
+        }
+    }
+    else
+    {
+        pushMaskBatches(LLRenderPass::PASS_ALPHA_MASK, true, true);
+    }
 
     //render rigged
     shader->bind(true);
-    pushRiggedMaskBatches(LLRenderPass::PASS_ALPHA_MASK_RIGGED, true, true);
+    if (gQLVulkanMaskRiggedLeftovers)
+    {
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_mesh = 0;
+        bool skip_last = false;
+        for (LLDrawInfo* params : *gQLVulkanMaskRiggedLeftovers)
+        {
+            LLGLSLShader::sCurBoundShaderPtr->setMinimumAlpha(params->mAlphaMaskCutoff);
+            if (uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh, skip_last))
+            {
+                pushBatch(*params, true, true);
+            }
+        }
+    }
+    else
+    {
+        pushRiggedMaskBatches(LLRenderPass::PASS_ALPHA_MASK_RIGGED, true, true);
+    }
 }
 
 // grass drawpool

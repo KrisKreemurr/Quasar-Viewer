@@ -205,6 +205,7 @@ std::string ql_vulkan_probe_draws_info();  // pipeline.cpp (QuasarVulkanProbeDra
 std::string ql_vulkan_main_draws_info();   // pipeline.cpp (QuasarVulkanMainDraws)
 std::string ql_vulkan_pbr_draws_info();    // pipeline.cpp (QuasarVulkanPBRDraws)
 std::string ql_vulkan_material_draws_info();  // pipeline.cpp (QuasarVulkanMaterialDraws)
+std::string ql_vulkan_mask_draws_info();  // pipeline.cpp (QuasarVulkanMaskDraws)
 std::string ql_vulkan_rigged_draws_info();    // pipeline.cpp (QuasarVulkanRiggedDraws)
 std::string ql_probe_cull_info();          // pipeline.cpp (QuasarProbeCullPixels, QuasarProbeCullDistance)
 #include "qldrawstats.h"
@@ -711,6 +712,8 @@ public:
             addText(xpos, ypos, "Quasar Vulkan PBR draws: " + ql_vulkan_pbr_draws_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan material draws: " + ql_vulkan_material_draws_info());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan cut-out draws: " + ql_vulkan_mask_draws_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan rigged draws: " + ql_vulkan_rigged_draws_info());
             ypos += y_inc;

@@ -5600,6 +5600,10 @@ struct QLVulkanLost
     bool                            rigged_materials = false;
     const std::vector<LLDrawInfo*>* simple_rigged = nullptr;
     const std::vector<LLDrawInfo*>* pbr_rigged = nullptr;
+    const std::vector<LLDrawInfo*>* mask = nullptr;  // the cut-outs (QuasarVulkanMaskDraws)
+    const std::vector<LLDrawInfo*>* mask_rigged = nullptr;
+    const std::vector<LLDrawInfo*>* pbr_mask = nullptr;
+    const std::vector<LLDrawInfo*>* pbr_mask_rigged = nullptr;
 };
 extern bool gQLVulkanRiggedMaterials;
 static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrigged passes
@@ -5868,6 +5872,59 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             }
             gGLLastMatrix = NULL;
             gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        }
+
+        // The cut-outs Vulkan was to draw, as pushMaskBatches, pushRiggedMaskBatches and the PBR alpha-mask pool draw them.
+        {
+            const auto any = [](const std::vector<LLDrawInfo*>* v) { return v && !v->empty(); };
+            if (any(lost.mask) || any(lost.mask_rigged) || any(lost.pbr_mask) || any(lost.pbr_mask_rigged))
+            {
+                LLGLDisable blend(GL_BLEND);
+                for (U32 rig = 0; rig < 2; ++rig)
+                {
+                    const std::vector<LLDrawInfo*>* simple_list = rig ? lost.mask_rigged : lost.mask;
+                    const std::vector<LLDrawInfo*>* pbr_list    = rig ? lost.pbr_mask_rigged : lost.pbr_mask;
+                    const LLVOAvatar* last_avatar = nullptr;
+                    U64 last_mesh = 0;
+                    bool skip_last = false;
+                    if (any(simple_list))
+                    {
+                        gDeferredDiffuseAlphaMaskProgram.selectVariant()->bind(rig != 0);
+                        for (LLDrawInfo* params : *simple_list)
+                        {
+                            if (!rig || LLRenderPass::uploadMatrixPalette(params->mAvatar, params->mSkinInfo,
+                                                                          last_avatar, last_mesh, skip_last))
+                            {
+                                LLGLSLShader::sCurBoundShaderPtr->setMinimumAlpha(params->mAlphaMaskCutoff);
+                                mSimplePool->pushBatch(*params, true, true);
+                            }
+                        }
+                    }
+                    if (any(pbr_list))
+                    {
+                        gDeferredPBRAlphaMaskProgram.selectVariant()->bind(rig != 0);
+                        last_avatar = nullptr;
+                        last_mesh   = 0;
+                        skip_last   = false;
+                        LLFetchedGLTFMaterial* last_mat = nullptr;
+                        LLViewerTexture* last_tex = nullptr;
+                        for (LLDrawInfo* params : *pbr_list)
+                        {
+                            if (rig)
+                            {
+                                LLRenderPass::pushRiggedGLTFBatch(*params, last_avatar, last_mesh, skip_last, last_mat,
+                                                                  last_tex);
+                            }
+                            else
+                            {
+                                LLRenderPass::pushGLTFBatch(*params, last_mat, last_tex);
+                            }
+                        }
+                    }
+                }
+                gGLLastMatrix = NULL;
+                gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            }
         }
 
         // The stars, the one layer of the sky the G-buffer takes, after every opaque pool, so the depth test spares
@@ -13684,6 +13741,16 @@ static const U32 QL_MATERIAL_PASS_TYPES[QL_MATERIAL_PASSES] = {
 };
 static const U32 QL_MATERIAL_SHADER_IDX[QL_MATERIAL_PASSES] = { 0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15 };
 static U64 sQLPBRLastDraws = 0, sQLPBRLastKept = 0, sQLPBRDraws = 0, sQLPBRKept = 0;
+// The cut-outs (QuasarVulkanMaskDraws): the legacy ones (LLDrawPoolAlphaMask's PASS_ALPHA_MASK) and the PBR ones
+// (LLDrawPoolGLTFPBR's alpha-mask pool), unrigged and rigged: left to GL, which the pools draw in place of their
+// scalar sweeps while set, and taken, which GL draws instead if the hand-over fails.
+static std::vector<LLDrawInfo*> sQLMaskLeftovers, sQLMaskTaken, sQLMaskRiggedLeftovers, sQLMaskRiggedTaken;
+static std::vector<LLDrawInfo*> sQLPBRMaskLeftovers, sQLPBRMaskTaken, sQLPBRMaskRiggedLeftovers, sQLPBRMaskRiggedTaken;
+std::vector<LLDrawInfo*>* gQLVulkanMaskLeftovers = nullptr;           // lldrawpoolsimple.cpp
+std::vector<LLDrawInfo*>* gQLVulkanMaskRiggedLeftovers = nullptr;     // lldrawpoolsimple.cpp
+std::vector<LLDrawInfo*>* gQLVulkanPBRMaskLeftovers = nullptr;        // lldrawpoolpbropaque.cpp
+std::vector<LLDrawInfo*>* gQLVulkanPBRMaskRiggedLeftovers = nullptr;  // lldrawpoolpbropaque.cpp
+static U64 sQLMaskLastDraws = 0, sQLMaskLastKept = 0, sQLMaskDraws = 0, sQLMaskKept = 0;
 
 #if QL_VULKAN_SHADOWS
 // The levels of a texture GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
@@ -13725,8 +13792,13 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     gQLVulkanSimpleRiggedLeftovers = nullptr;
     gQLVulkanPBRRiggedLeftovers = nullptr;
     gQLVulkanRiggedMaterials = false;
+    gQLVulkanMaskLeftovers = nullptr;
+    gQLVulkanMaskRiggedLeftovers = nullptr;
+    gQLVulkanPBRMaskLeftovers = nullptr;
+    gQLVulkanPBRMaskRiggedLeftovers = nullptr;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
+    static LLCachedControl<bool> mask_wanted(gSavedSettings, "QuasarVulkanMaskDraws", false);
     static LLCachedControl<bool> material_wanted(gSavedSettings, "QuasarVulkanMaterialDraws", false);
     static LLCachedControl<bool> rigged_wanted(gSavedSettings, "QuasarVulkanRiggedDraws", false);
     static LLCachedControl<bool> vulkan_shadows(gSavedSettings, "QuasarVulkanShadows", false);
@@ -13767,6 +13839,12 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     sQLSimpleRiggedTaken.clear();
     sQLPBRRiggedLeftovers.clear();
     sQLPBRRiggedTaken.clear();
+    for (std::vector<LLDrawInfo*>* v : { &sQLMaskLeftovers, &sQLMaskTaken, &sQLMaskRiggedLeftovers, &sQLMaskRiggedTaken,
+                                         &sQLPBRMaskLeftovers, &sQLPBRMaskTaken, &sQLPBRMaskRiggedLeftovers,
+                                         &sQLPBRMaskRiggedTaken })
+    {
+        v->clear();
+    }
     const LLVertexBuffer* last_vb = nullptr;
     bool last_in_arena = false, last_tangents = false, last_uv1 = false, last_uv2 = false, last_weights = false;
     unsigned base_vertex = 0, base_index = 0;
@@ -13902,121 +13980,103 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     };
     const bool rigged_draws = rigged_wanted() && vulkan_shadows();
     U64 rig_draws = 0, rig_kept = 0;
-    // PBR, opaque and unrigged, one material a draw (QuasarVulkanPBRDraws): as LLFetchedGLTFMaterial::bind binds it.
-    if (pbr_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PASS_GLTF_PBR))
+    // A PBR draw, one material (QuasarVulkanPBRDraws): as LLFetchedGLTFMaterial::bind binds it. mask: the cut-out
+    // pass's (QuasarVulkanMaskDraws), its material's cutoff (alpha mode MASK alone reaches that pass).
+    const auto pbr_draw = [&](LLDrawInfo& params, bool rig, bool mask, bool& skip)
     {
-        U64 pbr_draws = 0, pbr_kept = 0;
-        auto* pbr_end = gPipeline.endRenderMap(LLRenderPass::PASS_GLTF_PBR);
-        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_GLTF_PBR); i != pbr_end;)
+        skip = false;
+        LLFetchedGLTFMaterial* mat = params.mGLTFMaterial.get();
+        // Not a multi-material batch (the indexed sweep's), not a media face (bind's media override), with tangents.
+        if (!mat || !params.mCount || params.mGLTFMaterialList.size() > 1 || params.mTexture.notNull() ||
+            (rig && (params.mAvatar.isNull() || !params.mSkinInfo)) || !place(params.mVertexBuffer.get()) ||
+            !last_tangents || (rig && !last_weights))
+        {
+            return false;
+        }
+        unsigned palette = ~0u;
+        if (rig)
+        {
+            palette = palette_of(params, skip);
+            if (skip || palette == ~0u)
+            {
+                return false;
+            }
+        }
+        QLVulkanPresenter::GbDraw d;
+        matrices(params, d);
+        d.kind         = QLVulkanPresenter::GB_PBR;
+        d.palette      = palette;
+        d.double_sided = mat->mDoubleSided;
+        if (mask)
+        {
+            d.alpha_mode   = 2;
+            d.alpha_cutoff = mat->mAlphaCutoff;
+        }
+        LLViewerTexture* normal = mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL);
+        if (normal && normal->getDiscardLevel() > 4)
+        {
+            normal = nullptr;  // the flat normal, as bind takes it
+        }
+        const bool textured =
+            ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), false, d.textures[0],
+                            d.levels[0]) &&
+            ql_slot_texture(normal, true, d.textures[1], d.levels[1]) &&
+            ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS), false,
+                            d.textures[2], d.levels[2]) &&
+            ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), false, d.textures[3],
+                            d.levels[3]);
+        if (!textured)
+        {
+            return false;
+        }
+        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR].getPacked(d.transforms[0]);
+        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL].getPacked(d.transforms[1]);
+        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS].getPacked(d.transforms[2]);
+        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].getPacked(d.transforms[3]);
+        d.emissive[0] = mat->mEmissiveColor.mV[VRED];
+        d.emissive[1] = mat->mEmissiveColor.mV[VGREEN];
+        d.emissive[2] = mat->mEmissiveColor.mV[VBLUE];
+        d.metallic    = mat->mMetallicFactor;
+        d.roughness   = mat->mRoughnessFactor;
+        return QLVulkanPresenter::gbufferDraw(d);
+    };
+    // A pass's walk: each draw Vulkan's or GL's. A rigged draw whose skin has no palette yet is drawn by neither, as
+    // uploadMatrixPalette refuses it.
+    const auto walk = [&](U32 type, auto&& draw_of, std::vector<LLDrawInfo*>& taken,
+                          std::vector<LLDrawInfo*>& left, U64& draws, U64& kept)
+    {
+        auto* pass_end = gPipeline.endRenderMap(type);
+        for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(type); i != pass_end;)
         {
             LLDrawInfo* params = *i;
-            LLCullResult::increment_iterator(i, pbr_end);
+            LLCullResult::increment_iterator(i, pass_end);
             if (!params)
             {
                 continue;
             }
-            LLFetchedGLTFMaterial* mat = params->mGLTFMaterial.get();
-            bool drawn = false;
-            // Not a multi-material batch (the indexed sweep's), not a media face (bind's media override), with tangents.
-            if (mat && params->mCount && params->mGLTFMaterialList.size() <= 1 && params->mTexture.isNull() &&
-                place(params->mVertexBuffer.get()) && last_tangents)
+            bool skip = false;
+            const bool drawn = draw_of(*params, skip);
+            if (skip)
             {
-                QLVulkanPresenter::GbDraw d;
-                matrices(*params, d);
-                d.kind         = QLVulkanPresenter::GB_PBR;
-                d.double_sided = mat->mDoubleSided;
-                LLViewerTexture* normal = mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL);
-                if (normal && normal->getDiscardLevel() > 4)
-                {
-                    normal = nullptr;  // the flat normal, as bind takes it
-                }
-                bool textured =
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), false, d.textures[0],
-                                    d.levels[0]) &&
-                    ql_slot_texture(normal, true, d.textures[1], d.levels[1]) &&
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS), false,
-                                    d.textures[2], d.levels[2]) &&
-                    ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), false, d.textures[3],
-                                    d.levels[3]);
-                if (textured)
-                {
-                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR].getPacked(d.transforms[0]);
-                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL].getPacked(d.transforms[1]);
-                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS].getPacked(
-                        d.transforms[2]);
-                    mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].getPacked(d.transforms[3]);
-                    d.emissive[0] = mat->mEmissiveColor.mV[VRED];
-                    d.emissive[1] = mat->mEmissiveColor.mV[VGREEN];
-                    d.emissive[2] = mat->mEmissiveColor.mV[VBLUE];
-                    d.metallic    = mat->mMetallicFactor;
-                    d.roughness   = mat->mRoughnessFactor;
-                    drawn         = QLVulkanPresenter::gbufferDraw(d);
-                }
+                continue;
             }
-            (drawn ? sQLPBRTaken : sQLPBRLeftovers).push_back(params);
-            ++(drawn ? pbr_draws : pbr_kept);
+            (drawn ? taken : left).push_back(params);
+            ++(drawn ? draws : kept);
         }
+    };
+    const bool mask_draws = mask_wanted();
+    U64 mask_draws_now = 0, mask_kept_now = 0;
+    if (pbr_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PASS_GLTF_PBR))
+    {
+        U64 pbr_draws = 0, pbr_kept = 0;
+        walk(LLRenderPass::PASS_GLTF_PBR, [&](LLDrawInfo& p, bool& skip) { return pbr_draw(p, false, false, skip); },
+             sQLPBRTaken, sQLPBRLeftovers, pbr_draws, pbr_kept);
         // Rigged (PASS_GLTF_PBR_RIGGED), as pushRiggedGLTFBatch draws it.
         if (rigged_draws)
         {
-            auto* rig_end = gPipeline.endRenderMap(LLRenderPass::PASS_GLTF_PBR_RIGGED);
-            for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_GLTF_PBR_RIGGED);
-                 i != rig_end;)
-            {
-                LLDrawInfo* params = *i;
-                LLCullResult::increment_iterator(i, rig_end);
-                if (!params)
-                {
-                    continue;
-                }
-                LLFetchedGLTFMaterial* mat = params->mGLTFMaterial.get();
-                bool drawn = false;
-                if (mat && params->mCount && params->mGLTFMaterialList.size() <= 1 && params->mTexture.isNull() &&
-                    params->mAvatar.notNull() && params->mSkinInfo && place(params->mVertexBuffer.get()) &&
-                    last_tangents && last_weights)
-                {
-                    bool skip = false;
-                    const unsigned palette = palette_of(*params, skip);
-                    if (skip)
-                    {
-                        continue;
-                    }
-                    QLVulkanPresenter::GbDraw d;
-                    matrices(*params, d);
-                    d.kind         = QLVulkanPresenter::GB_PBR;
-                    d.palette      = palette;
-                    d.double_sided = mat->mDoubleSided;
-                    LLViewerTexture* normal = mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL);
-                    if (normal && normal->getDiscardLevel() > 4)
-                    {
-                        normal = nullptr;
-                    }
-                    const bool textured =
-                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR), false,
-                                        d.textures[0], d.levels[0]) &&
-                        ql_slot_texture(normal, true, d.textures[1], d.levels[1]) &&
-                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS),
-                                        false, d.textures[2], d.levels[2]) &&
-                        ql_slot_texture(mat->getRenderTexture(LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE), false,
-                                        d.textures[3], d.levels[3]);
-                    if (textured && palette != ~0u)
-                    {
-                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR].getPacked(d.transforms[0]);
-                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_NORMAL].getPacked(d.transforms[1]);
-                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_METALLIC_ROUGHNESS].getPacked(
-                            d.transforms[2]);
-                        mat->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].getPacked(d.transforms[3]);
-                        d.emissive[0] = mat->mEmissiveColor.mV[VRED];
-                        d.emissive[1] = mat->mEmissiveColor.mV[VGREEN];
-                        d.emissive[2] = mat->mEmissiveColor.mV[VBLUE];
-                        d.metallic    = mat->mMetallicFactor;
-                        d.roughness   = mat->mRoughnessFactor;
-                        drawn         = QLVulkanPresenter::gbufferDraw(d);
-                    }
-                }
-                (drawn ? sQLPBRRiggedTaken : sQLPBRRiggedLeftovers).push_back(params);
-                ++(drawn ? rig_draws : rig_kept);
-            }
+            walk(LLRenderPass::PASS_GLTF_PBR_RIGGED,
+                 [&](LLDrawInfo& p, bool& skip) { return pbr_draw(p, true, false, skip); }, sQLPBRRiggedTaken,
+                 sQLPBRRiggedLeftovers, rig_draws, rig_kept);
             gQLVulkanPBRRiggedLeftovers = &sQLPBRRiggedLeftovers;
         }
         sQLPBRDraws += pbr_draws;
@@ -14027,6 +14087,80 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             sQLPBRLastKept  = pbr_kept;
         }
         gQLVulkanPBRLeftovers = &sQLPBRLeftovers;
+    }
+    // The PBR cut-outs (PASS_GLTF_PBR_ALPHA_MASK, and rigged), as the alpha-mask pool's scalar sweep draws them.
+    if (mask_draws && pbr_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_GLTF_PBR_ALPHA_MASK))
+    {
+        walk(LLRenderPass::PASS_GLTF_PBR_ALPHA_MASK,
+             [&](LLDrawInfo& p, bool& skip) { return pbr_draw(p, false, true, skip); }, sQLPBRMaskTaken,
+             sQLPBRMaskLeftovers, mask_draws_now, mask_kept_now);
+        gQLVulkanPBRMaskLeftovers = &sQLPBRMaskLeftovers;
+        if (rigged_draws)
+        {
+            walk(LLRenderPass::PASS_GLTF_PBR_ALPHA_MASK_RIGGED,
+                 [&](LLDrawInfo& p, bool& skip) { return pbr_draw(p, true, true, skip); }, sQLPBRMaskRiggedTaken,
+                 sQLPBRMaskRiggedLeftovers, mask_draws_now, mask_kept_now);
+            gQLVulkanPBRMaskRiggedLeftovers = &sQLPBRMaskRiggedLeftovers;
+        }
+    }
+    // The legacy cut-outs (PASS_ALPHA_MASK, and rigged; gDeferredDiffuseAlphaMaskProgram), as pushMaskBatches draws
+    // them: one texture, the draw's cutoff. A batch of several textures (the indexed lookup) stays GL's, and a
+    // multi-material batch is drawn by neither pass's scalar sweep (pushMaskBatchesIndexed's).
+    if (mask_draws && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_ALPHA_MASK))
+    {
+        const auto mask_draw = [&](LLDrawInfo& params, bool rig, bool& skip)
+        {
+            skip = params.mMaterialSlotList.size() > 1;
+            if (skip || !params.mCount)
+            {
+                skip = true;  // pushBatch draws nothing of these either
+                return false;
+            }
+            const LLImageGL* image = (params.mTextureList.size() <= 1 && params.mTexture.notNull())
+                                         ? params.mTexture->getGLTexture()
+                                         : nullptr;
+            const U32 texture = image ? image->getTexName() : 0;
+            if (!texture || (rig && (params.mAvatar.isNull() || !params.mSkinInfo)) ||
+                !place(params.mVertexBuffer.get()) || (rig && !last_weights))
+            {
+                return false;
+            }
+            unsigned palette = ~0u;
+            if (rig)
+            {
+                palette = palette_of(params, skip);
+                if (skip || palette == ~0u)
+                {
+                    return false;
+                }
+            }
+            QLVulkanPresenter::GbDraw d;
+            matrices(params, d);
+            d.kind         = QLVulkanPresenter::GB_SIMPLE;
+            d.palette      = palette;
+            d.alpha_mode   = 2;
+            d.alpha_cutoff = params.mAlphaMaskCutoff;
+            d.textures[0]  = texture;
+            d.levels[0]    = ql_sampled_levels(image);
+            return QLVulkanPresenter::gbufferDraw(d);
+        };
+        walk(LLRenderPass::PASS_ALPHA_MASK, [&](LLDrawInfo& p, bool& skip) { return mask_draw(p, false, skip); },
+             sQLMaskTaken, sQLMaskLeftovers, mask_draws_now, mask_kept_now);
+        gQLVulkanMaskLeftovers = &sQLMaskLeftovers;
+        if (rigged_draws)
+        {
+            walk(LLRenderPass::PASS_ALPHA_MASK_RIGGED,
+                 [&](LLDrawInfo& p, bool& skip) { return mask_draw(p, true, skip); }, sQLMaskRiggedTaken,
+                 sQLMaskRiggedLeftovers, mask_draws_now, mask_kept_now);
+            gQLVulkanMaskRiggedLeftovers = &sQLMaskRiggedLeftovers;
+        }
+    }
+    sQLMaskDraws += mask_draws_now;
+    sQLMaskKept += mask_kept_now;
+    if (main_view)
+    {
+        sQLMaskLastDraws = mask_draws_now;
+        sQLMaskLastKept  = mask_kept_now;
     }
 
     if (rigged_draws)
@@ -14175,6 +14309,10 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     gQLVulkanSimpleRiggedLeftovers = nullptr;
     gQLVulkanPBRRiggedLeftovers = nullptr;
     gQLVulkanRiggedMaterials = false;
+    gQLVulkanMaskLeftovers = nullptr;
+    gQLVulkanMaskRiggedLeftovers = nullptr;
+    gQLVulkanPBRMaskLeftovers = nullptr;
+    gQLVulkanPBRMaskRiggedLeftovers = nullptr;
     if (!sQLProbeDrawsOpen)
     {
         return {};
@@ -14190,7 +14328,8 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
             any_material = any_material || (materials_taken && !sQLMatTaken[m].empty());
         }
         if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material || !sQLSimpleRiggedTaken.empty() ||
-            !sQLPBRRiggedTaken.empty())
+            !sQLPBRRiggedTaken.empty() || !sQLMaskTaken.empty() || !sQLMaskRiggedTaken.empty() ||
+            !sQLPBRMaskTaken.empty() || !sQLPBRMaskRiggedTaken.empty())
         {
             ++sQLProbeHandOversFailed;
             // GL draws them (renderGeomDeferred); cleared at the next begin
@@ -14198,6 +14337,10 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
             lost.rigged_materials = rigged_materials;
             lost.simple_rigged    = &sQLSimpleRiggedTaken;
             lost.pbr_rigged       = &sQLPBRRiggedTaken;
+            lost.mask             = &sQLMaskTaken;
+            lost.mask_rigged      = &sQLMaskRiggedTaken;
+            lost.pbr_mask         = &sQLPBRMaskTaken;
+            lost.pbr_mask_rigged  = &sQLPBRMaskRiggedTaken;
             return lost;
         }
     }
@@ -14222,6 +14365,23 @@ std::string ql_vulkan_rigged_draws_info()
                     "start %llu Vulkan, %llu GL",
                     (unsigned long long)sQLRigLastDraws, (unsigned long long)sQLRigLastKept,
                     (unsigned long long)sQLRigDraws, (unsigned long long)sQLRigKept);
+#else
+    return "not on this platform";
+#endif
+}
+
+std::string ql_vulkan_mask_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanMaskDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanMaskDraws)";
+    }
+    return llformat("main view last frame %llu Vulkan, %llu GL (simple and PBR cut-outs; rigged too with "
+                    "QuasarVulkanRiggedDraws, PBR with QuasarVulkanPBRDraws) | since start %llu Vulkan, %llu GL",
+                    (unsigned long long)sQLMaskLastDraws, (unsigned long long)sQLMaskLastKept,
+                    (unsigned long long)sQLMaskDraws, (unsigned long long)sQLMaskKept);
 #else
     return "not on this platform";
 #endif

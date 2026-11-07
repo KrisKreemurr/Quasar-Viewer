@@ -52,6 +52,8 @@ S32 LLDrawPoolGLTFPBR::getNumDeferredPasses()
 // Quasar: the opaque pass's draws GL keeps while Vulkan draws the rest (QuasarVulkanPBRDraws; pipeline.cpp).
 extern std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers;
 extern std::vector<LLDrawInfo*>* gQLVulkanPBRRiggedLeftovers;  // the rigged pass's (QuasarVulkanRiggedDraws)
+extern std::vector<LLDrawInfo*>* gQLVulkanPBRMaskLeftovers;        // the alpha-mask pool's (QuasarVulkanMaskDraws)
+extern std::vector<LLDrawInfo*>* gQLVulkanPBRMaskRiggedLeftovers;
 
 void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
 {
@@ -81,14 +83,19 @@ void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
 
     LLGLSLShader* opaque = scalar_program.selectVariant();
 
+    // Quasar: the draws Vulkan left this pool, the opaque pool's or the alpha-mask pool's.
+    std::vector<LLDrawInfo*>* const leftovers = alpha_mask ? gQLVulkanPBRMaskLeftovers : gQLVulkanPBRLeftovers;
+    std::vector<LLDrawInfo*>* const rigged_leftovers =
+        alpha_mask ? gQLVulkanPBRMaskRiggedLeftovers : gQLVulkanPBRRiggedLeftovers;
+
     opaque->bind();
-    if (!alpha_mask && gQLVulkanPBRLeftovers)
+    if (leftovers)
     {
         // Quasar: Vulkan draws the opaque pass's draws it could take (QuasarVulkanPBRDraws, pipeline.cpp); GL draws the
         // rest, as the sweep below would (multi-material infos are the indexed sweep's where it runs).
         LLFetchedGLTFMaterial* last_mat = nullptr;
         LLViewerTexture* last_tex = nullptr;
-        for (LLDrawInfo* params : *gQLVulkanPBRLeftovers)
+        for (LLDrawInfo* params : *leftovers)
         {
             if (indexed && params->mGLTFMaterialList.size() > 1)
             {
@@ -107,14 +114,14 @@ void LLDrawPoolGLTFPBR::renderDeferred(S32 pass)
     }
 
     opaque->bind(true);
-    if (!alpha_mask && gQLVulkanPBRRiggedLeftovers)
+    if (rigged_leftovers)
     {
         const LLVOAvatar* last_avatar = nullptr;
         U64 last_mesh = 0;
         bool skip_last = false;
         LLFetchedGLTFMaterial* last_mat = nullptr;
         LLViewerTexture* last_tex = nullptr;
-        for (LLDrawInfo* params : *gQLVulkanPBRRiggedLeftovers)
+        for (LLDrawInfo* params : *rigged_leftovers)
         {
             if (indexed && params->mGLTFMaterialList.size() > 1)
             {

@@ -6280,14 +6280,15 @@ struct QLVulkanPresenter::Impl
         VkImageView   views[5] = {};
         VkRenderPass  pass = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        VkPipeline    pipelines[4] = {};  // [greater * 2 + double-sided]
+        VkPipeline    pipelines[8] = {};  // [masked * 4 + greater * 2 + double-sided]
         bool          normHdr = false;    // the normals attachment is RGBA16 (GL's GBUFFER_NORM_HDR)
     };
     struct GbQueued
     {
         VkDescriptorSet set;  // its textures'
         U32             index;
-        U32             pipe;  // double-sided
+        U32             pipe;  // masked * 4 + double-sided
+        VkDrawIndexedIndirectCommand cmd;  // as written (the mapped copy is not read back: it is write-combined)
     };
     // A texture slot's default where a draw names none (GL binds sWhiteImagep, or sFlatNormalImagep in the normal
     // slot): images of Vulkan's own.
@@ -7061,9 +7062,9 @@ struct QLVulkanPresenter::Impl
             const auto normals = color_count > 2 ? mExtTextures.find(colors[2]) : mExtTextures.end();
             t.normHdr = normals != mExtTextures.end() && normals->second.vk == VK_FORMAT_R16G16B16A16_UNORM;
         }
-        for (U32 p = 0; p < 4; ++p)
+        for (U32 p = 0; p < 8; ++p)
         {
-            if (!createGbPipeline(t, (p & 2) != 0, (p & 1) != 0, t.pipelines[p]))
+            if (!createGbPipeline(t, (p & 2) != 0, (p & 1) != 0, (p & 4) != 0, t.pipelines[p]))
             {
                 gbWhy("its pipeline failed");
                 destroyGbTarget(t);
@@ -7076,8 +7077,17 @@ struct QLVulkanPresenter::Impl
         return (S32)mGbTargets.size() - 1;
     }
 
-    bool createGbPipeline(const GbTarget& t, bool greater, bool double_sided, VkPipeline& pipeline)
+    // masked: the fragment stage's discards are compiled in (qlgbuffer.frag's MASKED). Only the cut-outs' draws bind
+    // it: a stage that can discard has its depth tested and written after it shades, which the opaque draws are spared.
+    bool createGbPipeline(const GbTarget& t, bool greater, bool double_sided, bool masked, VkPipeline& pipeline)
     {
+        const VkBool32 masked_value = masked ? VK_TRUE : VK_FALSE;
+        const VkSpecializationMapEntry masked_entry = { 0, 0, sizeof(VkBool32) };
+        VkSpecializationInfo specialization = {};
+        specialization.mapEntryCount = 1;
+        specialization.pMapEntries   = &masked_entry;
+        specialization.dataSize      = sizeof(masked_value);
+        specialization.pData         = &masked_value;
         VkPipelineShaderStageCreateInfo stages[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
                                                       { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
         stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
@@ -7086,6 +7096,7 @@ struct QLVulkanPresenter::Impl
         stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = mGbFrag;
         stages[1].pName  = "main";
+        stages[1].pSpecializationInfo = &specialization;
         // Positions, normals (16 bytes a vertex, as LLVertexBuffer keeps both), texture coordinates, colours, tangents.
         // And the legacy materials' second and third texture coordinates (normal and specular maps).
         const VkVertexInputBindingDescription bindings[8] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
@@ -7314,7 +7325,9 @@ struct QLVulkanPresenter::Impl
         cmd.vertexOffset  = (S32)d.base_vertex;
         cmd.firstInstance = index;
         memcpy(slot + (size_t)GB_MAX_DRAWS * GB_DRAW_BYTES + (size_t)index * sizeof(cmd), &cmd, sizeof(cmd));
-        mGbDraws.push_back({ set, index, d.double_sided ? 1u : 0u });
+        // A cut-out (alpha mode MASK: the simple and PBR kinds' cut-out passes, a legacy material's mask) binds the
+        // pipeline that can discard.
+        mGbDraws.push_back({ set, index, (d.alpha_mode == 2 ? 4u : 0u) | (d.double_sided ? 1u : 0u), cmd });
         mGbPassRigged = mGbPassRigged || d.palette != ~0u;
         for (U32 i = 0; i < 4; ++i)
         {
@@ -7427,8 +7440,18 @@ struct QLVulkanPresenter::Impl
         vkCmdBindVertexBuffers(slot.cmd, 0, 8, buffers, offsets);
         vkCmdBindIndexBuffer(slot.cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
         const VkDeviceSize commands = GB_SLOT_BYTES * mGbSlot + (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES;
-        const VkDrawIndexedIndirectCommand* cmds =
-            reinterpret_cast<const VkDrawIndexedIndirectCommand*>(mGbHostMapped + commands);
+        VkDrawIndexedIndirectCommand* cmds = reinterpret_cast<VkDrawIndexedIndirectCommand*>(mGbHostMapped + commands);
+        // The cut-outs last, so the opaque draws' early depth test turns away what they hide before it is shaded. The
+        // commands follow them (each keeps its draw's index as its first instance), so a run of draws is still a run.
+        const auto masked_from =
+            std::stable_partition(mGbDraws.begin(), mGbDraws.end(), [](const GbQueued& q) { return (q.pipe & 4) == 0; });
+        if (masked_from != mGbDraws.end() && masked_from != mGbDraws.begin())
+        {
+            for (size_t k = 0; k < mGbDraws.size(); ++k)
+            {
+                memcpy(cmds + k, &mGbDraws[k].cmd, sizeof(VkDrawIndexedIndirectCommand));
+            }
+        }
         // Draws of one set and pipeline in a row: one indirect draw.
         U32 bound_pipe = U32_MAX;
         for (size_t first = 0; first < mGbDraws.size();)
@@ -7443,7 +7466,7 @@ struct QLVulkanPresenter::Impl
             {
                 bound_pipe = mGbDraws[first].pipe;
                 vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  target.pipelines[(mGbGreater ? 2 : 0) + bound_pipe]);
+                                  target.pipelines[(bound_pipe & 4) + (mGbGreater ? 2 : 0) + (bound_pipe & 1)]);
             }
             const VkDescriptorSet tex_set = mGbDraws[first].set;
             vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 1, 1, &tex_set, 0, nullptr);
@@ -7457,7 +7480,8 @@ struct QLVulkanPresenter::Impl
             {
                 for (size_t d = first; d < last; ++d)
                 {
-                    vkCmdDrawIndexed(slot.cmd, cmds[d].indexCount, 1, cmds[d].firstIndex, cmds[d].vertexOffset, (U32)d);
+                    const VkDrawIndexedIndirectCommand& c = mGbDraws[d].cmd;
+                vkCmdDrawIndexed(slot.cmd, c.indexCount, 1, c.firstIndex, c.vertexOffset, c.firstInstance);
                 }
             }
             first = last;
