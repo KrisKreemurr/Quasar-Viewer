@@ -26,7 +26,8 @@ struct Draw
     vec4 transforms[8];
     vec4 pbr;  // metallic, roughness, kind, sRGB view bits
     vec4 emissive;
-    vec4 spare[2];
+    vec4 specular;  // a legacy material's specular colour (sRGB) and glossiness
+    vec4 material;  // environment intensity, alpha cutoff, fullbright, alpha mode | normal map 4 | specular map 8
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Draws
@@ -143,9 +144,70 @@ vec4 sampleRaw(sampler2D s, vec2 uv)
     return mix(near, rawBilinear(s, uv, l1), clamp(lod - float(l0), 0.0, 1.0));
 }
 
+vec3 srgb_to_linear(vec3 cs)
+{
+    vec3 low_range = cs / vec3(12.92);
+    vec3 high_range = pow((cs + vec3(0.055)) / vec3(1.055), vec3(2.4));
+    return mix(high_range, low_range, lessThanEqual(cs, vec3(0.04045)));
+}
+
+// A legacy material, class3/deferred/materialF.glsl's G-buffer path: the diffuse (decoded) times the tint, the mask's
+// discard, the specular map (decoded, as AnisoWrapSRGB) times the linear specular colour, glossiness times the normal
+// map's alpha and widened by filterSpecularRoughness, the normal map (read undecoded, as AnisoWrap) in the tangent
+// frame, fullbright or the emissive mask's alpha as the albedo's alpha.
+void writeMaterial(Draw d, uint srgb_bits)
+{
+    uint flags = uint(d.material.w + 0.5);
+    uint alpha_mode = flags & 3u;
+    vec4 diffcol = texture(diffuseMap, base_color_texcoord);
+    diffcol.rgb *= vertex_color.rgb;
+    if (alpha_mode == 2u && diffcol.a < d.material.y - 0.001953125)
+    {
+        discard;
+    }
+    vec4 spec;
+    if ((flags & 8u) != 0u)
+    {
+        spec = texture(specularMap, metallic_roughness_texcoord);
+        spec.rgb *= srgb_to_linear(d.specular.rgb);
+    }
+    else
+    {
+        spec = vec4(srgb_to_linear(d.specular.rgb), 1.0);
+    }
+    float env = d.material.x * spec.a;
+    float glossiness = d.specular.a;
+    vec3 norm;
+    if ((flags & 4u) != 0u)
+    {
+        vec4 vNt = (srgb_bits & 2u) != 0u ? sampleRaw(bumpMap, normal_texcoord) : texture(bumpMap, normal_texcoord);
+        glossiness *= vNt.a;
+        vNt.xyz = vNt.xyz * 2.0 - 1.0;
+        vec3 vN = vary_normal;
+        vec3 vT = vary_tangent;
+        vec3 vB = vary_sign * cross(vN, vT);
+        norm = normalize(vNt.x * vT + vNt.y * vB + vNt.z * vN);
+    }
+    else
+    {
+        norm = normalize(vary_normal);
+    }
+    glossiness = 1.0 - filterSpecularRoughness(1.0 - glossiness, norm);
+    float emissive = alpha_mode == 3u ? max(diffcol.a, d.material.z) : d.material.z;
+    frag_data0 = max(vec4(diffcol.rgb, emissive), vec4(0));
+    frag_data1 = max(vec4(linear_to_srgb(spec.rgb), glossiness), vec4(0));
+    frag_data2 = vec4(octEncode(norm), env, GBUFFER_FLAG_HAS_ATMOS);
+    frag_data3 = vec4(0.0);
+}
+
 void main()
 {
     Draw d = draws[draw_index];
+    if (d.pbr.z > 1.5)
+    {
+        writeMaterial(d, uint(d.pbr.w + 0.5));
+        return;
+    }
     if (d.pbr.z < 0.5)
     {
         vec3 col = vertex_color.rgb * texture(diffuseMap, base_color_texcoord).rgb;

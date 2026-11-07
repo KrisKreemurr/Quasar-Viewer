@@ -2949,6 +2949,17 @@
             <key>Value</key>
             <real>0.0</real>
         </map>
+        <key>QuasarVulkanMaterialDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanProbeDraws or QuasarVulkanMainDraws): legacy materials (normal and specular maps, alpha masks, emissive masks; not blended, not rigged) are drawn into the G-buffer by Vulkan too, in reflections and in the main view where those are on. Live. Status: "Quasar Vulkan material draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanPBRDraws</key>
         <map>
             <key>Comment</key>

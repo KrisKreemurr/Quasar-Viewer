@@ -8,6 +8,8 @@
 //   - PBR (kind 1), deferred/pbropaqueV.glsl: the same, and each map's coordinate through its KHR transform and the
 //     texture matrix (textureUtilV.glsl's texture_transform), the tangent by the normal matrix and turned with the
 //     normal map's transform (tangent_space_transform).
+//   - legacy material (kind 2), deferred/materialV.glsl under LINEAR_DIFFUSE: the three texture coordinates by the
+//     texture matrix, the tangent by the normal matrix, normalised, its w the sign.
 // Each draw's data is found by its instance.
 
 layout(location = 0) in vec3 position;
@@ -15,6 +17,8 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 texcoord0;
 layout(location = 3) in vec4 diffuse_color;
 layout(location = 4) in vec4 tangent;
+layout(location = 5) in vec2 texcoord1;  // a legacy material's normal map's
+layout(location = 6) in vec2 texcoord2;  // and its specular map's
 
 struct Draw
 {
@@ -24,7 +28,8 @@ struct Draw
     vec4 transforms[8];  // KHR packed, two a map: base colour, normal, ORM, emissive
     vec4 pbr;            // metallic, roughness, kind, the slots whose views decode sRGB (bits)
     vec4 emissive;
-    vec4 spare[2];
+    vec4 specular;
+    vec4 material;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Draws
@@ -123,6 +128,16 @@ void main()
         normal_texcoord = metallic_roughness_texcoord = emissive_texcoord = base_color_texcoord;
         vary_tangent = vec3(1.0, 0.0, 0.0);
         vary_sign = 1.0;
+    }
+    else if (d.pbr.z > 1.5)
+    {
+        // Legacy material.
+        base_color_texcoord = (d.texture_matrix * vec4(texcoord0, 0, 1)).xy;
+        normal_texcoord = (d.texture_matrix * vec4(texcoord1, 0, 1)).xy;
+        metallic_roughness_texcoord = (d.texture_matrix * vec4(texcoord2, 0, 1)).xy;
+        emissive_texcoord = base_color_texcoord;
+        vary_tangent = normalize(mat3(d.normal_matrix) * tangent.xyz);
+        vary_sign = tangent.w;
     }
     else
     {

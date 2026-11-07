@@ -4228,6 +4228,7 @@ struct QLVulkanPresenter::Impl
         GLuint         glMemory = 0, gl = 0;
         VkDeviceSize   vertexBytes = 0, weightBytes = 0, normalBytes = 0, tangentBytes = 0, uvBytes = 0, colorBytes = 0,
                        indexBytes = 0;
+        VkDeviceSize   extraUvBytes = 0;  // each of the second and third texture coordinates (legacy materials' maps)
         VkDeviceSize   vertexTop = 0, indexTop = 0;
         U32            resets = 0;
         std::unordered_map<U64, ShArenaEntry> entries;
@@ -4235,13 +4236,15 @@ struct QLVulkanPresenter::Impl
         VkDeviceSize normalStart() const { return vertexBytes + weightBytes; }
         VkDeviceSize tangentStart() const { return vertexBytes + weightBytes + normalBytes; }
         VkDeviceSize uvStart() const { return vertexBytes + weightBytes + normalBytes + tangentBytes; }
-        VkDeviceSize colorStart() const { return uvStart() + uvBytes; }
+        VkDeviceSize uv1Start() const { return uvStart() + uvBytes; }
+        VkDeviceSize uv2Start() const { return uv1Start() + extraUvBytes; }
+        VkDeviceSize colorStart() const { return uv2Start() + extraUvBytes; }
         VkDeviceSize indexStart() const { return colorStart() + colorBytes; }
         VkDeviceSize totalBytes() const { return indexStart() + indexBytes; }
         VkDeviceSize used() const
         {
             return vertexTop * (1 + (weightBytes ? 1 : 0) + (normalBytes ? 1 : 0) + (tangentBytes ? 1 : 0)) +
-                   (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + indexTop;
+                   (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + (extraUvBytes ? vertexTop : 0) + indexTop;
         }
     };
     // A texture's place in the alpha atlas: which texture, as it held what (its content stamp), and the last map that
@@ -5329,7 +5332,7 @@ struct QLVulkanPresenter::Impl
     bool arenaPlace(ShArena& arena, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
                     U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index,
                     U32 uv_offset = 0, U32 color_offset = U32_MAX, U32 normal_offset = 0, bool any_pass = false,
-                    U32 tangent_offset = U32_MAX)
+                    U32 tangent_offset = U32_MAX, U32 uv1_offset = U32_MAX, U32 uv2_offset = U32_MAX)
     {
         if (!mShInPass && !any_pass)
         {
@@ -5377,6 +5380,17 @@ struct QLVulkanPresenter::Impl
                                           (GLintptr)(arena.colorStart() + arena.vertexTop / 4),
                                           (GLsizeiptr)vertex_count * 4);
             }
+        }
+        // The legacy materials' normal and specular maps' coordinates, where the mesh has them.
+        if (arena.extraUvBytes && uv1_offset != U32_MAX)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv1_offset,
+                                      (GLintptr)(arena.uv1Start() + arena.vertexTop / 2), (GLsizeiptr)vertex_count * 8);
+        }
+        if (arena.extraUvBytes && uv2_offset != U32_MAX)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv2_offset,
+                                      (GLintptr)(arena.uv2Start() + arena.vertexTop / 2), (GLsizeiptr)vertex_count * 8);
         }
         gl.CopyNamedBufferSubData(index_buffer, arena.gl, 0, (GLintptr)(arena.indexStart() + arena.indexTop),
                                   (GLsizeiptr)index_count * 2);
@@ -5570,7 +5584,7 @@ struct QLVulkanPresenter::Impl
     // An arena (see ShArena), with texture coordinates and colours where masked. A failure is the shadows' (shFail) for
     // the arenas every map needs; a masked arena's leaves the rest made and says why in mShMaskNote.
     bool createArena(ShArena& arena, VkDeviceSize vertex_bytes, bool weights, bool masked, VkDeviceSize index_bytes,
-                     const char* what, bool normals = false, bool tangents = false)
+                     const char* what, bool normals = false, bool tangents = false, bool extra_uvs = false)
     {
         const VkExternalMemoryHandleTypeFlagBits handle_type = mKMT ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
                                                                     : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
@@ -5588,6 +5602,7 @@ struct QLVulkanPresenter::Impl
         arena.weightBytes = weights ? vertex_bytes : 0;
         arena.normalBytes = normals ? vertex_bytes : 0;
         arena.tangentBytes = tangents ? vertex_bytes : 0;
+        arena.extraUvBytes = extra_uvs ? vertex_bytes / 2 : 0;
         arena.uvBytes     = masked ? vertex_bytes / 2 : 0;
         arena.colorBytes  = masked ? vertex_bytes / 4 : 0;
         arena.indexBytes  = index_bytes;
@@ -6317,7 +6332,7 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         if (!createArena(mGbArena, GB_ARENA_VERTEX_BYTES, false, true, GB_ARENA_INDEX_BYTES, "probe draws' arena", true,
-                         true))
+                         true, true))
         {
             return gbFail("its arena");
         }
@@ -7004,20 +7019,25 @@ struct QLVulkanPresenter::Impl
         stages[1].module = mGbFrag;
         stages[1].pName  = "main";
         // Positions, normals (16 bytes a vertex, as LLVertexBuffer keeps both), texture coordinates, colours, tangents.
-        const VkVertexInputBindingDescription bindings[5] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
+        // And the legacy materials' second and third texture coordinates (normal and specular maps).
+        const VkVertexInputBindingDescription bindings[7] = { { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 1, 16, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 2, 8, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 3, 4, VK_VERTEX_INPUT_RATE_VERTEX },
-                                                              { 4, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
-        const VkVertexInputAttributeDescription attributes[5] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+                                                              { 4, 16, VK_VERTEX_INPUT_RATE_VERTEX },
+                                                              { 5, 8, VK_VERTEX_INPUT_RATE_VERTEX },
+                                                              { 6, 8, VK_VERTEX_INPUT_RATE_VERTEX } };
+        const VkVertexInputAttributeDescription attributes[7] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 2, 2, VK_FORMAT_R32G32_SFLOAT, 0 },
                                                                   { 3, 3, VK_FORMAT_R8G8B8A8_UNORM, 0 },
-                                                                  { 4, 4, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
+                                                                  { 4, 4, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
+                                                                  { 5, 5, VK_FORMAT_R32G32_SFLOAT, 0 },
+                                                                  { 6, 6, VK_FORMAT_R32G32_SFLOAT, 0 } };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertex_input.vertexBindingDescriptionCount   = 5;
+        vertex_input.vertexBindingDescriptionCount   = 7;
         vertex_input.pVertexBindingDescriptions      = bindings;
-        vertex_input.vertexAttributeDescriptionCount = 5;
+        vertex_input.vertexAttributeDescriptionCount = 7;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -7137,29 +7157,38 @@ struct QLVulkanPresenter::Impl
 
     bool gbufferArena(U64 stamp, GLuint vertex_buffer, U32 position_offset, U32 normal_offset, U32 uv_offset,
                       U32 color_offset, U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex,
-                      U32& base_index, U32 tangent_offset)
+                      U32& base_index, U32 tangent_offset, U32 uv1_offset, U32 uv2_offset)
     {
         if (!mGbInPass)
         {
             return false;
         }
         return arenaPlace(mGbArena, stamp, vertex_buffer, position_offset, 0, vertex_count, index_buffer, index_count,
-                          base_vertex, base_index, uv_offset, color_offset, normal_offset, true, tangent_offset);
+                          base_vertex, base_index, uv_offset, color_offset, normal_offset, true, tangent_offset,
+                          uv1_offset, uv2_offset);
     }
 
     bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
     {
-        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_PBR)
+        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_MATERIAL)
         {
             return false;
         }
         // A simple draw reads its diffuse alone: its other slots take the defaults, whatever it names.
-        const bool simple = d.kind == QLVulkanPresenter::GB_SIMPLE;
-        const unsigned textures[4] = { d.textures[0], simple ? 0u : d.textures[1], simple ? 0u : d.textures[2],
-                                       simple ? 0u : d.textures[3] };
-        if (simple && !textures[0])
+        // A material reads its maps where it has them, and no fourth.
+        const bool simple   = d.kind == QLVulkanPresenter::GB_SIMPLE;
+        const bool material = d.kind == QLVulkanPresenter::GB_MATERIAL;
+        const unsigned textures[4] = { d.textures[0],
+                                       simple || (material && !d.has_normal_map) ? 0u : d.textures[1],
+                                       simple || (material && !d.has_specular_map) ? 0u : d.textures[2],
+                                       simple || material ? 0u : d.textures[3] };
+        if ((simple || material) && !textures[0])
         {
             return false;
+        }
+        if (material && ((d.has_normal_map && !textures[1]) || (d.has_specular_map && !textures[2])))
+        {
+            return false;  // a map named but not given: GL's (it binds the map itself)
         }
         U32 srgb_bits = 0;
         const VkDescriptorSet set = gbMaterialSet(textures, d.levels, srgb_bits);
@@ -7183,6 +7212,11 @@ struct QLVulkanPresenter::Impl
         out[85] = d.emissive[1];
         out[86] = d.emissive[2];
         out[87] = 0.f;
+        memcpy(out + 88, d.specular, sizeof(d.specular));  // legacy material: specular colour, glossiness
+        out[92] = d.env_intensity;
+        out[93] = d.alpha_cutoff;
+        out[94] = d.fullbright;
+        out[95] = (float)(d.alpha_mode | (d.has_normal_map ? 4u : 0u) | (d.has_specular_map ? 8u : 0u));
         VkDrawIndexedIndirectCommand cmd = {};
         cmd.indexCount    = d.index_count;
         cmd.instanceCount = 1;
@@ -7294,11 +7328,11 @@ struct QLVulkanPresenter::Impl
         vkCmdPushConstants(slot.cmd, mGbLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(flags), flags);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 0, 1, &slot.set, 0, nullptr);
-        const VkBuffer buffers[5] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer,
-                                      mGbArena.buffer };
-        const VkDeviceSize offsets[5] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart(),
-                                          mGbArena.tangentStart() };
-        vkCmdBindVertexBuffers(slot.cmd, 0, 5, buffers, offsets);
+        const VkBuffer buffers[7] = { mGbArena.buffer, mGbArena.buffer, mGbArena.buffer, mGbArena.buffer,
+                                      mGbArena.buffer, mGbArena.buffer, mGbArena.buffer };
+        const VkDeviceSize offsets[7] = { 0, mGbArena.normalStart(), mGbArena.uvStart(), mGbArena.colorStart(),
+                                          mGbArena.tangentStart(), mGbArena.uv1Start(), mGbArena.uv2Start() };
+        vkCmdBindVertexBuffers(slot.cmd, 0, 7, buffers, offsets);
         vkCmdBindIndexBuffer(slot.cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
         const VkDeviceSize commands = GB_SLOT_BYTES * mGbSlot + (VkDeviceSize)GB_MAX_DRAWS * GB_DRAW_BYTES;
         const VkDrawIndexedIndirectCommand* cmds =
@@ -9076,11 +9110,12 @@ bool QLVulkanPresenter::gbufferBegin(const unsigned* colors, unsigned color_coun
 bool QLVulkanPresenter::gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                                      unsigned normal_offset, unsigned uv_offset, unsigned color_offset,
                                      unsigned vertex_count, unsigned index_buffer, unsigned index_count,
-                                     unsigned& base_vertex, unsigned& base_index, unsigned tangent_offset)
+                                     unsigned& base_vertex, unsigned& base_index, unsigned tangent_offset,
+                                     unsigned uv1_offset, unsigned uv2_offset)
 {
     return sActive && sActive->gbufferArena((U64)stamp, vertex_buffer, position_offset, normal_offset, uv_offset,
                                             color_offset, vertex_count, index_buffer, index_count, base_vertex,
-                                            base_index, tangent_offset);
+                                            base_index, tangent_offset, uv1_offset, uv2_offset);
 }
 
 // static

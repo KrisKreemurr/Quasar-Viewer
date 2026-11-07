@@ -200,7 +200,7 @@ public:
     static bool gbufferArena(unsigned long long stamp, unsigned vertex_buffer, unsigned position_offset,
                              unsigned normal_offset, unsigned uv_offset, unsigned color_offset, unsigned vertex_count,
                              unsigned index_buffer, unsigned index_count, unsigned& base_vertex, unsigned& base_index,
-                             unsigned tangent_offset = ~0u);
+                             unsigned tangent_offset = ~0u, unsigned uv1_offset = ~0u, unsigned uv2_offset = ~0u);
 
     /// One draw of the G-buffer pass. Simple: textures[0] alone (the diffuse), times the tint. PBR (GL's
     /// pbropaqueF.glsl, opaque, unrigged): base colour, normal, occlusion-roughness-metal and emissive textures, a 0 in
@@ -208,7 +208,11 @@ public:
     /// transforms packed as LLGLTFMaterial::TextureTransform::getPacked packs them, the factors, and whether it is
     /// double-sided; the mesh needs tangents (gbufferArena's tangent_offset). Every texture named must be in Vulkan's
     /// memory. levels: as many as GL samples of each.
-    enum GbKind : unsigned { GB_SIMPLE = 0, GB_PBR = 1 };
+    /// Legacy material (kind 2, class3/deferred/materialF.glsl, not blended): diffuse, normal map (textures[1], read
+    /// with the mesh's second texture coordinates and tangents) and specular map (textures[2], third coordinates)
+    /// where it has them, the specular colour and glossiness, environment intensity, the alpha mode (0 none, 2 mask
+    /// with alpha_cutoff, 3 emissive) and fullbright.
+    enum GbKind : unsigned { GB_SIMPLE = 0, GB_PBR = 1, GB_MATERIAL = 2 };
     struct GbDraw
     {
         float    mvp[16];
@@ -217,6 +221,10 @@ public:
         float    transforms[4][8] = {};   // base colour, normal, ORM, emissive
         float    emissive[3] = {};
         float    metallic = 0.f, roughness = 0.f;
+        float    specular[4] = {};
+        float    env_intensity = 0.f, alpha_cutoff = 0.f, fullbright = 0.f;
+        unsigned alpha_mode = 0;
+        bool     has_normal_map = false, has_specular_map = false;
         unsigned kind = GB_SIMPLE;
         bool     double_sided = false;
         unsigned textures[4] = {};

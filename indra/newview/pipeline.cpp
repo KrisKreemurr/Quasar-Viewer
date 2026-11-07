@@ -5596,7 +5596,11 @@ struct QLVulkanLost
 {
     const std::vector<LLDrawInfo*>* simple = nullptr;
     const std::vector<LLDrawInfo*>* pbr = nullptr;
+    std::vector<LLDrawInfo*>*       materials = nullptr;  // QL_MATERIAL_PASSES of them
 };
+static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrigged passes
+extern std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers;
+extern bool gQLVulkanMaterialFallback;
 static QLVulkanLost ql_vulkan_probe_draws_end();
 
 void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
@@ -5783,6 +5787,23 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
         // the hand-over failed (Vulkan's draws are then off from now on), GL draws what it left to Vulkan.
         const QLVulkanLost lost = ql_vulkan_probe_draws_end();
+        if (lost.materials && mMaterialsPool)
+        {
+            // The pool draws Vulkan's draws of each pass as it draws its own, without its indexed sweep (drawn already).
+            gQLVulkanMaterialLeftovers = lost.materials;
+            gQLVulkanMaterialFallback  = true;
+            for (U32 m = 0; m < QL_MATERIAL_PASS_COUNT; ++m)
+            {
+                if (!lost.materials[m].empty())
+                {
+                    mMaterialsPool->beginDeferredPass(m);
+                    mMaterialsPool->renderDeferred(m);
+                    mMaterialsPool->endDeferredPass(m);
+                }
+            }
+            gQLVulkanMaterialLeftovers = nullptr;
+            gQLVulkanMaterialFallback  = false;
+        }
         if (lost.simple || lost.pbr)
         {
             LLGLDisable blend(GL_BLEND);
@@ -13596,6 +13617,23 @@ static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
 static std::vector<LLDrawInfo*> sQLPBRLeftovers;
 static std::vector<LLDrawInfo*> sQLPBRTaken;
 std::vector<LLDrawInfo*>* gQLVulkanPBRLeftovers = nullptr;  // lldrawpoolpbropaque.cpp
+// The legacy material draws (QuasarVulkanMaterialDraws), by LLDrawPoolMaterials' pass index (sMaterialPassType, 12):
+// what Vulkan left, which the pool draws in place of each pass's scalar draws while it is set (its indexed sweep of
+// multi-material batches as ever), and what it took, which the pool draws instead if the hand-over fails.
+static constexpr U32 QL_MATERIAL_PASSES = 12;
+static std::vector<LLDrawInfo*> sQLMatLeftovers[QL_MATERIAL_PASSES];
+static std::vector<LLDrawInfo*> sQLMatTaken[QL_MATERIAL_PASSES];
+std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers = nullptr;  // lldrawpoolmaterials.cpp
+bool gQLVulkanMaterialFallback = false;                          // lldrawpoolmaterials.cpp: no indexed sweep
+static U64 sQLMatLastDraws = 0, sQLMatLastKept = 0, sQLMatDraws = 0, sQLMatKept = 0;
+// As LLDrawPoolMaterials' sMaterialPassType, and the alpha mode and maps of each (its sMaterialShaderIdx's bits).
+static const U32 QL_MATERIAL_PASS_TYPES[QL_MATERIAL_PASSES] = {
+    LLRenderPass::PASS_MATERIAL,  LLRenderPass::PASS_MATERIAL_ALPHA_MASK, LLRenderPass::PASS_MATERIAL_ALPHA_EMISSIVE,
+    LLRenderPass::PASS_SPECMAP,   LLRenderPass::PASS_SPECMAP_MASK,        LLRenderPass::PASS_SPECMAP_EMISSIVE,
+    LLRenderPass::PASS_NORMMAP,   LLRenderPass::PASS_NORMMAP_MASK,        LLRenderPass::PASS_NORMMAP_EMISSIVE,
+    LLRenderPass::PASS_NORMSPEC,  LLRenderPass::PASS_NORMSPEC_MASK,       LLRenderPass::PASS_NORMSPEC_EMISSIVE,
+};
+static const U32 QL_MATERIAL_SHADER_IDX[QL_MATERIAL_PASSES] = { 0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15 };
 static U64 sQLPBRLastDraws = 0, sQLPBRLastKept = 0, sQLPBRDraws = 0, sQLPBRKept = 0;
 
 #if QL_VULKAN_SHADOWS
@@ -13634,8 +13672,10 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     sQLProbeDrawsOpen = false;
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
+    gQLVulkanMaterialLeftovers = nullptr;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
+    static LLCachedControl<bool> material_wanted(gSavedSettings, "QuasarVulkanMaterialDraws", false);
     static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanProbeDraws", false);
     static LLCachedControl<bool> pbr_wanted(gSavedSettings, "QuasarVulkanPBRDraws", false);
     if (!main_view && !wanted())
@@ -13664,8 +13704,13 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     sQLProbeTaken.clear();
     sQLPBRLeftovers.clear();
     sQLPBRTaken.clear();
+    for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+    {
+        sQLMatLeftovers[m].clear();
+        sQLMatTaken[m].clear();
+    }
     const LLVertexBuffer* last_vb = nullptr;
-    bool last_in_arena = false, last_tangents = false;
+    bool last_in_arena = false, last_tangents = false, last_uv1 = false, last_uv2 = false;
     unsigned base_vertex = 0, base_index = 0;
     // The mesh in the arena (positions, normals, texture coordinates, colours, tangents where it has them).
     const auto place = [&](const LLVertexBuffer* vb)
@@ -13674,6 +13719,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         {
             last_vb       = vb;
             last_tangents = vb && vb->hasDataType(LLVertexBuffer::TYPE_TANGENT);
+            last_uv1      = vb && vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD1);
+            last_uv2      = vb && vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD2);
             last_in_arena = vb && LLNavShapeVBOManager::shortIndices(vb) &&
                             vb->hasDataType(LLVertexBuffer::TYPE_NORMAL) &&
                             vb->hasDataType(LLVertexBuffer::TYPE_TEXCOORD0) &&
@@ -13684,7 +13731,9 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                                 vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD0), vb->getOffset(LLVertexBuffer::TYPE_COLOR),
                                 vb->getNumVerts(), LLNavShapeVBOManager::glIndices(vb), vb->getNumIndices(), base_vertex,
                                 base_index,
-                                last_tangents ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TANGENT) : ~0u);
+                                last_tangents ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TANGENT) : ~0u,
+                                last_uv1 ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD1) : ~0u,
+                                last_uv2 ? (unsigned)vb->getOffset(LLVertexBuffer::TYPE_TEXCOORD2) : ~0u);
         }
         return last_in_arena;
     };
@@ -13815,6 +13864,66 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         gQLVulkanPBRLeftovers = &sQLPBRLeftovers;
     }
 
+    // Legacy materials, not blended, unrigged, one material a draw (QuasarVulkanMaterialDraws), as
+    // LLDrawPoolMaterials::renderDeferred binds each.
+    if (material_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_MATERIALS))
+    {
+        U64 mat_draws = 0, mat_kept = 0;
+        const auto map_texture = [](LLViewerTexture* texture, U32& name, U32& levels)
+        {
+            const LLImageGL* image = texture ? texture->getGLTexture() : nullptr;
+            name = image ? image->getTexName() : 0;
+            levels = name ? ql_sampled_levels(image) : 1;
+            return name != 0;
+        };
+        for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+        {
+            const U32 type        = QL_MATERIAL_PASS_TYPES[m];
+            const U32 shader_idx  = QL_MATERIAL_SHADER_IDX[m];
+            const bool normal_map = (shader_idx & 0x8) != 0;
+            const bool spec_map   = (shader_idx & 0x4) != 0;
+            auto* mat_end = gPipeline.endRenderMap(type);
+            for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(type); i != mat_end;)
+            {
+                LLDrawInfo* params = *i;
+                LLCullResult::increment_iterator(i, mat_end);
+                if (!params)
+                {
+                    continue;
+                }
+                bool drawn = false;
+                if (params->mCount && params->mMaterialSlotList.size() <= 1 && place(params->mVertexBuffer.get()) &&
+                    (!normal_map || (last_tangents && last_uv1)) && (!spec_map || last_uv2))
+                {
+                    QLVulkanPresenter::GbDraw d;
+                    matrices(*params, d);
+                    d.kind             = QLVulkanPresenter::GB_MATERIAL;
+                    d.has_normal_map   = normal_map;
+                    d.has_specular_map = spec_map;
+                    d.alpha_mode       = shader_idx & 0x3;
+                    d.alpha_cutoff     = params->mAlphaMaskCutoff;
+                    d.env_intensity    = params->mEnvIntensity;
+                    d.fullbright       = params->mFullbright ? 1.f : 0.f;
+                    memcpy(d.specular, params->mSpecColor.mV, sizeof(d.specular));
+                    const bool textured = map_texture(params->mTexture.get(), d.textures[0], d.levels[0]) &&
+                                          (!normal_map || map_texture(params->mNormalMap.get(), d.textures[1], d.levels[1])) &&
+                                          (!spec_map || map_texture(params->mSpecularMap.get(), d.textures[2], d.levels[2]));
+                    drawn = textured && QLVulkanPresenter::gbufferDraw(d);
+                }
+                (drawn ? sQLMatTaken[m] : sQLMatLeftovers[m]).push_back(params);
+                ++(drawn ? mat_draws : mat_kept);
+            }
+        }
+        sQLMatDraws += mat_draws;
+        sQLMatKept += mat_kept;
+        if (main_view)
+        {
+            sQLMatLastDraws = mat_draws;
+            sQLMatLastKept  = mat_kept;
+        }
+        gQLVulkanMaterialLeftovers = sQLMatLeftovers;
+    }
+
     if (main_view)
     {
         sQLMainDraws += main_draws;
@@ -13834,6 +13943,8 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
 {
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
+    const bool materials_taken = gQLVulkanMaterialLeftovers != nullptr;
+    gQLVulkanMaterialLeftovers = nullptr;
     if (!sQLProbeDrawsOpen)
     {
         return {};
@@ -13841,13 +13952,38 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     sQLProbeDrawsOpen = false;
 #if QL_VULKAN_SHADOWS
     gGL.flush();
-    if (!QLVulkanPresenter::gbufferEnd() && (!sQLProbeTaken.empty() || !sQLPBRTaken.empty()))
+    if (!QLVulkanPresenter::gbufferEnd())
     {
-        ++sQLProbeHandOversFailed;
-        return { &sQLProbeTaken, &sQLPBRTaken };  // GL draws them (renderGeomDeferred); cleared at the next begin
+        bool any_material = false;
+        for (U32 m = 0; m < QL_MATERIAL_PASSES; ++m)
+        {
+            any_material = any_material || (materials_taken && !sQLMatTaken[m].empty());
+        }
+        if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material)
+        {
+            ++sQLProbeHandOversFailed;
+            // GL draws them (renderGeomDeferred); cleared at the next begin
+            return { &sQLProbeTaken, &sQLPBRTaken, any_material ? sQLMatTaken : nullptr };
+        }
     }
 #endif
     return {};
+}
+
+std::string ql_vulkan_material_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanMaterialDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanMaterialDraws)";
+    }
+    return llformat("main view last frame %llu Vulkan, %llu GL | since start %llu Vulkan, %llu GL (probes too)",
+                    (unsigned long long)sQLMatLastDraws, (unsigned long long)sQLMatLastKept,
+                    (unsigned long long)sQLMatDraws, (unsigned long long)sQLMatKept);
+#else
+    return "not on this platform";
+#endif
 }
 
 std::string ql_vulkan_pbr_draws_info()
