@@ -7481,7 +7481,7 @@ struct QLVulkanPresenter::Impl
                 for (size_t d = first; d < last; ++d)
                 {
                     const VkDrawIndexedIndirectCommand& c = mGbDraws[d].cmd;
-                vkCmdDrawIndexed(slot.cmd, c.indexCount, 1, c.firstIndex, c.vertexOffset, c.firstInstance);
+                    vkCmdDrawIndexed(slot.cmd, c.indexCount, 1, c.firstIndex, c.vertexOffset, c.firstInstance);
                 }
             }
             first = last;

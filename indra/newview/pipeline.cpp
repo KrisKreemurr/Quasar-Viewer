@@ -5896,7 +5896,7 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
                                                                           last_avatar, last_mesh, skip_last))
                             {
                                 LLGLSLShader::sCurBoundShaderPtr->setMinimumAlpha(params->mAlphaMaskCutoff);
-                                mSimplePool->pushBatch(*params, true, true);
+                                mAlphaMaskPool->pushBatch(*params, true, true);  // the pool that drew them
                             }
                         }
                     }
