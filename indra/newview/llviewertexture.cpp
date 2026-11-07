@@ -550,18 +550,39 @@ void LLViewerTexture::updateClass()
     // Quasar: what the viewer counts leaves out Vulkan's own memory, Streamline's and the driver's. Where the system's
     // budget for the process is known (the Vulkan presenter), the target leaves the real use QL_VRAM_HEADROOM_MB under
     // it: frame generation stops when the process goes over (Streamline's manageVRAM), and Windows starts paging.
+    // The real use is read every 30 frames: at each new reading, what the viewer does not count (the reading less its
+    // own count then) is latched, and the cap held from it until the next, so a purge between readings does not move
+    // the cap with it. The cap engages under 1 GB of real headroom and lets go above 1.5 GB, and lowers the target by at
+    // most half, so a squeeze from outside does not set off the emergency purge.
     {
         constexpr F32 QL_VRAM_HEADROOM_MB = 1024.f;
+        constexpr F32 QL_VRAM_RELEASE_MB  = 1536.f;
+        static U64  s_seen_used = 0, s_seen_budget = 0;
+        static F32  s_cap = 0.f;
+        static bool s_engaged = false;
         const U64 real_budget = gQLVideoMemoryBudgetBytes.load(std::memory_order_relaxed);
         const U64 real_used   = gQLVideoMemoryUsedBytes.load(std::memory_order_relaxed);
-        if (real_budget > 0)
+        if (real_budget == 0)
         {
-            const F32 headroom = (F32)(((F64)real_budget - (F64)real_used) / (1024.0 * 1024.0)) - QL_VRAM_HEADROOM_MB;
-            const F32 cap      = llmax(MIN_VRAM_BUDGET, used + headroom);
-            if (cap < target)
+            s_engaged = false;
+        }
+        else
+        {
+            if (real_used != s_seen_used || real_budget != s_seen_budget)
             {
-                target = cap;
-                budget = llmin(budget, cap / 0.8f);
+                s_seen_used   = real_used;
+                s_seen_budget = real_budget;
+                const F32 budget_mb = (F32)((F64)real_budget / (1024.0 * 1024.0));
+                const F32 used_mb   = (F32)((F64)real_used / (1024.0 * 1024.0));
+                const F32 other_mb  = llmax(0.f, used_mb - used);  // Vulkan's, Streamline's, the driver's
+                const F32 headroom  = budget_mb - used_mb;
+                s_engaged = headroom < QL_VRAM_HEADROOM_MB || (s_engaged && headroom < QL_VRAM_RELEASE_MB);
+                s_cap     = budget_mb - QL_VRAM_HEADROOM_MB - other_mb;
+            }
+            if (s_engaged && s_cap < target)
+            {
+                target = llmax(llmax(s_cap, target * 0.5f), MIN_VRAM_BUDGET);
+                budget = llmin(budget, target / 0.8f);
             }
             LL_PROFILE_PLOT("VRAM process used MB", (int64_t)(real_used >> 20));
             LL_PROFILE_PLOT("VRAM process budget MB", (int64_t)(real_budget >> 20));

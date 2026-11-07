@@ -1120,13 +1120,16 @@ struct QLVulkanPresenter::Impl
         VkPhysicalDeviceMemoryProperties2 props = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
         props.pNext = &budget;
         vkGetPhysicalDeviceMemoryProperties2(mPhysical, &props);
-        U64 used = 0, total = 0;
+        // The largest device-local heap: the card's memory (a small BAR heap beside it may overlap it).
+        U64 used = 0, total = 0, largest = 0;
         for (U32 i = 0; i < props.memoryProperties.memoryHeapCount; ++i)
         {
-            if (props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            const VkMemoryHeap& heap = props.memoryProperties.memoryHeaps[i];
+            if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && heap.size > largest)
             {
-                used += budget.heapUsage[i];
-                total += budget.heapBudget[i];
+                largest = heap.size;
+                used    = budget.heapUsage[i];
+                total   = budget.heapBudget[i];
             }
         }
         gQLVideoMemoryUsedBytes.store(used, std::memory_order_relaxed);
@@ -9325,8 +9328,10 @@ std::string QLVulkanPresenter::frameGenInfo()
             vram_budget ? llformat("VRAM %.1f/%.1f GB%s, ", (double)vram_used / (1ull << 30),
                                    (double)vram_budget / (1ull << 30), vram_used > vram_budget ? " OVER" : "")
                         : std::string();
-        return llformat("on, %u shown a frame drawn, %sinputs %ux%u", impl.mFGPresented, vram.c_str(), impl.mFGWidth,
-                        impl.mFGHeight);
+        // Streamline's own reason, where it stopped making frames while on.
+        const std::string stopped = impl.mFGStatus != 0 ? " | " + impl.mFGNote : std::string();
+        return llformat("on, %u shown a frame drawn, %sinputs %ux%u%s", impl.mFGPresented, vram.c_str(), impl.mFGWidth,
+                        impl.mFGHeight, stopped.c_str());
     }
     return impl.mFGNote;
 #endif
