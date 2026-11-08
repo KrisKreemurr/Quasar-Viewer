@@ -41,6 +41,16 @@ ALTerrainSurfaceMaps::ALTerrainSurfaceMaps(LLSurface& surface) :
 
 ALTerrainSurfaceMaps::~ALTerrainSurfaceMaps() = default;
 
+U32 ALTerrainSurfaceMaps::heightName() const
+{
+    return mHeight.notNull() ? mHeight->getTexName() : 0;
+}
+
+U32 ALTerrainSurfaceMaps::compositionName() const
+{
+    return mComposition.notNull() ? mComposition->getTexName() : 0;
+}
+
 void ALTerrainSurfaceMaps::markDirty()
 {
     mDirtyWhole = true;

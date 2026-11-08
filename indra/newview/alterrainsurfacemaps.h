@@ -79,6 +79,9 @@ public:
     // Moves whenever the maps are marked dirty. With the surface's hasZData, it says what the next bind holds: the
     // upload a dirty map takes there carries what was marked.
     U32  getVersion() const { return mVersion; }
+    // Quasar: the maps' GL names (0 before the first upload), for the terrain Vulkan draws.
+    U32  heightName() const;
+    U32  compositionName() const;
 
     // Every grid coordinate a map holds: [-APRON, grids_per_edge + APRON).
     static Rect wholeMap(S32 grids_per_edge);

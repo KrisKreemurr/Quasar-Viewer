@@ -3712,6 +3712,9 @@ struct QLVulkanPresenter::Impl
         { GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT, VK_FORMAT_BC2_SRGB_BLOCK, "SRGB DXT3" },
         { GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, VK_FORMAT_BC3_UNORM_BLOCK, "DXT5" },
         { GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT, VK_FORMAT_BC3_SRGB_BLOCK, "SRGB DXT5" },
+        // The terrain's maps (ALTerrainSurfaceMaps): its heights and its composition, for the terrain Vulkan draws.
+        { GL_R32F, VK_FORMAT_R32_SFLOAT, "R32F" },
+        { GL_RG16F, VK_FORMAT_R16G16_SFLOAT, "RG16F" },
     };
     static constexpr U32 TEX_FORMAT_COUNT = (U32)(sizeof(TEX_FORMATS) / sizeof(TEX_FORMATS[0]));
     // Per format: 0 not asked yet, 1 the device can share it, 2 it cannot. And the allocations still checked with GL
@@ -6865,7 +6868,8 @@ struct QLVulkanPresenter::Impl
         std::lock_guard<std::mutex> lock(mExtMutex);
         const auto found = mExtTextures.find(texture);
         if (found == mExtTextures.end() || found->second.block < 0 || found->second.vk == VK_FORMAT_R8_UNORM ||
-            found->second.vk == VK_FORMAT_R8G8_UNORM)
+            found->second.vk == VK_FORMAT_R8G8_UNORM || found->second.vk == VK_FORMAT_R32_SFLOAT ||
+            found->second.vk == VK_FORMAT_R16G16_SFLOAT)
         {
             return VK_NULL_HANDLE;
         }

@@ -176,6 +176,8 @@
 #define QL_VULKAN_SHADOWS 1
 #endif
 #include "qlexternalstorage.h"  // Quasar: render targets in Vulkan's memory (QuasarVulkanTargets)
+#include "alterrainsurfacemaps.h"  // Quasar: the terrain maps Vulkan reads
+#include "llsurface.h"
 #if LL_CLANG
 #pragma clang diagnostic pop
 #elif LL_GNUC
@@ -14491,6 +14493,31 @@ std::string ql_vulkan_rigged_draws_info()
 #else
     return "not on this platform";
 #endif
+}
+
+// Quasar: terrain step 1 -- the loaded regions' terrain maps (heights, composition) in Vulkan's memory, which the
+// terrain Vulkan is to draw reads (QuasarVulkanTextures shares them as it shares the fetched textures).
+std::string ql_vulkan_terrain_maps_info()
+{
+    if (!gQLExternalStorage || !gQLExternalTexturesWanted)
+    {
+        return "off (QuasarVulkanTextures)";
+    }
+    U32 regions = 0, heights = 0, compositions = 0;
+    for (LLViewerRegion* region : LLWorld::getInstance()->getRegionList())
+    {
+        ALTerrainSurfaceMaps& maps = region->getLand().getSurfaceMaps();
+        const U32 height = maps.heightName();
+        const U32 composition = maps.compositionName();
+        if (!height && !composition)
+        {
+            continue;  // not drawn yet
+        }
+        ++regions;
+        heights += (height && gQLExternalStorage->owns(height)) ? 1 : 0;
+        compositions += (composition && gQLExternalStorage->owns(composition)) ? 1 : 0;
+    }
+    return llformat("%u region(s) drawn | heights in Vulkan's memory %u, composition %u", regions, heights, compositions);
 }
 
 std::string ql_vulkan_bump_draws_info()
