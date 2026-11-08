@@ -13918,6 +13918,47 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         d.index_count = params.mCount;
     };
 
+    // A simple draw's diffuse, as pushBatch binds it: its one texture, or a batch of several (bindIndexedTextures'
+    // ladder, a missing one white), which the vertices index and no texture matrix moves. False where Vulkan cannot
+    // draw it: no texture, or a batch wider than the ladder GL's programs declare (its overflow GL's to show).
+    const auto diffuse_of = [&](const LLDrawInfo& params, QLVulkanPresenter::GbDraw& d)
+    {
+        const size_t count = params.mTextureList.size();
+        if (count <= 1)
+        {
+            const LLImageGL* image = params.mTexture.notNull() ? params.mTexture->getGLTexture() : nullptr;
+            d.textures[0] = image ? image->getTexName() : 0;
+            d.levels[0]   = ql_sampled_levels(image);
+            return d.textures[0] != 0;
+        }
+        if (count > 16 || count > (size_t)llmax(LLGLSLShader::sIndexedTextureChannels, 0))
+        {
+            return false;
+        }
+        for (size_t t = 0; t < count; ++t)
+        {
+            LLViewerTexture* tex = params.mTextureList[t].get();
+            const LLImageGL* image =
+                (tex ? tex : LLViewerFetchedTexture::sWhiteImagep.get())->getGLTexture();
+            d.batch[t]        = image ? image->getTexName() : 0;
+            d.batch_levels[t] = ql_sampled_levels(image);
+            if (!d.batch[t])
+            {
+                return false;
+            }
+        }
+        d.batch_count = (unsigned)count;
+        return true;
+    };
+    // After matrices: a batch's texture matrix is identity.
+    const auto batch_matrix = [](QLVulkanPresenter::GbDraw& d)
+    {
+        if (d.batch_count)
+        {
+            memcpy(d.texture_matrix, LLMatrix4a::identity().getF32ptr(), sizeof(d.texture_matrix));
+        }
+    };
+
     auto* end = gPipeline.endRenderMap(LLRenderPass::PASS_SIMPLE);
     for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(LLRenderPass::PASS_SIMPLE); i != end;)
     {
@@ -13927,20 +13968,15 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         {
             continue;  // pushBatch draws nothing of these either
         }
-        // A batch of several textures reads them through the indexed lookup: GL's.
-        const LLImageGL* image = (params->mTextureList.size() <= 1 && params->mTexture.notNull())
-                                     ? params->mTexture->getGLTexture()
-                                     : nullptr;
-        const U32 texture = image ? image->getTexName() : 0;
         bool drawn = false;
+        QLVulkanPresenter::GbDraw d;
+        const bool texture = diffuse_of(*params, d);
         if (texture && place(params->mVertexBuffer.get()))
         {
-            QLVulkanPresenter::GbDraw d;
             matrices(*params, d);
-            d.kind        = QLVulkanPresenter::GB_SIMPLE;
-            d.textures[0] = texture;
-            d.levels[0]   = ql_sampled_levels(image);
-            drawn         = QLVulkanPresenter::gbufferDraw(d);
+            batch_matrix(d);
+            d.kind = QLVulkanPresenter::GB_SIMPLE;
+            drawn  = QLVulkanPresenter::gbufferDraw(d);
         }
         (drawn ? sQLProbeTaken : sQLProbeLeftovers).push_back(params);
         if (main_view)
@@ -14116,11 +14152,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                 skip = true;  // pushBatch draws nothing of these either
                 return false;
             }
-            const LLImageGL* image = (params.mTextureList.size() <= 1 && params.mTexture.notNull())
-                                         ? params.mTexture->getGLTexture()
-                                         : nullptr;
-            const U32 texture = image ? image->getTexName() : 0;
-            if (!texture || (rig && (params.mAvatar.isNull() || !params.mSkinInfo)) ||
+            QLVulkanPresenter::GbDraw d;
+            if (!diffuse_of(params, d) || (rig && (params.mAvatar.isNull() || !params.mSkinInfo)) ||
                 !place(params.mVertexBuffer.get()) || (rig && !last_weights))
             {
                 return false;
@@ -14134,14 +14167,12 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                     return false;
                 }
             }
-            QLVulkanPresenter::GbDraw d;
             matrices(params, d);
+            batch_matrix(d);
             d.kind         = QLVulkanPresenter::GB_SIMPLE;
             d.palette      = palette;
             d.alpha_mode   = 2;
             d.alpha_cutoff = params.mAlphaMaskCutoff;
-            d.textures[0]  = texture;
-            d.levels[0]    = ql_sampled_levels(image);
             return QLVulkanPresenter::gbufferDraw(d);
         };
         walk(LLRenderPass::PASS_ALPHA_MASK, [&](LLDrawInfo& p, bool& skip) { return mask_draw(p, false, skip); },
@@ -14176,11 +14207,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                 continue;
             }
             bool drawn = false;
-            const LLImageGL* image = (params->mTextureList.size() <= 1 && params->mTexture.notNull())
-                                         ? params->mTexture->getGLTexture()
-                                         : nullptr;
-            const U32 texture = image ? image->getTexName() : 0;
-            if (params->mCount && params->mAvatar.notNull() && params->mSkinInfo && texture &&
+            QLVulkanPresenter::GbDraw d;
+            if (params->mCount && params->mAvatar.notNull() && params->mSkinInfo && diffuse_of(*params, d) &&
                 place(params->mVertexBuffer.get()) && last_weights)
             {
                 bool skip = false;
@@ -14189,13 +14217,11 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
                 {
                     continue;  // as uploadMatrixPalette's refusal: drawn by neither
                 }
-                QLVulkanPresenter::GbDraw d;
                 matrices(*params, d);
-                d.kind        = QLVulkanPresenter::GB_SIMPLE;
-                d.palette     = palette;
-                d.textures[0] = texture;
-                d.levels[0]   = ql_sampled_levels(image);
-                drawn         = palette != ~0u && QLVulkanPresenter::gbufferDraw(d);
+                batch_matrix(d);
+                d.kind    = QLVulkanPresenter::GB_SIMPLE;
+                d.palette = palette;
+                drawn     = palette != ~0u && QLVulkanPresenter::gbufferDraw(d);
             }
             (drawn ? sQLSimpleRiggedTaken : sQLSimpleRiggedLeftovers).push_back(params);
             ++(drawn ? rig_draws : rig_kept);

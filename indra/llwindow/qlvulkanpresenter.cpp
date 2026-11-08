@@ -6298,7 +6298,9 @@ struct QLVulkanPresenter::Impl
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView    view = VK_NULL_HANDLE;
     };
-    using GbMatKey = std::array<VkImage, 4>;
+    // A set's images: the four slots, then a batch's sixteen (white where there is none).
+    static constexpr U32 GB_SET_IMAGES = 20;
+    using GbMatKey = std::array<VkImage, GB_SET_IMAGES>;
 
     bool        mGbTried = false, mGbReady = false;
     std::string mGbNote = "off (QuasarVulkanProbeDraws)";
@@ -6439,16 +6441,17 @@ struct QLVulkanPresenter::Impl
             mGbSetLayout = VK_NULL_HANDLE;
             return gbFail("vkCreateDescriptorSetLayout (draws)");
         }
-        // Set 1: a draw's four textures (qlgbuffer.frag: base colour or diffuse, normal, ORM, emissive).
-        VkDescriptorSetLayoutBinding tex_bindings[4] = {};
-        for (U32 i = 0; i < 4; ++i)
+        // Set 1: a draw's four textures (qlgbuffer.frag: base colour or diffuse, normal, ORM, emissive), and a batch's
+        // sixteen diffuse textures (batchMap).
+        VkDescriptorSetLayoutBinding tex_bindings[5] = {};
+        for (U32 i = 0; i < 5; ++i)
         {
             tex_bindings[i].binding         = i;
             tex_bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            tex_bindings[i].descriptorCount = 1;
+            tex_bindings[i].descriptorCount = i < 4 ? 1 : 16;
             tex_bindings[i].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
         }
-        set_info.bindingCount = 4;
+        set_info.bindingCount = 5;
         set_info.pBindings    = tex_bindings;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mGbTexLayout) != VK_SUCCESS)
         {
@@ -6477,7 +6480,8 @@ struct QLVulkanPresenter::Impl
             mGbPool = VK_NULL_HANDLE;
             return gbFail("vkCreateDescriptorPool (draws)");
         }
-        const VkDescriptorPoolSize tex_size = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GB_MAX_TEXTURE_SETS * 4 };
+        const VkDescriptorPoolSize tex_size = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                                GB_MAX_TEXTURE_SETS * GB_SET_IMAGES };
         pool_info.flags      = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         pool_info.maxSets    = GB_MAX_TEXTURE_SETS;
         pool_info.pPoolSizes = &tex_size;
@@ -6888,20 +6892,28 @@ struct QLVulkanPresenter::Impl
 
     // The descriptor set of a draw's four textures, made the first time they are drawn with together, kept until one
     // of them goes (gbForget). Null where one cannot be drawn with, or the pool is full: the draw is GL's.
-    VkDescriptorSet gbMaterialSet(const unsigned textures[4], const unsigned levels[4], U32& srgb_bits)
+    // batch: a batch's diffuse textures, batch_count of them (none for a draw of one).
+    VkDescriptorSet gbMaterialSet(const unsigned textures[4], const unsigned levels[4], const unsigned* batch,
+                                  const unsigned* batch_levels, U32 batch_count, U32& srgb_bits)
     {
         GbMatKey key = {};
-        VkImageView views[4] = {};
+        VkImageView views[GB_SET_IMAGES] = {};
+        unsigned names[GB_SET_IMAGES] = {};
         srgb_bits = 0;
-        for (U32 i = 0; i < 4; ++i)
+        for (U32 i = 0; i < GB_SET_IMAGES; ++i)
         {
+            const U32 b = i - 4;
+            names[i] = i < 4 ? textures[i] : (b < batch_count ? batch[b] : 0u);
             bool srgb = false;
-            views[i] = gbSlotView(textures[i], levels[i], i, key[i], srgb);
+            // The batch's slots are colour (decoded where sRGB, as the ladder's LINEAR_DIFFUSE samplers), white where
+            // empty.
+            views[i] = gbSlotView(names[i], i < 4 ? levels[i] : (b < batch_count ? batch_levels[b] : 1u), i < 4 ? i : 0,
+                                  key[i], srgb);
             if (!views[i])
             {
                 return VK_NULL_HANDLE;
             }
-            srgb_bits |= srgb ? (1u << i) : 0u;
+            srgb_bits |= (i < 4 && srgb) ? (1u << i) : 0u;
         }
         const auto found = mGbMatSets.find(key);
         if (found != mGbMatSets.end())
@@ -6917,25 +6929,28 @@ struct QLVulkanPresenter::Impl
         {
             return VK_NULL_HANDLE;  // the pool is full: these draws stay GL's
         }
-        VkDescriptorImageInfo images[4];
-        VkWriteDescriptorSet writes[4];
-        for (U32 i = 0; i < 4; ++i)
+        VkDescriptorImageInfo images[GB_SET_IMAGES];
+        VkWriteDescriptorSet writes[5];
+        for (U32 i = 0; i < GB_SET_IMAGES; ++i)
         {
             images[i] = { mGbSampler, views[i], VK_IMAGE_LAYOUT_GENERAL };
+        }
+        for (U32 i = 0; i < 5; ++i)
+        {
             writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
             writes[i].dstSet          = set;
             writes[i].dstBinding      = i;
-            writes[i].descriptorCount = 1;
+            writes[i].descriptorCount = i < 4 ? 1 : 16;
             writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[i].pImageInfo      = &images[i];
         }
-        vkUpdateDescriptorSets(mDevice, 4, writes, 0, nullptr);
+        vkUpdateDescriptorSets(mDevice, 5, writes, 0, nullptr);
         mGbMatSets.emplace(key, set);
-        for (U32 i = 0; i < 4; ++i)
+        for (U32 i = 0; i < GB_SET_IMAGES; ++i)
         {
             // Defaults never go, and an image twice in a set is listed once.
             const bool repeated = std::find(key.begin(), key.begin() + i, key[i]) != key.begin() + i;
-            if (textures[i] && !repeated)
+            if (names[i] && !repeated)
             {
                 mGbMatUse.emplace(key[i], key);
             }
@@ -7107,18 +7122,20 @@ struct QLVulkanPresenter::Impl
                                                               { 5, 8, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 6, 8, VK_VERTEX_INPUT_RATE_VERTEX },
                                                               { 7, 16, VK_VERTEX_INPUT_RATE_VERTEX } };
-        const VkVertexInputAttributeDescription attributes[8] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+        const VkVertexInputAttributeDescription attributes[9] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0 },
                                                                   { 2, 2, VK_FORMAT_R32G32_SFLOAT, 0 },
                                                                   { 3, 3, VK_FORMAT_R8G8B8A8_UNORM, 0 },
                                                                   { 4, 4, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
                                                                   { 5, 5, VK_FORMAT_R32G32_SFLOAT, 0 },
                                                                   { 6, 6, VK_FORMAT_R32G32_SFLOAT, 0 },
-                                                                  { 7, 7, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
+                                                                  { 7, 7, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
+                                                                  // A batch's texture index: position.w's bits.
+                                                                  { 8, 0, VK_FORMAT_R32_SINT, 12 } };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
         vertex_input.vertexBindingDescriptionCount   = 8;
         vertex_input.pVertexBindingDescriptions      = bindings;
-        vertex_input.vertexAttributeDescriptionCount = 8;
+        vertex_input.vertexAttributeDescriptionCount = 9;
         vertex_input.pVertexAttributeDescriptions    = attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -7278,7 +7295,8 @@ struct QLVulkanPresenter::Impl
                                        simple || (material && !d.has_normal_map) ? 0u : d.textures[1],
                                        simple || (material && !d.has_specular_map) ? 0u : d.textures[2],
                                        simple || material ? 0u : d.textures[3] };
-        if ((simple || material) && !textures[0])
+        const bool batched = simple && d.batch_count > 1;
+        if (d.batch_count > 16 || (d.batch_count && !batched) || ((simple || material) && !textures[0] && !batched))
         {
             return false;
         }
@@ -7287,7 +7305,8 @@ struct QLVulkanPresenter::Impl
             return false;  // a map named but not given: GL's (it binds the map itself)
         }
         U32 srgb_bits = 0;
-        const VkDescriptorSet set = gbMaterialSet(textures, d.levels, srgb_bits);
+        const VkDescriptorSet set =
+            gbMaterialSet(textures, d.levels, d.batch, d.batch_levels, batched ? d.batch_count : 0u, srgb_bits);
         if (!set)
         {
             return false;
@@ -7317,7 +7336,8 @@ struct QLVulkanPresenter::Impl
         const bool rigged = d.palette != ~0u;
         out[96] = rigged ? (float)d.palette : 0.f;
         out[97] = rigged ? 1.f : 0.f;
-        out[98] = out[99] = 0.f;
+        out[98] = batched ? 1.f : 0.f;  // qlgbuffer.frag's diffuseLookup reads the batch
+        out[99] = 0.f;
         VkDrawIndexedIndirectCommand cmd = {};
         cmd.indexCount    = d.index_count;
         cmd.instanceCount = 1;
@@ -7329,13 +7349,13 @@ struct QLVulkanPresenter::Impl
         // pipeline that can discard.
         mGbDraws.push_back({ set, index, (d.alpha_mode == 2 ? 4u : 0u) | (d.double_sided ? 1u : 0u), cmd });
         mGbPassRigged = mGbPassRigged || d.palette != ~0u;
-        for (U32 i = 0; i < 4; ++i)
+        for (U32 i = 0; i < 4 + (batched ? d.batch_count : 0u); ++i)
         {
-            if (textures[i] &&
-                std::find(mGbPassTextures.begin(), mGbPassTextures.end(), (GLuint)textures[i]) == mGbPassTextures.end())
+            const unsigned name = i < 4 ? textures[i] : d.batch[i - 4];
+            if (name && std::find(mGbPassTextures.begin(), mGbPassTextures.end(), (GLuint)name) == mGbPassTextures.end())
             {
-                mGbPassTextures.push_back(textures[i]);
-                mGbPassImages.push_back(extImageOf(textures[i]));
+                mGbPassTextures.push_back(name);
+                mGbPassImages.push_back(extImageOf(name));
             }
         }
         return true;

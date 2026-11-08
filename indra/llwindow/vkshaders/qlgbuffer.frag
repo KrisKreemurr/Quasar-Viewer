@@ -25,6 +25,9 @@ layout(set = 1, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 1) uniform sampler2D bumpMap;
 layout(set = 1, binding = 2) uniform sampler2D specularMap;
 layout(set = 1, binding = 3) uniform sampler2D emissiveMap;
+// A batch's diffuse textures (Draw.rig.z set: a simple draw of several, LLRenderPass::bindIndexedTextures' ladder),
+// the slots past its count white.
+layout(set = 1, binding = 4) uniform sampler2D batchMap[16];
 
 struct Draw
 {
@@ -36,7 +39,7 @@ struct Draw
     vec4 emissive;
     vec4 specular;  // a legacy material's specular colour (sRGB) and glossiness
     vec4 material;  // environment intensity, alpha cutoff, fullbright, alpha mode | normal map 4 | specular map 8
-    vec4 rig;
+    vec4 rig;  // palette's first vec4, whether it skins, whether it is a batch (batchMap)
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Draws
@@ -58,6 +61,7 @@ layout(location = 5) in vec2 emissive_texcoord;
 layout(location = 6) in vec3 vary_tangent;
 layout(location = 7) flat in float vary_sign;
 layout(location = 8) flat in uint draw_index;
+layout(location = 9) flat in int vary_texture_index;
 
 layout(location = 0) out vec4 frag_data0;
 layout(location = 1) out vec4 frag_data1;
@@ -164,6 +168,35 @@ vec3 srgb_to_linear(vec3 cs)
 // discard, the specular map (decoded, as AnisoWrapSRGB) times the linear specular colour, glossiness times the normal
 // map's alpha and widened by filterSpecularRoughness, the normal map (read undecoded, as AnisoWrap) in the tangent
 // frame, fullbright or the emissive mask's alpha as the albedo's alpha.
+// llshadermgr.cpp's diffuseLookup: the batch's texture the vertex names, by constant indices (the index varies across
+// the draw); a single texture's draw reads the diffuse.
+vec4 diffuseLookup(Draw d, vec2 uv)
+{
+    if (d.rig.z < 0.5)
+    {
+        return texture(diffuseMap, uv);
+    }
+    switch (clamp(vary_texture_index, 0, 15))
+    {
+        case 0: return texture(batchMap[0], uv);
+        case 1: return texture(batchMap[1], uv);
+        case 2: return texture(batchMap[2], uv);
+        case 3: return texture(batchMap[3], uv);
+        case 4: return texture(batchMap[4], uv);
+        case 5: return texture(batchMap[5], uv);
+        case 6: return texture(batchMap[6], uv);
+        case 7: return texture(batchMap[7], uv);
+        case 8: return texture(batchMap[8], uv);
+        case 9: return texture(batchMap[9], uv);
+        case 10: return texture(batchMap[10], uv);
+        case 11: return texture(batchMap[11], uv);
+        case 12: return texture(batchMap[12], uv);
+        case 13: return texture(batchMap[13], uv);
+        case 14: return texture(batchMap[14], uv);
+        default: return texture(batchMap[15], uv);
+    }
+}
+
 void writeMaterial(Draw d, uint srgb_bits)
 {
     uint flags = uint(d.material.w + 0.5);
@@ -219,7 +252,7 @@ void main()
     }
     if (d.pbr.z < 0.5 && MASKED)
     {
-        vec4 col = texture(diffuseMap, base_color_texcoord) * vertex_color;
+        vec4 col = diffuseLookup(d, base_color_texcoord) * vertex_color;
         if (col.a < d.material.y - MASK_BIAS)
         {
             discard;
@@ -232,7 +265,7 @@ void main()
     }
     if (d.pbr.z < 0.5)
     {
-        vec3 col = vertex_color.rgb * texture(diffuseMap, base_color_texcoord).rgb;
+        vec3 col = vertex_color.rgb * diffuseLookup(d, base_color_texcoord).rgb;
         frag_data0 = vec4(col, 0.0);
         frag_data1 = vec4(vec3(vertex_color.a), vertex_color.a);
         vec3 nvn = normalize(vary_normal);

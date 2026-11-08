@@ -20,6 +20,7 @@ layout(location = 4) in vec4 tangent;
 layout(location = 5) in vec2 texcoord1;  // a legacy material's normal map's
 layout(location = 6) in vec2 texcoord2;  // and its specular map's
 layout(location = 7) in vec4 weight4;    // a rigged draw's joints and weights
+layout(location = 8) in int texture_index;  // a batch's texture (position.w's bits, as LLFace writes it)
 
 struct Draw
 {
@@ -31,7 +32,7 @@ struct Draw
     vec4 emissive;
     vec4 specular;
     vec4 material;
-    vec4 rig;  // palette's first vec4, whether it skins
+    vec4 rig;  // palette's first vec4, whether it skins, whether it is a batch (batchMap)
 };
 
 // The skins' palettes (the shadows'): a skin's origin, then three vec4s a joint (objectSkinV.glsl's matrixPalette).
@@ -89,6 +90,7 @@ layout(location = 5) out vec2 emissive_texcoord;
 layout(location = 6) out vec3 vary_tangent;
 layout(location = 7) flat out float vary_sign;
 layout(location = 8) flat out uint draw_index;
+layout(location = 9) flat out int vary_texture_index;  // indexedTextureV.glsl's
 
 vec4 linearizeVertexTint(vec4 tint)
 {
@@ -149,6 +151,7 @@ vec4 tangent_space_transform(vec4 vertex_tangent, vec3 vertex_normal, vec4 khr0,
 void main()
 {
     Draw d = draws[gl_InstanceIndex];
+    vary_texture_index = texture_index;
     draw_index = uint(gl_InstanceIndex);
     // A rigged draw (objectSkinV.glsl): the position skinned about the skin's origin, split as skinTransformH splits it;
     // the normal through the blend's cofactor, the tangent through the blend, both then by the model-view.

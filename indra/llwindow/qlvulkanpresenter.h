@@ -235,6 +235,12 @@ public:
         // (gbufferArena's weight_offset), and its normal_matrix is the model-view's upper 3x3 (the skin's own
         // cofactor turns the normal first, as objectSkinV.glsl's skinNormal).
         unsigned palette = ~0u;
+        // A simple draw of several diffuse textures (LLRenderPass::bindIndexedTextures' ladder, the vertex's texture
+        // index in its position's w): the textures in order, batch_count of them (2 to 16); textures[0] is then
+        // unread. Its texture_matrix is identity, as pushBatch loads none for a batch.
+        unsigned batch[16] = {};
+        unsigned batch_levels[16] = {};
+        unsigned batch_count = 0;
     };
     static bool gbufferDraw(const GbDraw& draw);
     static bool gbufferEnd();
