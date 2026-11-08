@@ -5281,6 +5281,8 @@ struct QLVulkanPresenter::Impl
             shadowFlush();  // normally nothing: each view hands its maps over as it ends
             mShFlushesLast = mShFlushesNow;
             mShFlushesNow = 0;
+            mShMergedLast = mShMergedNow;
+            mShMergedNow = 0;
             mShPassesLast = mShPassesNow;
             mShDrawsLast  = mShDrawsNow;
             mShRiggedLast = mShRiggedNow;
@@ -5865,23 +5867,41 @@ struct QLVulkanPresenter::Impl
     // are drawn by GL first (what Vulkan left) and finished by Vulkan here, before anything reads them; depth tests
     // commute, so the order changes nothing drawn. On NVIDIA's threaded driver the signal waits for the driver's
     // thread to catch up: once a view, rather than once a map.
-    bool shadowFlush()
+    // A shadow hand-over's parts, so the G-buffer's can carry it (QuasarVulkanMergeHandOvers): what shadowRecord
+    // gathered and recorded, which the crossing then hands over, and shadowFinish completes.
+    struct ShFlush
     {
-        if (mShPending.empty())
-        {
-            return true;
-        }
-        LL_PROFILE_ZONE_NAMED("vulkan shadow hand-over");
         std::vector<ShPending> pending;
+        std::vector<ShDepth*>  images;
+        std::vector<U32>       image_of;
+        std::vector<GLuint>    gl_buffers;
+        std::vector<GLuint>    gl_textures;
+        std::vector<GLenum>    layouts;
+        VkCommandBuffer        cmd = VK_NULL_HANDLE;
+        ShSlot*                head = nullptr;
+        bool                   masked = false, rigged = false;
+        U32                    draws = 0, rigged_draws = 0, masked_draws = 0, masked_rigged_draws = 0;
+    };
+
+    // The queued maps copied in from GL and recorded into the first's command buffer, its fence reset: everything a
+    // hand-over does before GL signals. False where nothing can be drawn (the queue is then let go).
+    bool shadowRecord(ShFlush& f)
+    {
+        std::vector<ShPending>& pending = f.pending;
         pending.swap(mShPending);
         // The atlas's tiles drawn with until now may go to other textures once GL has waited for this hand-over.
         mShPassAtFlush = mShPassSerial;
 
         // The images, each once (a map drawn twice in a view is queued twice).
-        std::vector<ShDepth*> images;
-        std::vector<U32> image_of(pending.size());
-        bool masked = false, rigged = false;
-        U32 draws = 0, rigged_draws = 0, masked_draws = 0, masked_rigged_draws = 0;
+        std::vector<ShDepth*>& images = f.images;
+        std::vector<U32>& image_of = f.image_of;
+        image_of.assign(pending.size(), 0);
+        bool& masked = f.masked;
+        bool& rigged = f.rigged;
+        U32& draws = f.draws;
+        U32& rigged_draws = f.rigged_draws;
+        U32& masked_draws = f.masked_draws;
+        U32& masked_rigged_draws = f.masked_rigged_draws;
         for (size_t i = 0; i < pending.size(); ++i)
         {
             const ShPending& p = pending[i];
@@ -5923,13 +5943,14 @@ struct QLVulkanPresenter::Impl
         }
 
         // What GL hands over: every arena, every map's image and, with masked casters, the atlas its blits wrote.
-        std::vector<GLuint> gl_buffers = { mShStatic.gl, mShRigged.gl };
+        std::vector<GLuint>& gl_buffers = f.gl_buffers;
+        gl_buffers = { mShStatic.gl, mShRigged.gl };
         if (mShMaskReady)
         {
             gl_buffers.push_back(mShMasked.gl);
             gl_buffers.push_back(mShMaskedRigged.gl);
         }
-        std::vector<GLuint> gl_textures;
+        std::vector<GLuint>& gl_textures = f.gl_textures;
         for (const ShDepth* image : images)
         {
             gl_textures.push_back(image->glTexture);
@@ -5938,7 +5959,7 @@ struct QLVulkanPresenter::Impl
         {
             gl_textures.push_back(mShAtlasGL);
         }
-        const std::vector<GLenum> layouts(gl_textures.size(), GL_LAYOUT_GENERAL_EXT);
+        f.layouts.assign(gl_textures.size(), GL_LAYOUT_GENERAL_EXT);
         const ShArena* arenas[4] = { &mShStatic, &mShRigged, &mShMasked, &mShMaskedRigged };
         const U32 arena_count = mShMaskReady ? 4 : 2;
 
@@ -5961,31 +5982,15 @@ struct QLVulkanPresenter::Impl
                 }
             }
         }
-        {
-            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl signal");
-            // QuasarVulkanShadowSignalObjects off (an experiment): the signal names nothing it hands over, in case naming
-            // the arenas and the images is what makes NVIDIA's driver wait for its thread here.
-            if (sShSignalObjects)
-            {
-                gl.SignalSemaphoreEXT(mShGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(),
-                                      (GLuint)gl_textures.size(), gl_textures.data(), layouts.data());
-            }
-            else
-            {
-                gl.SignalSemaphoreEXT(mShGLDoneGL, 0, nullptr, 0, nullptr, nullptr);
-            }
-        }
-        {
-            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl flush");
-            gl.Flush();
-        }
         // To the function's end (its own variable, beside the hand-over's zone): its self time is the recording, the
         // steps after have zones of their own.
         LL_PROFILE_ZONE_NAMED_COLOR("vulkan shadow - vk record", 0x40A0FF);
 
         // The first map's command buffer and fence carry the hand-over.
         ShSlot& head = mShSlots[pending[0].slot];
+        f.head = &head;
         VkCommandBuffer cmd = head.cmd;
+        f.cmd = cmd;
         vkResetFences(mDevice, 1, &head.fence);
         vkResetCommandBuffer(cmd, 0);
         VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -6144,20 +6149,14 @@ struct QLVulkanPresenter::Impl
                              0, nullptr, 0, nullptr, (U32)releases.size(), releases.data());
         vkEndCommandBuffer(cmd);
 
-        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-        submit.waitSemaphoreCount   = 1;
-        submit.pWaitSemaphores      = &mShGLDoneVK;
-        submit.pWaitDstStageMask    = &wait_stage;
-        submit.commandBufferCount   = 1;
-        submit.pCommandBuffers      = &cmd;
-        submit.signalSemaphoreCount = 1;
-        submit.pSignalSemaphores    = &mShVKDoneVK;
-        VkResult result = VK_SUCCESS;
-        {
-            LL_PROFILE_ZONE_NAMED("vulkan shadow - vk submit");
-            result = vkQueueSubmit(mQueue, 1, &submit, head.fence);
-        }
+        return true;
+    }
+
+    // A recorded hand-over submitted (result): the slots' serials, or the failure.
+    bool shadowSubmitted(ShFlush& f, VkResult result)
+    {
+        const std::vector<ShPending>& pending = f.pending;
+        ShSlot& head = *f.head;
         for (const ShPending& p : pending)
         {
             mShSlots[p.slot].pending = false;
@@ -6176,24 +6175,20 @@ struct QLVulkanPresenter::Impl
             mShSlots[p.slot].submitted = false;  // only the head's fence is this submission's
         }
         head.submitted = true;
-        if (rigged)
+        if (f.rigged)
         {
             mShSegmentSerial[mShFrame % SH_PALETTE_SEGMENTS] = serial;
         }
 
-        // GL: back once Vulkan is done (on the GPU), and each map into GL's own texture.
-        {
-            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl wait");
-            if (sShSignalObjects)
-            {
-                gl.WaitSemaphoreEXT(mShVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(),
-                                    (GLuint)gl_textures.size(), gl_textures.data(), layouts.data());
-            }
-            else
-            {
-                gl.WaitSemaphoreEXT(mShVKDoneGL, 0, nullptr, 0, nullptr, nullptr);
-            }
-        }
+        return true;
+    }
+
+    // After GL has waited for the hand-over: each map back into GL's own texture.
+    void shadowFinish(ShFlush& f)
+    {
+        const std::vector<ShPending>& pending = f.pending;
+        const std::vector<ShDepth*>& images = f.images;
+        const std::vector<U32>& image_of = f.image_of;
         {
             LL_PROFILE_ZONE_NAMED("vulkan shadow - gl copy out");
             for (size_t i = 0; i < pending.size(); ++i)
@@ -6213,10 +6208,83 @@ struct QLVulkanPresenter::Impl
         }
         ++mShFlushesNow;
         mShPassesNow += (U32)pending.size();
-        mShDrawsNow += draws;
-        mShRiggedNow += rigged_draws;
-        mShMaskedNow += masked_draws;
-        mShMaskedRiggedNow += masked_rigged_draws;
+        mShDrawsNow += f.draws;
+        mShRiggedNow += f.rigged_draws;
+        mShMaskedNow += f.masked_draws;
+        mShMaskedRiggedNow += f.masked_rigged_draws;
+    }
+
+    // Whether the next G-buffer hand-over is to carry the queued shadow maps (QuasarVulkanMergeHandOvers): set by the
+    // viewer for the main view's maps, which nothing reads before its G-buffer is drawn; shadowFlush still hands them
+    // over if no G-buffer hand-over takes them.
+    bool mShMergeNext = false;
+    U32  mShMergedNow = 0, mShMergedLast = 0;
+
+    bool shadowFlush()
+    {
+        mShMergeNext = false;
+        if (mShPending.empty())
+        {
+            return true;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan shadow hand-over");
+        ShFlush f;
+        if (!shadowRecord(f))
+        {
+            return false;
+        }
+        const std::vector<GLuint>& gl_buffers = f.gl_buffers;
+        const std::vector<GLuint>& gl_textures = f.gl_textures;
+        const std::vector<GLenum>& layouts = f.layouts;
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl signal");
+            // QuasarVulkanShadowSignalObjects off (an experiment): the signal names nothing it hands over, in case naming
+            // the arenas and the images is what makes NVIDIA's driver wait for its thread here.
+            if (sShSignalObjects)
+            {
+                gl.SignalSemaphoreEXT(mShGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(),
+                                      (GLuint)gl_textures.size(), gl_textures.data(), layouts.data());
+            }
+            else
+            {
+                gl.SignalSemaphoreEXT(mShGLDoneGL, 0, nullptr, 0, nullptr, nullptr);
+            }
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl flush");
+            gl.Flush();
+        }
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &mShGLDoneVK;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &f.cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &mShVKDoneVK;
+        VkResult result = VK_SUCCESS;
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - vk submit");
+            result = vkQueueSubmit(mQueue, 1, &submit, f.head->fence);
+        }
+        if (!shadowSubmitted(f, result))
+        {
+            return false;
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan shadow - gl wait");
+            if (sShSignalObjects)
+            {
+                gl.WaitSemaphoreEXT(mShVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(),
+                                    (GLuint)gl_textures.size(), gl_textures.data(), layouts.data());
+            }
+            else
+            {
+                gl.WaitSemaphoreEXT(mShVKDoneGL, 0, nullptr, 0, nullptr, nullptr);
+            }
+        }
+        shadowFinish(f);
         return true;
     }
 
@@ -6233,9 +6301,9 @@ struct QLVulkanPresenter::Impl
             return mShNote;
         }
         std::string info =
-            llformat("%u maps in %u hand-overs, %u draws (%u rigged) last frame | arenas %.0f/%.0f + %.0f/%.0f MB, %.1f MB copied, "
-                     "%u+%u resets, %u palettes",
-                     mShPassesLast, mShFlushesLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
+            llformat("%u maps in %u hand-overs (%u carried by the G-buffer's), %u draws (%u rigged) last frame | arenas "
+                     "%.0f/%.0f + %.0f/%.0f MB, %.1f MB copied, %u+%u resets, %u palettes",
+                     mShPassesLast, mShFlushesLast, mShMergedLast, mShDrawsLast, mShRiggedLast, (double)mShStatic.used() / (1 << 20),
                      (double)mShStatic.totalBytes() / (1 << 20), (double)mShRigged.used() / (1 << 20),
                      (double)mShRigged.totalBytes() / (1 << 20), (double)mShCopiedLast / (1 << 20), mShStatic.resets,
                      mShRigged.resets, mShPaletteCountLast);
@@ -7923,14 +7991,31 @@ struct QLVulkanPresenter::Impl
         }
         LL_PROFILE_ZONE_NAMED("vulkan probe draws");
         const GbTarget& target = mGbTargets[mGbTarget];
-        // What GL hands over: the arena, the attachments, and every texture drawn with (once each).
+        // The shadow maps queued for this view, carried by this hand-over (QuasarVulkanMergeHandOvers): one crossing
+        // for both. Recorded first, so their copies in from GL come before the signal.
+        ShFlush sh;
+        bool merged = false;
+        if (mShMergeNext && !mShPending.empty())
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan probe draws - shadows record");
+            merged = shadowRecord(sh);
+        }
+        mShMergeNext = false;
+        // What GL hands over: the arena, the attachments, and every texture drawn with (once each); and the shadows'.
         std::vector<GLuint> textures(target.names, target.names + target.colors + 1);
         textures.insert(textures.end(), mGbPassTextures.begin(), mGbPassTextures.end());
         const std::vector<VkImage>& texture_images = mGbPassImages;
+        std::vector<GLuint> gl_buffers = { mGbArena.gl };
+        if (merged && sShSignalObjects)
+        {
+            gl_buffers.insert(gl_buffers.end(), sh.gl_buffers.begin(), sh.gl_buffers.end());
+            textures.insert(textures.end(), sh.gl_textures.begin(), sh.gl_textures.end());
+        }
         const std::vector<GLenum> layouts(textures.size(), GL_LAYOUT_GENERAL_EXT);
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl signal");
-            gl.SignalSemaphoreEXT(mGbGLDoneGL, 1, &mGbArena.gl, (GLuint)textures.size(), textures.data(), layouts.data());
+            gl.SignalSemaphoreEXT(mGbGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)textures.size(),
+                                  textures.data(), layouts.data());
             gl.Flush();
         }
         LL_PROFILE_ZONE_NAMED_COLOR("vulkan probe draws - vk record", 0x40A0FF);
@@ -8097,14 +8182,25 @@ struct QLVulkanPresenter::Impl
         submit.waitSemaphoreCount   = 1;
         submit.pWaitSemaphores      = &mGbGLDoneVK;
         submit.pWaitDstStageMask    = &wait_stage;
-        submit.commandBufferCount   = 1;
-        submit.pCommandBuffers      = &slot.cmd;
+        // The shadows' commands first in the batch: one wait on GL, one signal back.
+        const VkCommandBuffer submitted[2] = { merged ? sh.cmd : slot.cmd, slot.cmd };
+        submit.commandBufferCount   = merged ? 2 : 1;
+        submit.pCommandBuffers      = submitted;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores    = &mGbVKDoneVK;
         VkResult result = VK_SUCCESS;
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - vk submit");
             result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+            if (merged && result == VK_SUCCESS)
+            {
+                // The shadow slots' fence, signalled once all of it (the batch above) is done.
+                result = vkQueueSubmit(mQueue, 0, nullptr, sh.head->fence);
+            }
+        }
+        if (merged && !shadowSubmitted(sh, result))
+        {
+            merged = false;  // let go (shFail); the G-buffer's draws follow the same result
         }
         if (result != VK_SUCCESS)
         {
@@ -8120,7 +8216,13 @@ struct QLVulkanPresenter::Impl
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl wait");
-            gl.WaitSemaphoreEXT(mGbVKDoneGL, 1, &mGbArena.gl, (GLuint)textures.size(), textures.data(), layouts.data());
+            gl.WaitSemaphoreEXT(mGbVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)textures.size(),
+                                textures.data(), layouts.data());
+        }
+        if (merged)
+        {
+            shadowFinish(sh);
+            ++mShMergedNow;
         }
         ++mGbPassesNow;
         mTrRegionsNow += (U32)mTrQueued.size();
@@ -9869,6 +9971,15 @@ std::string QLVulkanPresenter::gbufferInfo()
 bool QLVulkanPresenter::shadowFlush()
 {
     return !sActive || sActive->shadowFlush();
+}
+
+// static
+void QLVulkanPresenter::shadowMergeNext()
+{
+    if (sActive)
+    {
+        sActive->mShMergeNext = true;
+    }
 }
 
 // static

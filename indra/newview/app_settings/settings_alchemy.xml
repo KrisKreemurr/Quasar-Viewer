@@ -2960,6 +2960,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanMergeHandOvers</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanShadows and QuasarVulkanMainDraws): the main view's shadow maps are handed to Vulkan with its G-buffer draws, in one GL-to-Vulkan crossing instead of two (the frame-order rework, step 1). Live. Status: "Quasar Vulkan shadows" (the hand-overs "carried by the G-buffer's").</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanTerrainDraws</key>
         <map>
             <key>Comment</key>

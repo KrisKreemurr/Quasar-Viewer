@@ -354,6 +354,10 @@ public:
     /// Hands every queued map over at once (one GL signal, one Vulkan submission, one GL wait): due before anything
     /// reads a queued map, so at the end of each view's shadow maps. Nothing queued: nothing done.
     static bool shadowFlush();
+    /// The shadow maps queued now are carried by the next G-buffer hand-over (gbufferEnd), one crossing for both,
+    /// where it comes before shadowFlush; QuasarVulkanMergeHandOvers. The caller still calls shadowFlush before
+    /// anything reads the maps.
+    static void shadowMergeNext();
 
     /// Whether GL's signals and waits around a map name the arenas and depth image they hand over (the default), or
     /// nothing (QuasarVulkanShadowSignalObjects off: an experiment on what makes the signal wait).

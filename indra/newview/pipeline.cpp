@@ -5616,6 +5616,7 @@ static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrig
 extern std::vector<LLDrawInfo*>* gQLVulkanMaterialLeftovers;
 extern bool gQLVulkanMaterialFallback;
 static QLVulkanLost ql_vulkan_probe_draws_end();
+static void ql_vulkan_shadow_flush();
 
 void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 {
@@ -5801,6 +5802,9 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
         // the hand-over failed (Vulkan's draws are then off from now on), GL draws what it left to Vulkan.
         const QLVulkanLost lost = ql_vulkan_probe_draws_end();
+        // Quasar: the main view's shadow maps, where its G-buffer hand-over did not carry them
+        // (QuasarVulkanMergeHandOvers): due before the lighting reads them.
+        ql_vulkan_shadow_flush();
         if (lost.materials && mMaterialsPool)
         {
             // The pool draws Vulkan's draws of each pass as it draws its own, without its indexed sweep (drawn already).
@@ -13686,10 +13690,24 @@ static void ql_vulkan_shadow_flush()
 #endif
 }
 
-// A view's shadow maps are finished by Vulkan as it ends: generateSunShadow's every way out.
+// A view's shadow maps are finished by Vulkan as it ends: generateSunShadow's every way out. The main view's are
+// carried instead by its G-buffer hand-over, where QuasarVulkanMergeHandOvers asks it (one crossing for both): nothing
+// reads them before renderGeomDeferred ends, which hands them over itself if no G-buffer hand-over took them.
 struct QLVulkanShadowView
 {
-    ~QLVulkanShadowView() { ql_vulkan_shadow_flush(); }
+    ~QLVulkanShadowView()
+    {
+#if QL_VULKAN_SHADOWS
+        static LLCachedControl<bool> merge(gSavedSettings, "QuasarVulkanMergeHandOvers", false);
+        static LLCachedControl<bool> main_draws(gSavedSettings, "QuasarVulkanMainDraws", false);
+        if (merge() && main_draws() && !gCubeSnapshot && gPipeline.mRT == &gPipeline.mMainRT)
+        {
+            QLVulkanPresenter::shadowMergeNext();
+            return;
+        }
+#endif
+        ql_vulkan_shadow_flush();
+    }
 };
 
 // ---- QuasarVulkanProbeDraws: a reflection probe face's simple prims drawn by Vulkan (piece 3) -----------------------
