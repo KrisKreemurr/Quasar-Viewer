@@ -2963,7 +2963,7 @@
         <key>QuasarVulkanMergeHandOvers</key>
         <map>
             <key>Comment</key>
-            <string>Quasar (experimental, with QuasarVulkanShadows and QuasarVulkanMainDraws): the main view's shadow maps are handed to Vulkan with its G-buffer draws, in one GL-to-Vulkan crossing instead of two (the frame-order rework, step 1). Live. Status: "Quasar Vulkan shadows" (the hand-overs "carried by the G-buffer's").</string>
+            <string>Quasar (experimental, with QuasarVulkanShadows and QuasarVulkanMainDraws): the main view's shadow maps, and each reflection probe face's (with QuasarVulkanProbeDraws), are handed to Vulkan with that view's G-buffer draws, in one GL-to-Vulkan crossing instead of two (the frame-order rework). Live. Status: "Quasar Vulkan shadows" (the hand-overs "carried by the G-buffer's").</string>
             <key>Persist</key>
             <integer>1</integer>
             <key>Type</key>

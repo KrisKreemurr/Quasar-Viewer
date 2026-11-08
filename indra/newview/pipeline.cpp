@@ -13694,9 +13694,10 @@ static void ql_vulkan_shadow_flush()
 #endif
 }
 
-// A view's shadow maps are finished by Vulkan as it ends: generateSunShadow's every way out. The main view's are
-// carried instead by its G-buffer hand-over, where QuasarVulkanMergeHandOvers asks it (one crossing for both): nothing
-// reads them before renderGeomDeferred ends, which hands them over itself if no G-buffer hand-over took them.
+// A view's shadow maps are finished by Vulkan as it ends: generateSunShadow's every way out. The main view's and a
+// probe face's are carried instead by its G-buffer hand-over, where QuasarVulkanMergeHandOvers asks it (one crossing for
+// both): nothing reads them before renderGeomDeferred ends, which hands them over itself if no G-buffer hand-over took
+// them, as the lighting does.
 struct QLVulkanShadowView
 {
     ~QLVulkanShadowView()
@@ -13704,7 +13705,13 @@ struct QLVulkanShadowView
 #if QL_VULKAN_SHADOWS
         static LLCachedControl<bool> merge(gSavedSettings, "QuasarVulkanMergeHandOvers", false);
         static LLCachedControl<bool> main_draws(gSavedSettings, "QuasarVulkanMainDraws", false);
-        if (merge() && main_draws() && !gCubeSnapshot && gPipeline.mRT == &gPipeline.mMainRT)
+        static LLCachedControl<bool> probe_draws(gSavedSettings, "QuasarVulkanProbeDraws", false);
+        // The main view's, and a reflection probe face's (display_cube_face: its shadows, then its G-buffer, then its
+        // lighting, as the main view's), each where its G-buffer has a hand-over of its own (renderGeomDeferred's).
+        const bool main_view  = main_draws() && !gCubeSnapshot && gPipeline.mRT == &gPipeline.mMainRT;
+        const bool probe_face = probe_draws() && gCubeSnapshot && gPipeline.mRT == &gPipeline.mAuxillaryRT &&
+                                !gPipeline.mHeroProbeManager.isMirrorPass();
+        if (merge() && (main_view || probe_face))
         {
             QLVulkanPresenter::shadowMergeNext();
             return;
