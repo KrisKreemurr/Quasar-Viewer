@@ -1187,6 +1187,46 @@ GLuint LLShaderMgr::compileShaderFile(const std::string& filename, S32 & shader_
             // info log (deprecated usage, precision mismatches, unused varyings...).
             // dumpObjectLog() no-ops on an empty log, so this is free on clean builds.
             dumpObjectLog(ret, false, open_file_name);
+            // Quasar: with QUASAR_DUMP_SHADERS set, every object's source as GL compiled it (defines, engine blocks and
+            // extra code spliced in) goes to logs/shader_dump, one file a distinct source, for the Vulkan lighting
+            // port to compile into SPIR-V as GL's programs are built.
+            static const bool dump = getenv("QUASAR_DUMP_SHADERS") != nullptr;
+            if (dump)
+            {
+                std::string text;
+                for (GLuint i = 0; i < shader_code_count; ++i)
+                {
+                    text += shader_code_text[i];
+                }
+                std::string flat = filename;
+                for (char& c : flat)
+                {
+                    if (c == '/' || c == '\\' || c == ':')
+                    {
+                        c = '_';
+                    }
+                }
+                const char* stage = type == GL_VERTEX_SHADER            ? "vert"
+                                    : type == GL_FRAGMENT_SHADER        ? "frag"
+                                    : type == GL_COMPUTE_SHADER         ? "comp"
+                                    : type == GL_TESS_CONTROL_SHADER    ? "tesc"
+                                    : type == GL_TESS_EVALUATION_SHADER ? "tese"
+                                                                        : "glsl";
+                const std::string dir = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, "shader_dump");
+                LLFile::mkdir(dir);
+                const std::string path = dir + gDirUtilp->getDirDelimiter() + flat + "." +
+                                         fmt::format("{:016x}", (unsigned long long)std::hash<std::string>{}(text)) +
+                                         "." + stage;
+                if (!LLFile::isfile(path))
+                {
+                    LLFILE* out = LLFile::fopen(path, LLFILE_MODE("wb"));
+                    if (out)
+                    {
+                        fwrite(text.data(), 1, text.size(), out);
+                        fclose(out);
+                    }
+                }
+            }
         }
     }
     else
