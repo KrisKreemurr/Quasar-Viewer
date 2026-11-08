@@ -3977,8 +3977,12 @@ struct QLVulkanPresenter::Impl
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         // An image's size is the same for the same format, size and levels: a wasteful one is known without making it.
         const U64 shape = (U64)index | ((U64)levels << 5) | ((U64)(width & 0xFFFF) << 10) | ((U64)(height & 0xFFFF) << 26);
+        // The terrain's maps are wanted whatever they waste: a few hundred KB a region, and the terrain Vulkan draws
+        // reads nothing else (their odd size, the grid and its apron, pads past the rule).
+        const bool wanted_anyway =
+            TEX_FORMATS[index].vk == VK_FORMAT_R32_SFLOAT || TEX_FORMATS[index].vk == VK_FORMAT_R16G16_SFLOAT;
         const auto known = mTexWastefulShapes.find(shape);
-        if (counted_bytes && known != mTexWastefulShapes.end() && counted_bytes <= known->second)
+        if (!wanted_anyway && counted_bytes && known != mTexWastefulShapes.end() && counted_bytes <= known->second)
         {
             ++mTexWasteful;
             return false;
@@ -3994,7 +3998,7 @@ struct QLVulkanPresenter::Impl
         }
         VkMemoryRequirements req = {};
         vkGetImageMemoryRequirements(mDevice, ext.image, &req);
-        if (counted_bytes && (double)req.size > TEX_MAX_WASTE * (double)counted_bytes)
+        if (!wanted_anyway && counted_bytes && (double)req.size > TEX_MAX_WASTE * (double)counted_bytes)
         {
             vkDestroyImage(mDevice, ext.image, nullptr);
             ++mTexWasteful;

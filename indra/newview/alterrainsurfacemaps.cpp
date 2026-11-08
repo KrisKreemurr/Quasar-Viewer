@@ -29,6 +29,7 @@
 #include "alterrainsurfacemaps.h"
 
 #include "llimagegl.h"
+#include "qlexternalstorage.h"  // Quasar: whether the maps went to Vulkan's memory
 #include "llrender.h"
 #include "llsurface.h"
 #include "llsurfacepatch.h"
@@ -174,6 +175,14 @@ void ALTerrainSurfaceMaps::upload(LLPointer<LLImageGL>& image, S32 internal_form
         gGL.getTextureSlot(0)->makeActive();
         image->createGLTexture(0, bytes);
         gGL.getTextureSlot(unit)->makeActive();
+        if (gQLExternalTexturesWanted && gQLExternalStorage)
+        {
+            LL_INFOS("Vulkan") << "Terrain map " << mSize << "x" << mSize << " (format 0x" << std::hex << internal_format
+                               << std::dec << ", made with unit " << unit << " active before): "
+                               << (gQLExternalStorage->owns(image->getTexName()) ? "in Vulkan's memory"
+                                                                                  : "GL's own memory")
+                               << LL_ENDL;
+        }
     }
     else if (whole)
     {
