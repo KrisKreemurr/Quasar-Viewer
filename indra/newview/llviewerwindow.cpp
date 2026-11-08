@@ -1146,11 +1146,17 @@ public:
             gl_rect_2d(mBackRectCamera2, mBackColor, true);
         }
 
+        // Quasar: a line too long for the room right of its column is moved left until its end is on screen (the
+        // status lines run far past the 400 pixels the column leaves).
+        const S32 right_edge = mWindow->getWorldViewWidthScaled() - 8;
+        LLFontGL* font = LLFontGL::getFontMonospace();
         for (line_list_t::iterator iter = mLineList.begin();
              iter != mLineList.end(); ++iter)
         {
             const Line& line = *iter;
-            LLFontGL::getFontMonospace()->renderUTF8(line.text, 0, (F32)line.x, (F32)line.y, mTextColor,
+            const S32 width = font->getWidth(line.text);
+            const S32 x = llmax(llmin(line.x, right_edge - width), 0);
+            font->renderUTF8(line.text, 0, (F32)x, (F32)line.y, mTextColor,
                     LLFontGL::LEFT, LLFontGL::TOP, LLFontGL::NORMAL, LLFontGL::NO_SHADOW);
         }
     }
