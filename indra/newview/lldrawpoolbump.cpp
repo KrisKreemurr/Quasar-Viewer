@@ -467,10 +467,6 @@ S32 LLDrawPoolBump::getNumDeferredPasses()
 
 // Whether a bump face's texture can fall below its cutoff. Without an alpha channel the texture reads 1 and the face
 // is never discarded; a texture whose channels are not yet known is taken to have one.
-// Quasar: the draws Vulkan left the deferred pass (QuasarVulkanBumpDraws; pipeline.cpp), unrigged and rigged.
-extern std::vector<LLDrawInfo*>* gQLVulkanBumpLeftovers;
-extern std::vector<LLDrawInfo*>* gQLVulkanBumpRiggedLeftovers;
-
 static bool bump_can_discard(const LLDrawInfo& params)
 {
     if (params.mAlphaMaskCutoff <= 0.f)
@@ -480,6 +476,10 @@ static bool bump_can_discard(const LLDrawInfo& params)
     const LLViewerTexture* tex = params.mTexture.get();
     return !(tex && tex->hasGLTexture() && tex->getComponents() == 3);
 }
+
+// Quasar: the draws Vulkan left the deferred pass (QuasarVulkanBumpDraws; pipeline.cpp), unrigged and rigged.
+extern std::vector<LLDrawInfo*>* gQLVulkanBumpLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanBumpRiggedLeftovers;
 
 //static
 bool LLDrawPoolBump::canDiscard(const LLDrawInfo& params)
