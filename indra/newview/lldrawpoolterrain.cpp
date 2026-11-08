@@ -943,16 +943,38 @@ bool LLDrawPoolTerrain::qlVulkanDraw()
         }
         return false;
     };
-    // The four-texture terrain only (PBR terrain is a later step), through the variants Vulkan has: flat or
-    // triplanar, levels not pinned, no hex tiling, no parcel overlay.
+    // Through the variants Vulkan has: flat or triplanar, levels not pinned, no hex tiling, no parcel overlay; PBR
+    // terrain at full detail over the alpha ramp, with smooth normals and no masked material.
     const bool use_local_materials = gLocalTerrainMaterials.makeMaterialsReady(true, false);
     LLViewerRegion* regionp = mDrawFace[0]->getDrawable()->getVObj()->getRegion();
     LLVLComposition* compp = regionp->getComposition();
-    if (use_local_materials || compp->getMaterialType() != LLTerrainMaterials::Type::TEXTURE)
-    {
-        return kept("PBR terrain");
-    }
+    const bool pbr = use_local_materials || compp->getMaterialType() == LLTerrainMaterials::Type::PBR;
     const ALShaderInputs& inputs = gPipeline.shaderInputs();
+    LLPointer<LLFetchedGLTFMaterial> (*fetched_materials)[LLVLComposition::ASSET_COUNT] = &compp->mDetailRenderMaterials;
+    if (use_local_materials)
+    {
+        fetched_materials = &gLocalTerrainMaterials.mDetailRenderMaterials;
+    }
+    if (pbr)
+    {
+        const U32 paint_type = use_local_materials ? gLocalTerrainMaterials.getPaintType() : compp->getPaintType();
+        if (paint_type != TERRAIN_PAINT_TYPE_HEIGHTMAP_WITH_NOISE)
+        {
+            return kept("PBR terrain painted by a paint map");
+        }
+        if (sPBRDetailMode != TERRAIN_PBR_DETAIL_EMISSIVE || inputs.mLocal.mTerrainPBRNormals)
+        {
+            return kept("PBR terrain below full detail, or with flat normals");
+        }
+        for (U32 i = 0; i < LLVLComposition::ASSET_COUNT; ++i)
+        {
+            const LLFetchedGLTFMaterial* material = (*fetched_materials)[i].get();
+            if (material && material->mAlphaMode == LLGLTFMaterial::ALPHA_MODE_MASK)
+            {
+                return kept("PBR terrain with a masked material");
+            }
+        }
+    }
     if (inputs.mGlobal.mTerrainHexTiling || inputs.mLocal.mTerrainTessPinned)
     {
         return kept("hex tiling or pinned levels");
@@ -1023,8 +1045,75 @@ bool LLDrawPoolTerrain::qlVulkanDraw()
     memcpy(d.plane_s, plane_s, sizeof(plane_s));
     memcpy(d.plane_t, plane_t, sizeof(plane_t));
 
+    const auto name_of = [](LLViewerTexture* texture, U32& levels)
+    {
+        const LLImageGL* image = texture ? texture->getGLTexture() : nullptr;
+        levels = image ? ql_sampled_levels(image) : 1;
+        return image ? image->getTexName() : 0u;
+    };
+    if (pbr)
+    {
+        // renderFullShaderPBR's textures and uniforms. A material's missing map is the slot's default (0): white, or the
+        // flat normal; one not loaded yet keeps the region GL's.
+        d.pbr = true;
+        for (U32 i = 0; i < LLVLComposition::ASSET_COUNT; ++i)
+        {
+            const LLFetchedGLTFMaterial* fetched = (*fetched_materials)[i].get();
+            const LLGLTFMaterial* material = fetched ? (const LLGLTFMaterial*)fetched : &LLGLTFMaterial::sDefault;
+            LLViewerTexture* base = fetched ? fetched->mBaseColorTexture.get() : nullptr;
+            d.detail[i] = name_of(base ? base : LLViewerFetchedTexture::sWhiteImagep.get(), d.detail_levels[i]);
+            LLViewerTexture* maps[3] = { fetched ? fetched->mNormalTexture.get() : nullptr,
+                                         fetched ? fetched->mMetallicRoughnessTexture.get() : nullptr,
+                                         fetched ? fetched->mEmissiveTexture.get() : nullptr };
+            unsigned* names[3] = { &d.normal[i], &d.orm[i], &d.emissive[i] };
+            unsigned* levels[3] = { &d.normal_levels[i], &d.orm_levels[i], &d.emissive_levels[i] };
+            for (U32 k = 0; k < 3; ++k)
+            {
+                *names[k] = maps[k] ? name_of(maps[k], *levels[k]) : 0u;
+                if (maps[k] && !*names[k])
+                {
+                    return kept("a PBR terrain map not loaded");
+                }
+            }
+            if (!d.detail[i])
+            {
+                return kept("a PBR terrain base colour not loaded");
+            }
+            LLGLTFMaterial::TextureTransform transform;
+            if (fetched)
+            {
+                transform = fetched->mTextureTransform[LLGLTFMaterial::GLTF_TEXTURE_INFO_BASE_COLOR];
+            }
+            const F32 scale_u = transform.mScale.mV[VX] * sPBRDetailScale;
+            const F32 scale_v = transform.mScale.mV[VY] * sPBRDetailScale;
+            const F32 c = cosf(transform.mRotation);
+            const F32 sn = sinf(transform.mRotation);
+            d.uv_transform[i][0] = c * scale_u;
+            d.uv_transform[i][1] = sn * scale_u;
+            d.uv_transform[i][2] = -sn * scale_v;
+            d.uv_transform[i][3] = c * scale_v;
+            d.uv_offset[i][0] = transform.mOffset.mV[VX];
+            d.uv_offset[i][1] = -transform.mOffset.mV[VY];
+            const F32 sign_u = scale_u < 0.f ? -1.f : 1.f;
+            const F32 sign_v = scale_v < 0.f ? -1.f : 1.f;
+            d.normal_axes[i][0] = sign_u * c;
+            d.normal_axes[i][1] = -sign_v * sn;
+            d.normal_axes[i][2] = sign_u * sn;
+            d.normal_axes[i][3] = sign_v * c;
+            for (U32 k = 0; k < 4; ++k)
+            {
+                d.base_color[i][k] = material->mBaseColor.mV[k];
+            }
+            d.metallic[i]  = material->mMetallicFactor;
+            d.roughness[i] = material->mRoughnessFactor;
+            for (U32 k = 0; k < 3; ++k)
+            {
+                d.emissive_color[i][k] = material->mEmissiveColor.mV[k];
+            }
+        }
+    }
     // The textures, as renderFullShaderTextures binds them.
-    for (U32 i = 0; i < 4; ++i)
+    for (U32 i = 0; i < 4 && !pbr; ++i)
     {
         LLViewerTexture* detail = LLPipeline::sRenderTextures ? compp->mDetailTextures[i].get()
                                                               : LLViewerFetchedTexture::sDefaultDiffuseImagep.get();
@@ -1071,7 +1160,9 @@ bool LLDrawPoolTerrain::qlVulkanDraw()
     }
     if (!QLVulkanPresenter::gbufferTerrain(d))
     {
-        return kept("not taken by Vulkan (its maps or textures not in Vulkan's memory, or the pass not open)");
+        return kept(pbr ? "PBR terrain not taken by Vulkan (its maps or textures not in Vulkan's memory, or the pass "
+                          "not open)"
+                        : "not taken by Vulkan (its maps or textures not in Vulkan's memory, or the pass not open)");
     }
     sQLTerrainTaken.push_back(this);
     if (sQLTerrainMainView)

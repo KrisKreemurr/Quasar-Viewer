@@ -3,7 +3,9 @@
 // QLVulkanPresenter::gbufferTerrain), as GL's gDeferredTerrainProgram draws it: one patch a surface patch, its corners
 // here, tessellated from the region's height map. Kept in step with newview's deferred/terrainPatchV.glsl,
 // terrainTC.glsl, terrainTE.glsl, terrainSurface.glsl and terrainF.glsl, and pbrterrainUtilF.glsl's ramp and
-// triplanar weights. Hex tiling, pinned levels and the parcel overlay stay GL's (pipeline.cpp sends no region then).
+// triplanar weights; and PBR terrain, pbrterrainTE.glsl and pbrterrainF.glsl with pbrterrainUtilF.glsl's sampling, at
+// full detail over the alpha ramp. Hex tiling, pinned levels, the parcel overlay, flat normals, a paint map and masked
+// materials stay GL's (lldrawpoolterrain.cpp sends no region then).
 
 struct Region
 {
@@ -16,6 +18,16 @@ struct Region
     vec4 plane_s;           // object_plane_s
     vec4 plane_t;           // object_plane_t
     vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, the ramp is R8
+    // PBR terrain (pbrterrainF.glsl's uniforms): x set where the region's terrain is PBR, y the undecoded data maps
+    // read through decoding views (normal 1 << m, ORM 16 << m).
+    vec4 pbr;
+    vec4 uv_transform[4];   // terrain_uv_transform, a mat2 each (column-major)
+    vec4 uv_offset[2];      // terrain_uv_offset, two a vec4
+    vec4 normal_axes[4];    // terrain_normal_axes
+    vec4 base_color[4];     // baseColorFactors
+    vec4 metallic;          // metallicFactors
+    vec4 roughness;         // roughnessFactors
+    vec4 emissive[4];       // emissiveColors
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Regions

@@ -6319,8 +6319,9 @@ struct QLVulkanPresenter::Impl
     // from its height map (qlterrain.vert/.tesc/.tese/.frag). Each slot has its regions' data and patches in a host
     // buffer of its own, and a descriptor pool for their textures, reset as the slot is taken again.
     static constexpr U32          TR_MAX_REGIONS = 16;
+    static constexpr U32          TR_TEXTURES = 19;  // qlterrain's set 1
     static constexpr U32          TR_MAX_PATCHES = 8192;
-    static constexpr VkDeviceSize TR_REGION_BYTES = 288;  // qlterrain's Region
+    static constexpr VkDeviceSize TR_REGION_BYTES = 624;  // qlterrain's Region
     static constexpr VkDeviceSize TR_PATCHES_AT = ((VkDeviceSize)TR_MAX_REGIONS * TR_REGION_BYTES + 255) & ~(VkDeviceSize)255;
     static constexpr VkDeviceSize TR_SLOT_BYTES =
         (TR_PATCHES_AT + (VkDeviceSize)TR_MAX_PATCHES * 16 + 255) & ~(VkDeviceSize)255;
@@ -7392,16 +7393,17 @@ struct QLVulkanPresenter::Impl
             mTrSetLayout = VK_NULL_HANDLE;
             return trFail("vkCreateDescriptorSetLayout (regions)");
         }
-        // Set 1: the heights, the composition, the alpha ramp, the four details.
-        VkDescriptorSetLayoutBinding set1[7] = {};
-        for (U32 b = 0; b < 7; ++b)
+        // Set 1: the heights, the composition, the alpha ramp, the four details (PBR: base colours), the PBR normals,
+        // ORMs and emissives.
+        VkDescriptorSetLayoutBinding set1[TR_TEXTURES] = {};
+        for (U32 b = 0; b < TR_TEXTURES; ++b)
         {
             set1[b].binding         = b;
             set1[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             set1[b].descriptorCount = 1;
             set1[b].stageFlags      = TR_STAGES;
         }
-        set_info.bindingCount = 7;
+        set_info.bindingCount = TR_TEXTURES;
         set_info.pBindings    = set1;
         if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mTrTexLayout) != VK_SUCCESS)
         {
@@ -7458,7 +7460,7 @@ struct QLVulkanPresenter::Impl
             mTrPool = VK_NULL_HANDLE;
             return trFail("vkCreateDescriptorPool");
         }
-        const VkDescriptorPoolSize samplers = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TR_MAX_REGIONS * 7 };
+        const VkDescriptorPoolSize samplers = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TR_MAX_REGIONS * TR_TEXTURES };
         VkDescriptorPoolCreateInfo tex_pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         tex_pool_info.maxSets       = TR_MAX_REGIONS;
         tex_pool_info.poolSizeCount = 1;
@@ -7673,9 +7675,19 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         VkFormat height_format = VK_FORMAT_UNDEFINED, composition_format = VK_FORMAT_UNDEFINED;
-        VkImageView views[7] = {};
-        VkImage images[7] = {};
-        GLuint names[7] = { d.height, d.composition, d.ramp, d.detail[0], d.detail[1], d.detail[2], d.detail[3] };
+        VkImageView views[TR_TEXTURES] = {};
+        VkImage images[TR_TEXTURES] = {};
+        GLuint names[TR_TEXTURES] = { d.height,    d.composition, d.ramp,        d.detail[0],   d.detail[1],
+                                      d.detail[2], d.detail[3],   d.normal[0],   d.normal[1],   d.normal[2],
+                                      d.normal[3], d.orm[0],      d.orm[1],      d.orm[2],      d.orm[3],
+                                      d.emissive[0], d.emissive[1], d.emissive[2], d.emissive[3] };
+        if (!d.pbr)
+        {
+            for (U32 i = 7; i < TR_TEXTURES; ++i)
+            {
+                names[i] = 0;  // the defaults; the four-texture terrain reads none of them
+            }
+        }
         views[0] = d.height ? extView(d.height, VK_IMAGE_ASPECT_COLOR_BIT, &height_format, 1) : VK_NULL_HANDLE;
         views[1] = d.composition ? extView(d.composition, VK_IMAGE_ASPECT_COLOR_BIT, &composition_format, 1)
                                  : VK_NULL_HANDLE;
@@ -7696,13 +7708,34 @@ struct QLVulkanPresenter::Impl
         }
         images[2] = extImageOf(d.ramp);
         const F32 ramp_red = ramp_format == VK_FORMAT_R8_UNORM ? 1.f : 0.f;
-        for (U32 i = 3; i < 7; ++i)
+        // The details (base colours) must be there; a PBR material's other maps may be the slot's default (0). The
+        // data maps (normal, ORM) read through a decoding view are read raw (qlterrain.frag's dataGrad).
+        U32 raw_bits = 0;
+        for (U32 i = 3; i < TR_TEXTURES; ++i)
         {
+            const U32 m = (i - 3) % 4;
+            const U32 kind = (i - 3) / 4;  // 0 base colour, 1 normal, 2 ORM, 3 emissive
+            const U32 levels = kind == 0 ? d.detail_levels[m]
+                               : kind == 1 ? d.normal_levels[m]
+                               : kind == 2 ? d.orm_levels[m]
+                                           : d.emissive_levels[m];
+            if (kind == 0 && !names[i])
+            {
+                return false;
+            }
             bool srgb = false;
-            views[i] = names[i] ? gbSlotView(names[i], d.detail_levels[i - 3], 0, images[i], srgb) : VK_NULL_HANDLE;
+            views[i] = gbSlotView(names[i], levels, kind == 1 ? 1u : 0u, images[i], srgb);
             if (!views[i])
             {
                 return false;
+            }
+            if (srgb && kind == 1)
+            {
+                raw_bits |= 1u << m;
+            }
+            else if (srgb && kind == 2)
+            {
+                raw_bits |= 16u << m;
             }
         }
         VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -7714,13 +7747,13 @@ struct QLVulkanPresenter::Impl
         {
             return false;
         }
-        const VkSampler samplers[7] = { mTrPointClamp, mTrLinearClamp, mTrAnisoClamp, mGbSampler,
-                                        mGbSampler,    mGbSampler,     mGbSampler };
-        VkDescriptorImageInfo infos[7];
-        VkWriteDescriptorSet writes[7];
-        for (U32 i = 0; i < 7; ++i)
+        VkDescriptorImageInfo infos[TR_TEXTURES];
+        VkWriteDescriptorSet writes[TR_TEXTURES];
+        for (U32 i = 0; i < TR_TEXTURES; ++i)
         {
-            infos[i] = { samplers[i], views[i], VK_IMAGE_LAYOUT_GENERAL };
+            const VkSampler sampler = i == 0 ? mTrPointClamp : i == 1 ? mTrLinearClamp : i == 2 ? mTrAnisoClamp
+                                                                                            : mGbSampler;
+            infos[i] = { sampler, views[i], VK_IMAGE_LAYOUT_GENERAL };
             writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
             writes[i].dstSet          = set;
             writes[i].dstBinding      = i;
@@ -7728,7 +7761,7 @@ struct QLVulkanPresenter::Impl
             writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[i].pImageInfo      = &infos[i];
         }
-        vkUpdateDescriptorSets(mDevice, 7, writes, 0, nullptr);
+        vkUpdateDescriptorSets(mDevice, TR_TEXTURES, writes, 0, nullptr);
 
         // The region's data (qlterrain's Region) and its patches.
         const U32 region = (U32)mTrQueued.size();
@@ -7743,6 +7776,21 @@ struct QLVulkanPresenter::Impl
                                d.plane_t[0], d.plane_t[1], d.plane_t[2], d.plane_t[3],
                                d.raster[0], d.raster[1], (F32)d.planar_count, ramp_red };
         memcpy(out + 52, rest, sizeof(rest));
+        F32 pbr[84] = {};
+        pbr[0] = d.pbr ? 1.f : 0.f;
+        pbr[1] = (F32)raw_bits;
+        for (U32 m = 0; m < 4; ++m)
+        {
+            memcpy(pbr + 4 + 4 * m, d.uv_transform[m], 4 * sizeof(F32));
+            pbr[20 + 2 * m]     = d.uv_offset[m][0];
+            pbr[20 + 2 * m + 1] = d.uv_offset[m][1];
+            memcpy(pbr + 28 + 4 * m, d.normal_axes[m], 4 * sizeof(F32));
+            memcpy(pbr + 44 + 4 * m, d.base_color[m], 4 * sizeof(F32));
+            pbr[60 + m] = d.metallic[m];
+            pbr[64 + m] = d.roughness[m];
+            memcpy(pbr + 68 + 4 * m, d.emissive_color[m], 3 * sizeof(F32));
+        }
+        memcpy(out + 72, pbr, sizeof(pbr));
         F32* patches = reinterpret_cast<F32*>(mTrHostMapped + TR_SLOT_BYTES * mGbSlot + TR_PATCHES_AT) + 4 * mTrPatches;
         for (U32 i = 0; i < d.patch_count; ++i)
         {
@@ -7753,9 +7801,9 @@ struct QLVulkanPresenter::Impl
         }
         mTrQueued.push_back({ set, mTrPatches, d.patch_count });
         mTrPatches += d.patch_count;
-        for (U32 i = 0; i < 7; ++i)
+        for (U32 i = 0; i < TR_TEXTURES; ++i)
         {
-            if (std::find(mGbPassTextures.begin(), mGbPassTextures.end(), names[i]) == mGbPassTextures.end())
+            if (names[i] && std::find(mGbPassTextures.begin(), mGbPassTextures.end(), names[i]) == mGbPassTextures.end())
             {
                 mGbPassTextures.push_back(names[i]);
                 mGbPassImages.push_back(images[i]);

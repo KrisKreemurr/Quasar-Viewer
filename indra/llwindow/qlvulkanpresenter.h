@@ -271,6 +271,18 @@ public:
         unsigned detail_levels[4] = {};
         const float* patches = nullptr;  // per patch: its region-local corner x, y and its edge
         unsigned patch_count = 0;
+        // PBR terrain (renderFullShaderPBR's uniforms; detail[] are then the base colours): the four materials' maps
+        // (0 for the slot's default: white, the flat normal) and factors.
+        bool     pbr = false;
+        unsigned normal[4] = {}, normal_levels[4] = {};
+        unsigned orm[4] = {}, orm_levels[4] = {};
+        unsigned emissive[4] = {}, emissive_levels[4] = {};
+        float    uv_transform[4][4] = {};  // mat2 each, column-major
+        float    uv_offset[4][2] = {};
+        float    normal_axes[4][4] = {};
+        float    base_color[4][4] = {};
+        float    metallic[4] = {}, roughness[4] = {};
+        float    emissive_color[4][3] = {};
     };
     static bool gbufferTerrain(const TerrainDraw& draw);
     static std::string terrainInfo();
