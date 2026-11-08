@@ -168,7 +168,12 @@ void ALTerrainSurfaceMaps::upload(LLPointer<LLImageGL>& image, S32 internal_form
     {
         image = new LLImageGL(mSize, mSize, components, /*usemipmaps=*/false);
         image->setExplicitFormat(internal_format, primary_format, GL_FLOAT);
+        // Quasar: made with unit 0 active, which is how LLImageGL::allocateTextureStorage knows the new name to give
+        // Vulkan's memory (QuasarVulkanTextures); the terrain pools upload from bindSurface with another unit active.
+        const U32 unit = gGL.getCurrentTexUnitIndex();
+        gGL.getTextureSlot(0)->activate();
         image->createGLTexture(0, bytes);
+        gGL.getTextureSlot(unit)->activate();
     }
     else if (whole)
     {
