@@ -7401,7 +7401,9 @@ struct QLVulkanPresenter::Impl
             set1[b].binding         = b;
             set1[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             set1[b].descriptorCount = 1;
-            set1[b].stageFlags      = TR_STAGES;
+            // The maps the fragment stage alone reads (the ramp, the details, the PBR maps) are its alone: no stage
+            // then sees more than the 16 samplers every device has.
+            set1[b].stageFlags      = b < 2 ? TR_STAGES : VK_SHADER_STAGE_FRAGMENT_BIT;
         }
         set_info.bindingCount = TR_TEXTURES;
         set_info.pBindings    = set1;
@@ -7719,9 +7721,9 @@ struct QLVulkanPresenter::Impl
                                : kind == 1 ? d.normal_levels[m]
                                : kind == 2 ? d.orm_levels[m]
                                            : d.emissive_levels[m];
-            if (kind == 0 && !names[i])
+            if (kind == 0 && !names[i] && !d.pbr)
             {
-                return false;
+                return false;  // a detail not loaded; a PBR base colour of 0 is the slot's white
             }
             bool srgb = false;
             views[i] = gbSlotView(names[i], levels, kind == 1 ? 1u : 0u, images[i], srgb);

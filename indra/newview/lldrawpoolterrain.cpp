@@ -1060,8 +1060,18 @@ bool LLDrawPoolTerrain::qlVulkanDraw()
         {
             const LLFetchedGLTFMaterial* fetched = (*fetched_materials)[i].get();
             const LLGLTFMaterial* material = fetched ? (const LLGLTFMaterial*)fetched : &LLGLTFMaterial::sDefault;
+            // No base colour (or the white image itself) is the slot's own white (0), as ql_slot_texture maps it: the
+            // shared white image may well be GL's.
             LLViewerTexture* base = fetched ? fetched->mBaseColorTexture.get() : nullptr;
-            d.detail[i] = name_of(base ? base : LLViewerFetchedTexture::sWhiteImagep.get(), d.detail_levels[i]);
+            if (base == LLViewerFetchedTexture::sWhiteImagep.get())
+            {
+                base = nullptr;
+            }
+            d.detail[i] = base ? name_of(base, d.detail_levels[i]) : 0u;
+            if (!base)
+            {
+                d.detail_levels[i] = 1;
+            }
             LLViewerTexture* maps[3] = { fetched ? fetched->mNormalTexture.get() : nullptr,
                                          fetched ? fetched->mMetallicRoughnessTexture.get() : nullptr,
                                          fetched ? fetched->mEmissiveTexture.get() : nullptr };
@@ -1069,13 +1079,18 @@ bool LLDrawPoolTerrain::qlVulkanDraw()
             unsigned* levels[3] = { &d.normal_levels[i], &d.orm_levels[i], &d.emissive_levels[i] };
             for (U32 k = 0; k < 3; ++k)
             {
+                if (maps[k] == LLViewerFetchedTexture::sWhiteImagep.get() ||
+                    maps[k] == LLViewerFetchedTexture::sFlatNormalImagep.get())
+                {
+                    maps[k] = nullptr;  // the slot's default
+                }
                 *names[k] = maps[k] ? name_of(maps[k], *levels[k]) : 0u;
                 if (maps[k] && !*names[k])
                 {
                     return kept("a PBR terrain map not loaded");
                 }
             }
-            if (!d.detail[i])
+            if (base && !d.detail[i])
             {
                 return kept("a PBR terrain base colour not loaded");
             }
