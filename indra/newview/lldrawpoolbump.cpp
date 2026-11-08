@@ -477,6 +477,8 @@ static bool bump_can_discard(const LLDrawInfo& params)
     return !(tex && tex->hasGLTexture() && tex->getComponents() == 3);
 }
 
+bool ql_allocate_shared_texture2D(S32 intformat, S32 width, S32 height, S32 levels);  // llimagegl.cpp
+
 // Quasar: the draws Vulkan left the deferred pass (QuasarVulkanBumpDraws; pipeline.cpp), unrigged and rigged.
 extern std::vector<LLDrawInfo*>* gQLVulkanBumpLeftovers;
 extern std::vector<LLDrawInfo*>* gQLVulkanBumpRiggedLeftovers;
@@ -940,7 +942,12 @@ void LLBumpImageList::onSourceUpdated(LLViewerTexture* src, EBumpEffect bump_cod
         // fill levels allocated here -- with a single level it is a spec-defined no-op
         // and the normal map aliases under the trilinear/aniso samplers that read it.
         const S32 levels = LLImageGL::calcMipLevelCount(dst_img->getWidth(), dst_img->getHeight());
-        LLImageGL::allocateTexture2D(GL_TEXTURE_2D, dst_img->getStorageInternalFormat(), dst_img->getWidth(), dst_img->getHeight(), GL_RGBA, GL_UNSIGNED_BYTE, nullptr, levels);
+        // Quasar: in Vulkan's memory where it can be (QuasarVulkanTextures), so Vulkan's bump draws can read it.
+        if (!ql_allocate_shared_texture2D(dst_img->getStorageInternalFormat(), dst_img->getWidth(),
+                                          dst_img->getHeight(), levels))
+        {
+            LLImageGL::allocateTexture2D(GL_TEXTURE_2D, dst_img->getStorageInternalFormat(), dst_img->getWidth(), dst_img->getHeight(), GL_RGBA, GL_UNSIGNED_BYTE, nullptr, levels);
+        }
         dst_img->markStorageAllocated();
 
         LLGLuint tex_name = dst_img->getTexName();

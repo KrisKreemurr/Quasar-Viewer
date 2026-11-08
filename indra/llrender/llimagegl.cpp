@@ -2100,6 +2100,30 @@ static void skipSRGBDecode(U32 target)
     glTexParameteri(target, GL_TEXTURE_SRGB_DECODE_EXT, GL_SKIP_DECODE_EXT);
 }
 
+// Quasar: storage for a texture GL draws into itself (the bump pool's generated normal maps), from Vulkan's memory as the
+// fetched textures' is (QuasarVulkanTextures), so Vulkan's draws can sample it. The name is the one bound on unit 0,
+// which must be the active unit. False where it is GL's (the caller allocates as ever). Declared where used, so the
+// header (and every file that includes it) is left alone.
+bool ql_allocate_shared_texture2D(S32 intformat, S32 width, S32 height, S32 levels)
+{
+    if (!gQLExternalTexturesWanted || !gQLExternalStorage || gGL.getCurrentTexUnitIndex() != 0)
+    {
+        return false;
+    }
+    const U32 name = gGL.getTextureSlot(0)->getCurrTexture();
+    if (!name ||
+        !gQLExternalStorage->allocateTexture(
+            name, intformat, width, height, levels,
+            (unsigned long long)LLImageGL::dataFormatVRAMBytes(intformat, width, height, levels)))
+    {
+        return false;
+    }
+    skipSRGBDecode(GL_TEXTURE_2D);
+    alloc_tex_image(width, height, intformat, 1, levels, LLImageGLMemory::OTHER_TEXTURE);
+    stop_glerror();
+    return true;
+}
+
 // Allocate a 2D texture on the currently-bound name and upload level 0.
 //
 // This owns the whole texture: call it exactly once per texture object. The result cannot
