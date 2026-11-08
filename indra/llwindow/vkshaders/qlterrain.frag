@@ -15,7 +15,7 @@ struct Region
     vec4 grid;              // terrain_grid_scale, region_scale, terrain_smoothing, terrainTriplanarBlend
     vec4 plane_s;           // object_plane_s
     vec4 plane_t;           // object_plane_t
-    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, 0
+    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, the ramp is R8
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Regions
@@ -195,11 +195,18 @@ TerrainMix get_terrain_mix_weights(float alpha1, float alpha2, float alphaFinal)
     return tm;
 }
 
-TerrainMix terrain_ramp_mix(vec2 composition)
+// The ramp's alpha: its red where GL keeps it as R8 (misc.w), as GL's swizzle reads it.
+float ramp_alpha(vec2 uv, bool red)
 {
-    float alpha1 = texture(alpha_ramp, composition).a;
-    float alpha2 = texture(alpha_ramp, composition - vec2(2.0, 0.0)).a;
-    float alphaFinal = texture(alpha_ramp, composition - vec2(1.0, 0.0)).a;
+    vec4 t = texture(alpha_ramp, uv);
+    return red ? t.r : t.a;
+}
+
+TerrainMix terrain_ramp_mix(vec2 composition, bool red)
+{
+    float alpha1 = ramp_alpha(composition, red);
+    float alpha2 = ramp_alpha(composition - vec2(2.0, 0.0), red);
+    float alphaFinal = ramp_alpha(composition - vec2(1.0, 0.0), red);
     return get_terrain_mix_weights(alpha1, alpha2, alphaFinal);
 }
 
@@ -261,7 +268,7 @@ void main()
     vec4 side_ddx = dFdx(vary_texcoord_side);
     vec4 side_ddy = dFdy(vary_texcoord_side);
 
-    TerrainMix tm = terrain_ramp_mix(vary_composition);
+    TerrainMix tm = terrain_ramp_mix(vary_composition, r.misc.w > 0.5);
     bool triplanar = r.misc.z > 2.0;
     TerrainTriplanar tw;
     tw.weight = vec3(0.0, 0.0, 1.0);

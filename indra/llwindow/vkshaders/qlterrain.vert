@@ -15,7 +15,7 @@ struct Region
     vec4 grid;              // terrain_grid_scale, region_scale, terrain_smoothing, terrainTriplanarBlend
     vec4 plane_s;           // object_plane_s
     vec4 plane_t;           // object_plane_t
-    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, 0
+    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, the ramp is R8
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Regions

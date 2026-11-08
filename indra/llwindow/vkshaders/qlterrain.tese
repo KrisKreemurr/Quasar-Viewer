@@ -15,7 +15,7 @@ struct Region
     vec4 grid;              // terrain_grid_scale, region_scale, terrain_smoothing, terrainTriplanarBlend
     vec4 plane_s;           // object_plane_s
     vec4 plane_t;           // object_plane_t
-    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, 0
+    vec4 misc;              // terrain_tess_raster, TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT, the ramp is R8
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Regions
@@ -23,8 +23,7 @@ layout(std430, set = 0, binding = 0) readonly buffer Regions
     Region regions[];
 };
 
-// Culling is off for the terrain's pipeline, so the winding (which Vulkan's upper-left domain origin turns over) does
-// not matter.
+// The pipeline sets GL's lower-left domain origin, so ccw winds as GL's does.
 layout(quads, fractional_odd_spacing, ccw) in;
 
 layout(push_constant) uniform Push

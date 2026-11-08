@@ -245,7 +245,10 @@ void LLDrawPoolTerrain::endDeferredPass(S32 pass)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
     LLFacePool::endRenderPass(pass);
-    sShader->unbind();
+    if (sShader)  // none yet where Vulkan has drawn every region so far
+    {
+        sShader->unbind();
+    }
 }
 
 void LLDrawPoolTerrain::renderDeferred(S32 pass)
@@ -879,6 +882,7 @@ void LLDrawPoolTerrain::qlBeginPass(bool main_view)
     sQLTerrainTaken.clear();
     if (main_view)
     {
+        sQLTerrainWhy.clear();
         sQLTerrainLastTaken = sQLTerrainTakenNow;
         sQLTerrainLastKept  = sQLTerrainKeptNow;
         sQLTerrainTakenNow = sQLTerrainKeptNow = 0;

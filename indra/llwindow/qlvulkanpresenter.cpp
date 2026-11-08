@@ -7139,7 +7139,11 @@ struct QLVulkanPresenter::Impl
             {
                 if (!createTrPipeline(t, g != 0, t.terrain[g]))
                 {
-                    t.terrain[0] = t.terrain[1] = VK_NULL_HANDLE;  // the terrain stays GL's here; the rest is drawn
+                    for (VkPipeline& p : t.terrain)  // the terrain stays GL's here; the rest is drawn
+                    {
+                        if (p) vkDestroyPipeline(mDevice, p, nullptr);
+                        p = VK_NULL_HANDLE;
+                    }
                     break;
                 }
             }
@@ -7579,9 +7583,7 @@ struct QLVulkanPresenter::Impl
         mTrSetLayout = mTrTexLayout = VK_NULL_HANDLE;
     }
 
-    // As createGbPipeline, for patches of four corners with no vertex input, both faces drawn (the winding through
-    // Vulkan's tessellation domain is no concern then; GL draws the terrain under its back-face cull, which no view of
-    // it from above reaches).
+    // As createGbPipeline, for patches of four corners with no vertex input.
     bool createTrPipeline(const GbTarget& t, bool greater, VkPipeline& pipeline)
     {
         VkPipelineShaderStageCreateInfo stages[4] = {};
@@ -7599,14 +7601,19 @@ struct QLVulkanPresenter::Impl
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+        // GL's domain origin (lower left; Vulkan 1.1), so the patches' triangles wind as GL's do.
+        VkPipelineTessellationDomainOriginStateCreateInfo origin = {
+            VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO };
+        origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
         VkPipelineTessellationStateCreateInfo tess = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+        tess.pNext              = &origin;
         tess.patchControlPoints = 4;
         VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
         viewport_state.viewportCount = 1;
         viewport_state.scissorCount  = 1;
         VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
         raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode    = VK_CULL_MODE_NONE;
+        raster.cullMode    = VK_CULL_MODE_BACK_BIT;  // GL's GL_CULL_FACE over the deferred pools
         raster.frontFace   = VK_FRONT_FACE_CLOCKWISE;
         raster.lineWidth   = 1.f;
         VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -7675,11 +7682,20 @@ struct QLVulkanPresenter::Impl
         }
         images[0] = extImageOf(d.height);
         images[1] = extImageOf(d.composition);
-        for (U32 i = 2; i < 7; ++i)
+        // The alpha ramp: GL_ALPHA8, kept as R8 (applySwizzleForDeprecatedFormat), read through its red channel.
+        VkFormat ramp_format = VK_FORMAT_UNDEFINED;
+        views[2] = d.ramp ? extView(d.ramp, VK_IMAGE_ASPECT_COLOR_BIT, &ramp_format, d.ramp_levels) : VK_NULL_HANDLE;
+        if (!views[2] || (ramp_format != VK_FORMAT_R8_UNORM && ramp_format != VK_FORMAT_R8G8B8A8_UNORM &&
+                          ramp_format != VK_FORMAT_R8G8B8A8_SRGB))
+        {
+            return false;
+        }
+        images[2] = extImageOf(d.ramp);
+        const F32 ramp_red = ramp_format == VK_FORMAT_R8_UNORM ? 1.f : 0.f;
+        for (U32 i = 3; i < 7; ++i)
         {
             bool srgb = false;
-            const U32 levels = i == 2 ? d.ramp_levels : d.detail_levels[i - 3];
-            views[i] = names[i] ? gbSlotView(names[i], levels, 0, images[i], srgb) : VK_NULL_HANDLE;
+            views[i] = names[i] ? gbSlotView(names[i], d.detail_levels[i - 3], 0, images[i], srgb) : VK_NULL_HANDLE;
             if (!views[i])
             {
                 return false;
@@ -7721,7 +7737,7 @@ struct QLVulkanPresenter::Impl
                                d.grid_scale, d.region_scale, d.smoothing ? 1.f : 0.f, d.triplanar_blend,
                                d.plane_s[0], d.plane_s[1], d.plane_s[2], d.plane_s[3],
                                d.plane_t[0], d.plane_t[1], d.plane_t[2], d.plane_t[3],
-                               d.raster[0], d.raster[1], (F32)d.planar_count, 0.f };
+                               d.raster[0], d.raster[1], (F32)d.planar_count, ramp_red };
         memcpy(out + 52, rest, sizeof(rest));
         F32* patches = reinterpret_cast<F32*>(mTrHostMapped + TR_SLOT_BYTES * mGbSlot + TR_PATCHES_AT) + 4 * mTrPatches;
         for (U32 i = 0; i < d.patch_count; ++i)
@@ -7911,8 +7927,12 @@ struct QLVulkanPresenter::Impl
             b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
             acquires.push_back(b);
         }
+        // The terrain reads its maps from its vertex and tessellation stages too.
+        const VkPipelineStageFlags texture_stages =
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+            VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                             texture_stages | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              0, 0, nullptr, 0, nullptr, (U32)acquires.size(), acquires.data());
 
@@ -8012,7 +8032,7 @@ struct QLVulkanPresenter::Impl
             r.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
         }
         vkCmdPipelineBarrier(slot.cmd,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                             texture_stages | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, (U32)releases.size(),
                              releases.data());
