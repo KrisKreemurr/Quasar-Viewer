@@ -12437,6 +12437,10 @@ void LLPipeline::renderDeferredLighting()
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     LL_PROFILE_GPU_ZONE("renderDeferredLighting");
 
+    // Quasar: the shadow maps the lighting reads, handed over if nothing has yet (QuasarVulkanMergeHandOvers asked the
+    // G-buffer's hand-over to carry them, and a frame that skips renderGeomDeferred never ran it).
+    ql_vulkan_shadow_flush();
+
     if (!sCull)
     {
         return;

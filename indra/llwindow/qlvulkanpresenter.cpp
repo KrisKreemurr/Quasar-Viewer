@@ -6218,11 +6218,19 @@ struct QLVulkanPresenter::Impl
     // viewer for the main view's maps, which nothing reads before its G-buffer is drawn; shadowFlush still hands them
     // over if no G-buffer hand-over takes them.
     bool mShMergeNext = false;
+    bool mShMergeFailed = false;  // a carried hand-over's shadows were lost: the next shadowFlush says so
     U32  mShMergedNow = 0, mShMergedLast = 0;
 
     bool shadowFlush()
     {
         mShMergeNext = false;
+        if (mShMergeFailed)
+        {
+            // Maps a G-buffer hand-over was to carry, lost: the caller throws away what its caches kept of them.
+            mShMergeFailed = false;
+            mShPending.clear();
+            return false;
+        }
         if (mShPending.empty())
         {
             return true;
@@ -7999,6 +8007,7 @@ struct QLVulkanPresenter::Impl
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - shadows record");
             merged = shadowRecord(sh);
+            mShMergeFailed = !merged;
         }
         mShMergeNext = false;
         // What GL hands over: the arena, the attachments, and every texture drawn with (once each); and the shadows'.
@@ -8192,15 +8201,18 @@ struct QLVulkanPresenter::Impl
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - vk submit");
             result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
-            if (merged && result == VK_SUCCESS)
-            {
-                // The shadow slots' fence, signalled once all of it (the batch above) is done.
-                result = vkQueueSubmit(mQueue, 0, nullptr, sh.head->fence);
-            }
         }
-        if (merged && !shadowSubmitted(sh, result))
+        if (merged)
         {
-            merged = false;  // let go (shFail); the G-buffer's draws follow the same result
+            // The shadow slots' fence, signalled once all of it (the batch above) is done. Its own result: a batch that
+            // went is the G-buffer's either way, and GL still waits for it.
+            const VkResult fence_result =
+                result == VK_SUCCESS ? vkQueueSubmit(mQueue, 0, nullptr, sh.head->fence) : result;
+            if (!shadowSubmitted(sh, fence_result))
+            {
+                merged         = false;  // let go (shFail); the viewer's next shadowFlush reports it
+                mShMergeFailed = true;
+            }
         }
         if (result != VK_SUCCESS)
         {
