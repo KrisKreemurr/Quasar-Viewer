@@ -5604,6 +5604,8 @@ struct QLVulkanLost
     const std::vector<LLDrawInfo*>* mask_rigged = nullptr;
     const std::vector<LLDrawInfo*>* pbr_mask = nullptr;
     const std::vector<LLDrawInfo*>* pbr_mask_rigged = nullptr;
+    const std::vector<LLDrawInfo*>* bump = nullptr;  // the legacy bumps (QuasarVulkanBumpDraws)
+    const std::vector<LLDrawInfo*>* bump_rigged = nullptr;
 };
 extern bool gQLVulkanRiggedMaterials;
 static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrigged passes
@@ -5925,6 +5927,22 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
                 gGLLastMatrix = NULL;
                 gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
             }
+        }
+
+        // The legacy bumps Vulkan was to draw, as the bump pool draws them.
+        if (mBumpPool && ((lost.bump && !lost.bump->empty()) || (lost.bump_rigged && !lost.bump_rigged->empty())))
+        {
+            LLDrawPoolBump* bump_pool = static_cast<LLDrawPoolBump*>(mBumpPool);
+            if (lost.bump)
+            {
+                bump_pool->renderDeferredList(false, lost.bump);
+            }
+            if (lost.bump_rigged)
+            {
+                bump_pool->renderDeferredList(true, lost.bump_rigged);
+            }
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
         }
 
         // The stars, the one layer of the sky the G-buffer takes, after every opaque pool, so the depth test spares
@@ -13751,6 +13769,11 @@ std::vector<LLDrawInfo*>* gQLVulkanMaskRiggedLeftovers = nullptr;     // lldrawp
 std::vector<LLDrawInfo*>* gQLVulkanPBRMaskLeftovers = nullptr;        // lldrawpoolpbropaque.cpp
 std::vector<LLDrawInfo*>* gQLVulkanPBRMaskRiggedLeftovers = nullptr;  // lldrawpoolpbropaque.cpp
 static U64 sQLMaskLastDraws = 0, sQLMaskLastKept = 0, sQLMaskDraws = 0, sQLMaskKept = 0;
+// The legacy bumps (QuasarVulkanBumpDraws): LLDrawPoolBump's deferred pass, unrigged and rigged, as the masks.
+static std::vector<LLDrawInfo*> sQLBumpLeftovers, sQLBumpTaken, sQLBumpRiggedLeftovers, sQLBumpRiggedTaken;
+std::vector<LLDrawInfo*>* gQLVulkanBumpLeftovers = nullptr;        // lldrawpoolbump.cpp
+std::vector<LLDrawInfo*>* gQLVulkanBumpRiggedLeftovers = nullptr;  // lldrawpoolbump.cpp
+static U64 sQLBumpLastDraws = 0, sQLBumpLastKept = 0, sQLBumpDraws = 0, sQLBumpKept = 0;
 
 #if QL_VULKAN_SHADOWS
 // The levels of a texture GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
@@ -13796,8 +13819,11 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     gQLVulkanMaskRiggedLeftovers = nullptr;
     gQLVulkanPBRMaskLeftovers = nullptr;
     gQLVulkanPBRMaskRiggedLeftovers = nullptr;
+    gQLVulkanBumpLeftovers = nullptr;
+    gQLVulkanBumpRiggedLeftovers = nullptr;
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::gbufferFrame(LLFrameTimer::getFrameCount());
+    static LLCachedControl<bool> bump_wanted(gSavedSettings, "QuasarVulkanBumpDraws", false);
     static LLCachedControl<bool> mask_wanted(gSavedSettings, "QuasarVulkanMaskDraws", false);
     static LLCachedControl<bool> material_wanted(gSavedSettings, "QuasarVulkanMaterialDraws", false);
     static LLCachedControl<bool> rigged_wanted(gSavedSettings, "QuasarVulkanRiggedDraws", false);
@@ -13841,7 +13867,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
     sQLPBRRiggedTaken.clear();
     for (std::vector<LLDrawInfo*>* v : { &sQLMaskLeftovers, &sQLMaskTaken, &sQLMaskRiggedLeftovers, &sQLMaskRiggedTaken,
                                          &sQLPBRMaskLeftovers, &sQLPBRMaskTaken, &sQLPBRMaskRiggedLeftovers,
-                                         &sQLPBRMaskRiggedTaken })
+                                         &sQLPBRMaskRiggedTaken, &sQLBumpLeftovers, &sQLBumpTaken,
+                                         &sQLBumpRiggedLeftovers, &sQLBumpRiggedTaken })
     {
         v->clear();
     }
@@ -14194,6 +14221,71 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         sQLMaskLastKept  = mask_kept_now;
     }
 
+    // The legacy bumps (PASS_BUMP, and rigged; gDeferredBumpProgram and its alpha-mask twin), as
+    // LLDrawPoolBump::renderDeferredList draws them: the diffuse (pushBumpBatch binds the draw's one texture, never a
+    // batch) and the bump image bindBumpMap binds, the cutoff where the draw can discard.
+    if (bump_wanted() && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_BUMP))
+    {
+        U64 bump_draws = 0, bump_kept = 0;
+        const auto bump_draw = [&](LLDrawInfo& params, bool rig, bool& skip)
+        {
+            skip = false;
+            if (!params.mCount || params.mTexture.isNull() || (rig && (params.mAvatar.isNull() || !params.mSkinInfo)))
+            {
+                return false;
+            }
+            const LLImageGL* diffuse = params.mTexture->getGLTexture();
+            LLViewerTexture* bump_tex = LLDrawPoolBump::bumpImageOf(params.mBump, params.mTexture.get());
+            const LLImageGL* bump = bump_tex ? bump_tex->getGLTexture() : nullptr;
+            const U32 diffuse_name = diffuse ? diffuse->getTexName() : 0;
+            const U32 bump_name    = bump ? bump->getTexName() : 0;
+            if (!diffuse_name || !bump_name || !place(params.mVertexBuffer.get()) || !last_tangents ||
+                (rig && !last_weights))
+            {
+                return false;
+            }
+            unsigned palette = ~0u;
+            if (rig)
+            {
+                palette = palette_of(params, skip);
+                if (skip || palette == ~0u)
+                {
+                    return false;
+                }
+            }
+            QLVulkanPresenter::GbDraw d;
+            matrices(params, d);
+            d.kind        = QLVulkanPresenter::GB_BUMP;
+            d.palette     = palette;
+            d.textures[0] = diffuse_name;
+            d.levels[0]   = ql_sampled_levels(diffuse);
+            d.textures[1] = bump_name;
+            d.levels[1]   = ql_sampled_levels(bump);
+            if (LLDrawPoolBump::canDiscard(params))
+            {
+                d.alpha_mode   = 2;
+                d.alpha_cutoff = params.mAlphaMaskCutoff;
+            }
+            return QLVulkanPresenter::gbufferDraw(d);
+        };
+        walk(LLRenderPass::PASS_BUMP, [&](LLDrawInfo& p, bool& skip) { return bump_draw(p, false, skip); },
+             sQLBumpTaken, sQLBumpLeftovers, bump_draws, bump_kept);
+        gQLVulkanBumpLeftovers = &sQLBumpLeftovers;
+        if (rigged_draws)
+        {
+            walk(LLRenderPass::PASS_BUMP_RIGGED, [&](LLDrawInfo& p, bool& skip) { return bump_draw(p, true, skip); },
+                 sQLBumpRiggedTaken, sQLBumpRiggedLeftovers, bump_draws, bump_kept);
+            gQLVulkanBumpRiggedLeftovers = &sQLBumpRiggedLeftovers;
+        }
+        sQLBumpDraws += bump_draws;
+        sQLBumpKept += bump_kept;
+        if (main_view)
+        {
+            sQLBumpLastDraws = bump_draws;
+            sQLBumpLastKept  = bump_kept;
+        }
+    }
+
     if (rigged_draws)
     {
         // Simple, rigged (PASS_SIMPLE_RIGGED), as pushRiggedBatches draws it.
@@ -14339,6 +14431,8 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     gQLVulkanMaskRiggedLeftovers = nullptr;
     gQLVulkanPBRMaskLeftovers = nullptr;
     gQLVulkanPBRMaskRiggedLeftovers = nullptr;
+    gQLVulkanBumpLeftovers = nullptr;
+    gQLVulkanBumpRiggedLeftovers = nullptr;
     if (!sQLProbeDrawsOpen)
     {
         return {};
@@ -14355,7 +14449,8 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
         }
         if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material || !sQLSimpleRiggedTaken.empty() ||
             !sQLPBRRiggedTaken.empty() || !sQLMaskTaken.empty() || !sQLMaskRiggedTaken.empty() ||
-            !sQLPBRMaskTaken.empty() || !sQLPBRMaskRiggedTaken.empty())
+            !sQLPBRMaskTaken.empty() || !sQLPBRMaskRiggedTaken.empty() || !sQLBumpTaken.empty() ||
+            !sQLBumpRiggedTaken.empty())
         {
             ++sQLProbeHandOversFailed;
             // GL draws them (renderGeomDeferred); cleared at the next begin
@@ -14367,6 +14462,8 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
             lost.mask_rigged      = &sQLMaskRiggedTaken;
             lost.pbr_mask         = &sQLPBRMaskTaken;
             lost.pbr_mask_rigged  = &sQLPBRMaskRiggedTaken;
+            lost.bump             = &sQLBumpTaken;
+            lost.bump_rigged      = &sQLBumpRiggedTaken;
             return lost;
         }
     }
@@ -14391,6 +14488,23 @@ std::string ql_vulkan_rigged_draws_info()
                     "start %llu Vulkan, %llu GL",
                     (unsigned long long)sQLRigLastDraws, (unsigned long long)sQLRigLastKept,
                     (unsigned long long)sQLRigDraws, (unsigned long long)sQLRigKept);
+#else
+    return "not on this platform";
+#endif
+}
+
+std::string ql_vulkan_bump_draws_info()
+{
+#if QL_VULKAN_SHADOWS
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanBumpDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanBumpDraws)";
+    }
+    return llformat("main view last frame %llu Vulkan, %llu GL (legacy bump and shiny-bump prims; rigged too with "
+                    "QuasarVulkanRiggedDraws) | since start %llu Vulkan, %llu GL",
+                    (unsigned long long)sQLBumpLastDraws, (unsigned long long)sQLBumpLastKept,
+                    (unsigned long long)sQLBumpDraws, (unsigned long long)sQLBumpKept);
 #else
     return "not on this platform";
 #endif

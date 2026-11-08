@@ -2960,6 +2960,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanBumpDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanProbeDraws or QuasarVulkanMainDraws): legacy bump-mapped prims (bumpiness set in the build tools, with or without shininess; rigged ones too with QuasarVulkanRiggedDraws) are drawn into the G-buffer by Vulkan. Live. Status: "Quasar Vulkan bump draws".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanMaskDraws</key>
         <map>
             <key>Comment</key>

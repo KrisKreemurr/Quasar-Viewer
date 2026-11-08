@@ -213,7 +213,9 @@ public:
     /// with the mesh's second texture coordinates and tangents) and specular map (textures[2], third coordinates)
     /// where it has them, the specular colour and glossiness, environment intensity, the alpha mode (0 none, 2 mask
     /// with alpha_cutoff, 3 emissive) and fullbright.
-    enum GbKind : unsigned { GB_SIMPLE = 0, GB_PBR = 1, GB_MATERIAL = 2 };
+    // GB_BUMP: a legacy bump (LLDrawPoolBump, deferred/bumpF.glsl): textures[0] the diffuse, textures[1] the bump
+    // image (bindBumpMap's: a standard bumpmap or the diffuse's brightness/darkness map); needs tangents.
+    enum GbKind : unsigned { GB_SIMPLE = 0, GB_PBR = 1, GB_MATERIAL = 2, GB_BUMP = 3 };
     struct GbDraw
     {
         float    mvp[16];

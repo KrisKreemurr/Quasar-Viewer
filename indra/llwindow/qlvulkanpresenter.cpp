@@ -7282,7 +7282,7 @@ struct QLVulkanPresenter::Impl
 
     bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
     {
-        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_MATERIAL ||
+        if (!mGbInPass || mGbDraws.size() >= GB_MAX_DRAWS || d.kind > QLVulkanPresenter::GB_BUMP ||
             (d.palette != ~0u && (!mGbSlots[mGbSlot].palettes || d.palette >= (1u << 24))))
         {
             return false;
@@ -7291,10 +7291,15 @@ struct QLVulkanPresenter::Impl
         // A material reads its maps where it has them, and no fourth.
         const bool simple   = d.kind == QLVulkanPresenter::GB_SIMPLE;
         const bool material = d.kind == QLVulkanPresenter::GB_MATERIAL;
+        const bool bump     = d.kind == QLVulkanPresenter::GB_BUMP;  // the diffuse and the bump image alone
         const unsigned textures[4] = { d.textures[0],
                                        simple || (material && !d.has_normal_map) ? 0u : d.textures[1],
-                                       simple || (material && !d.has_specular_map) ? 0u : d.textures[2],
-                                       simple || material ? 0u : d.textures[3] };
+                                       simple || bump || (material && !d.has_specular_map) ? 0u : d.textures[2],
+                                       simple || material || bump ? 0u : d.textures[3] };
+        if (bump && (!textures[0] || !textures[1]))
+        {
+            return false;
+        }
         const bool batched = simple && d.batch_count > 1;
         if (d.batch_count > 16 || (d.batch_count && !batched) || ((simple || material) && !textures[0] && !batched))
         {

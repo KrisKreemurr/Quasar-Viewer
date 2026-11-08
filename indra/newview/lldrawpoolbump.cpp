@@ -362,12 +362,36 @@ bool LLDrawPoolBump::bindBumpMap(LLFace* face, S32 channel)
 bool LLDrawPoolBump::bindBumpMap(U8 bump_code, LLViewerTexture* texture, S32 channel)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
+    LLViewerTexture* bump = bumpImageOf(bump_code, texture);
+
+    if (bump)
+    {
+        if (channel == -2)
+        {
+            gGL.getTextureSlot(1)->bindFast(bump, ALSamplers::AnisoWrap);
+            gGL.getTextureSlot(0)->bindFast(bump, ALSamplers::AnisoWrap);
+        }
+        else
+        {
+            // NOTE: do not use bindFast here (see SL-16222)
+            gGL.getTextureSlot(channel)->bindSampled(bump, ALSamplers::AnisoWrap);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+//static
+LLViewerTexture* LLDrawPoolBump::bumpImageOf(U8 bump_code, LLViewerTexture* texture)
+{
     //Note: texture atlas does not support bump texture now.
     LLViewerFetchedTexture* tex = LLViewerTextureManager::staticCastToFetchedTexture(texture) ;
     if(!tex)
     {
         //if the texture is not a fetched texture
-        return false;
+        return nullptr;
     }
 
     LLViewerTexture* bump = NULL;
@@ -390,23 +414,7 @@ bool LLDrawPoolBump::bindBumpMap(U8 bump_code, LLViewerTexture* texture, S32 cha
         break;
     }
 
-    if (bump)
-    {
-        if (channel == -2)
-        {
-            gGL.getTextureSlot(1)->bindFast(bump, ALSamplers::AnisoWrap);
-            gGL.getTextureSlot(0)->bindFast(bump, ALSamplers::AnisoWrap);
-        }
-        else
-        {
-            // NOTE: do not use bindFast here (see SL-16222)
-            gGL.getTextureSlot(channel)->bindSampled(bump, ALSamplers::AnisoWrap);
-        }
-
-        return true;
-    }
-
-    return false;
+    return bump;
 }
 
 //static
@@ -459,6 +467,10 @@ S32 LLDrawPoolBump::getNumDeferredPasses()
 
 // Whether a bump face's texture can fall below its cutoff. Without an alpha channel the texture reads 1 and the face
 // is never discarded; a texture whose channels are not yet known is taken to have one.
+// Quasar: the draws Vulkan left the deferred pass (QuasarVulkanBumpDraws; pipeline.cpp), unrigged and rigged.
+extern std::vector<LLDrawInfo*>* gQLVulkanBumpLeftovers;
+extern std::vector<LLDrawInfo*>* gQLVulkanBumpRiggedLeftovers;
+
 static bool bump_can_discard(const LLDrawInfo& params)
 {
     if (params.mAlphaMaskCutoff <= 0.f)
@@ -469,7 +481,20 @@ static bool bump_can_discard(const LLDrawInfo& params)
     return !(tex && tex->hasGLTexture() && tex->getComponents() == 3);
 }
 
+//static
+bool LLDrawPoolBump::canDiscard(const LLDrawInfo& params)
+{
+    return bump_can_discard(params);
+}
+
 void LLDrawPoolBump::renderDeferred(S32 pass)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
+    renderDeferredList(false, gQLVulkanBumpLeftovers);
+    renderDeferredList(true, gQLVulkanBumpRiggedLeftovers);
+}
+
+void LLDrawPoolBump::renderDeferredList(bool rigged, const std::vector<LLDrawInfo*>* list)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
 
@@ -477,16 +502,14 @@ void LLDrawPoolBump::renderDeferred(S32 pass)
     // the hoisted GL_FRAMEBUFFER_SRGB (renderGeomDeferred) re-encodes on store.
 
     shiny = true;
-    for (int i = 0; i < 2; ++i)
     {
-        bool rigged = i == 1;
-
         U32 type = rigged ? LLRenderPass::PASS_BUMP_RIGGED : LLRenderPass::PASS_BUMP;
         LLCullResult::drawinfo_iterator begin = gPipeline.beginRenderMap(type);
         LLCullResult::drawinfo_iterator end = gPipeline.endRenderMap(type);
-        if (begin == end)
+        if (list ? list->empty() : begin == end)
         {   // no bump geometry in this pass -- skip the shader bind and texture setup
-            continue;
+            shiny = false;
+            return;
         }
 
         // The faces that cannot be discarded first, under the program without the test, so their depth is written
@@ -551,6 +574,19 @@ void LLDrawPoolBump::renderDeferred(S32 pass)
 
             if (!alpha_mask)
             {
+                if (list)
+                {
+                    for (LLDrawInfo* params : *list)
+                    {
+                        if (bump_can_discard(*params))
+                        {
+                            masked.push_back(params);
+                            continue;
+                        }
+                        draw(*params);
+                    }
+                }
+                else
                 for (LLCullResult::drawinfo_iterator i = begin; i != end; )
                 {
                     LLDrawInfo& params = **i;

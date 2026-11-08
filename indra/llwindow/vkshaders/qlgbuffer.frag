@@ -242,9 +242,39 @@ void writeMaterial(Draw d, uint srgb_bits)
     frag_data3 = vec4(0.0);
 }
 
+// A legacy bump, deferred/bumpF.glsl: the diffuse (decoded) dropped below the cutoff by its own alpha (the tint not yet
+// in it), then tinted; the bump image (read undecoded, as AnisoWrap) in the tangent frame; specular and environment
+// the tint's alpha, the lobe widened by filterSpecularRoughness.
+void writeBump(uint srgb_bits)
+{
+    Draw d = draws[draw_index];
+    vec4 col = texture(diffuseMap, base_color_texcoord);
+    if (MASKED && col.a < d.material.y - MASK_BIAS)
+    {
+        discard;
+    }
+    col *= vertex_color;
+    vec3 norm = ((srgb_bits & 2u) != 0u ? sampleRaw(bumpMap, base_color_texcoord)
+                                        : texture(bumpMap, base_color_texcoord)).rgb * 2.0 - 1.0;
+    vec3 vN = vary_normal;
+    vec3 vT = vary_tangent;
+    vec3 vB = vary_sign * cross(vN, vT);
+    vec3 nvn = normalize(norm.x * vT + norm.y * vB + norm.z * vN);
+    float glossiness = 1.0 - filterSpecularRoughness(1.0 - vertex_color.a, nvn);
+    frag_data0 = vec4(col.rgb, 0.0);
+    frag_data1 = vec4(vec3(vertex_color.a), glossiness);
+    frag_data2 = vec4(octEncode(nvn), vertex_color.a, GBUFFER_FLAG_HAS_ATMOS);
+    frag_data3 = vec4(0.0);
+}
+
 void main()
 {
     Draw d = draws[draw_index];
+    if (d.pbr.z > 2.5)
+    {
+        writeBump(uint(d.pbr.w + 0.5));
+        return;
+    }
     if (d.pbr.z > 1.5)
     {
         writeMaterial(d, uint(d.pbr.w + 0.5));

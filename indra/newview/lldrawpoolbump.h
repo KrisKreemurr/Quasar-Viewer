@@ -79,6 +79,14 @@ public:
 
 private:
     static bool bindBumpMap(U8 bump_code, LLViewerTexture* tex, S32 channel);
+    // Quasar: the bump image bindBumpMap binds for a draw, its texture stats noted as bindBumpMap notes them; null
+    // where it binds none.
+    static LLViewerTexture* bumpImageOf(U8 bump_code, LLViewerTexture* tex);
+    // Quasar: whether a draw takes the alpha-mask program (its cutoff set and its diffuse not opaque by format).
+    static bool canDiscard(const LLDrawInfo& params);
+    // Quasar: the deferred pass's draws, rigged or not, from the render map (list null) or from a list (the draws
+    // Vulkan left, QuasarVulkanBumpDraws; or those it was to draw, where its hand-over failed).
+    void renderDeferredList(bool rigged, const std::vector<LLDrawInfo*>* list);
     bool mRigged = false; // if true, doing a rigged pass
 
 };

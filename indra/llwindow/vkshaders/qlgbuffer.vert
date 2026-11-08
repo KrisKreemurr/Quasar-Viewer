@@ -188,6 +188,14 @@ void main()
         vary_tangent = vec3(1.0, 0.0, 0.0);
         vary_sign = 1.0;
     }
+    else if (d.pbr.z > 2.5)
+    {
+        // Legacy bump (deferred/bumpV.glsl): one coordinate for both maps, the tangent by the normal matrix.
+        base_color_texcoord = (d.texture_matrix * vec4(texcoord0, 0, 1)).xy;
+        normal_texcoord = metallic_roughness_texcoord = emissive_texcoord = base_color_texcoord;
+        vary_tangent = normalize(mat3(d.normal_matrix) * object_tangent);
+        vary_sign = tangent.w;
+    }
     else if (d.pbr.z > 1.5)
     {
         // Legacy material.
