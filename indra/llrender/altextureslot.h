@@ -133,6 +133,9 @@ public:
     // where nothing samples through the slot; a bind that will be sampled goes through
     // bindSampled/bindFast so the caller names how.
     bool bind(LLImageGL* texture, bool for_rendering = false, bool forceBind = false, S32 usename = 0);
+    // Quasar: this unit made the active one (glActiveTexture), for a caller that must create storage through unit 0
+    // (LLImageGL::allocateTextureStorage gives Vulkan's memory the name bound there only while unit 0 is active).
+    void makeActive() { activate(); }
 
     // Bind AND select the sampler in one step. The caller names the whole sampling mode;
     // the texture contributes nothing -- it carries no sampling state to contribute.
