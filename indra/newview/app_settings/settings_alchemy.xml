@@ -2960,6 +2960,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanTerrainDraws</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanProbeDraws or QuasarVulkanMainDraws): the ground (four-texture terrain, flat or triplanar) is tessellated and drawn into the G-buffer by Vulkan. PBR terrain, hex tiling, pinned tessellation and the parcel owners overlay stay GL's. Live. Status: "Quasar Vulkan terrain maps" (its "draws" part).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanBumpDraws</key>
         <map>
             <key>Comment</key>

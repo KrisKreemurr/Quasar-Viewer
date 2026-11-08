@@ -177,6 +177,7 @@
 #endif
 #include "qlexternalstorage.h"  // Quasar: render targets in Vulkan's memory (QuasarVulkanTargets)
 #include "alterrainsurfacemaps.h"  // Quasar: the terrain maps Vulkan reads
+#include "lldrawpoolterrain.h"
 #include "llsurface.h"
 #if LL_CLANG
 #pragma clang diagnostic pop
@@ -5608,6 +5609,7 @@ struct QLVulkanLost
     const std::vector<LLDrawInfo*>* pbr_mask_rigged = nullptr;
     const std::vector<LLDrawInfo*>* bump = nullptr;  // the legacy bumps (QuasarVulkanBumpDraws)
     const std::vector<LLDrawInfo*>* bump_rigged = nullptr;
+    bool                            terrain = false;  // the terrain Vulkan took (QuasarVulkanTerrainDraws)
 };
 extern bool gQLVulkanRiggedMaterials;
 static constexpr U32 QL_MATERIAL_PASS_COUNT = 12;  // LLDrawPoolMaterials' unrigged passes
@@ -5929,6 +5931,14 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
                 gGLLastMatrix = NULL;
                 gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
             }
+        }
+
+        // The terrain Vulkan was to draw, as its pools draw it.
+        if (lost.terrain)
+        {
+            LLDrawPoolTerrain::qlDrawLost();
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
         }
 
         // The legacy bumps Vulkan was to draw, as the bump pool draws them.
@@ -13703,7 +13713,7 @@ static U64 sQLMainLastDraws = 0, sQLMainLastKept = 0;  // the last main view's
 
 #if QL_VULKAN_SHADOWS
 // The inverse transpose of a model-view's upper 3x3, as the normal matrix, column-major in a 4x4.
-static void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])
+void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16])  // and lldrawpoolterrain.cpp
 {
     const F32* m = modelview.getF32ptr();
     auto a = [m](int r, int c) { return m[c * 4 + r]; };
@@ -13779,7 +13789,7 @@ static U64 sQLBumpLastDraws = 0, sQLBumpLastKept = 0, sQLBumpDraws = 0, sQLBumpK
 
 #if QL_VULKAN_SHADOWS
 // The levels of a texture GL samples: as far as it has uploaded (GL_TEXTURE_MAX_LEVEL, createGLTexture).
-static U32 ql_sampled_levels(const LLImageGL* image)
+U32 ql_sampled_levels(const LLImageGL* image)  // and lldrawpoolterrain.cpp
 {
     return image->getUseMipMaps() ? (U32)llmax(1, image->getMaxDiscardLevel() - image->getDiscardLevel() + 1) : 1u;
 }
@@ -13811,6 +13821,7 @@ static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& nam
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 {
     sQLProbeDrawsOpen = false;
+    LLDrawPoolTerrain::qlBeginPass(main_view);
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
     gQLVulkanMaterialLeftovers = nullptr;
@@ -14449,10 +14460,11 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
         {
             any_material = any_material || (materials_taken && !sQLMatTaken[m].empty());
         }
+        const bool terrain_taken = LLDrawPoolTerrain::qlTakenCount() > 0;
         if (!sQLProbeTaken.empty() || !sQLPBRTaken.empty() || any_material || !sQLSimpleRiggedTaken.empty() ||
             !sQLPBRRiggedTaken.empty() || !sQLMaskTaken.empty() || !sQLMaskRiggedTaken.empty() ||
             !sQLPBRMaskTaken.empty() || !sQLPBRMaskRiggedTaken.empty() || !sQLBumpTaken.empty() ||
-            !sQLBumpRiggedTaken.empty())
+            !sQLBumpRiggedTaken.empty() || terrain_taken)
         {
             ++sQLProbeHandOversFailed;
             // GL draws them (renderGeomDeferred); cleared at the next begin
@@ -14466,6 +14478,7 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
             lost.pbr_mask_rigged  = &sQLPBRMaskRiggedTaken;
             lost.bump             = &sQLBumpTaken;
             lost.bump_rigged      = &sQLBumpRiggedTaken;
+            lost.terrain          = terrain_taken;
             return lost;
         }
     }
@@ -14495,6 +14508,8 @@ std::string ql_vulkan_rigged_draws_info()
 #endif
 }
 
+std::string ql_vulkan_terrain_draws_info();  // lldrawpoolterrain.cpp (QuasarVulkanTerrainDraws)
+
 // Quasar: terrain step 1 -- the loaded regions' terrain maps (heights, composition) in Vulkan's memory, which the
 // terrain Vulkan is to draw reads (QuasarVulkanTextures shares them as it shares the fetched textures).
 std::string ql_vulkan_terrain_maps_info()
@@ -14517,7 +14532,8 @@ std::string ql_vulkan_terrain_maps_info()
         heights += (height && gQLExternalStorage->owns(height)) ? 1 : 0;
         compositions += (composition && gQLExternalStorage->owns(composition)) ? 1 : 0;
     }
-    return llformat("%u region(s) drawn | heights in Vulkan's memory %u, composition %u", regions, heights, compositions);
+    return llformat("%u region(s) drawn | heights in Vulkan's memory %u, composition %u", regions, heights, compositions) +
+           " | draws: " + ql_vulkan_terrain_draws_info();
 }
 
 std::string ql_vulkan_bump_draws_info()

@@ -71,7 +71,15 @@ public:
     static F32 sPBRDetailScale; // textures per meter
     static F32 sLODFactor; // RenderTerrainLODFactor squared; scales the tessellation density
 
+    // Quasar (QuasarVulkanTerrainDraws): the four-texture terrain drawn into the G-buffer by Vulkan, from inside
+    // renderDeferred while the hand-over is open (pipeline.cpp's ql_vulkan_probe_draws_begin). A pass's taken pools
+    // are cleared as it begins; where its hand-over fails GL draws them after all (qlDrawLost).
+    static void qlBeginPass(bool main_view);
+    static U32  qlTakenCount();
+    static void qlDrawLost();
+
 protected:
+    bool qlVulkanDraw();  // true where Vulkan took this region's terrain
     void boostTerrainDetailTextures();
     // The region's surface maps and the tessellation uniforms, for the bound
     // program; every pass that draws terrain binds the same ones.

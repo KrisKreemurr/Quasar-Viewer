@@ -245,6 +245,35 @@ public:
         unsigned batch_count = 0;
     };
     static bool gbufferDraw(const GbDraw& draw);
+
+    /// A region's four-texture terrain (QuasarVulkanTerrainDraws), as LLDrawPoolTerrain's renderFullShaderTextures
+    /// draws it through gDeferredTerrainProgram: its patches tessellated from its height map. Flat or triplanar
+    /// projection; GL keeps hex tiling, pinned levels and the parcel overlay.
+    struct TerrainDraw
+    {
+        float mvp[16];               // its model-view-projection, its render matrix applied
+        float normal_matrix[16];
+        float tess_clip[16];         // terrain_tess_clip (a capture's; unread where raster is 0)
+        float tess_clip_origin[4];
+        float tess_origin[3];        // terrain_tess_origin: the camera, region-local
+        float density = 0.f;         // terrain_tess_density
+        float grid_scale = 1.f;      // metres per grid
+        float region_scale = 256.f;  // the region's width
+        bool  smoothing = false;
+        float triplanar_blend = 8.f;
+        float plane_s[4];            // object_plane_s, object_plane_t: the detail's texgen
+        float plane_t[4];
+        float raster[2] = {};        // terrain_tess_raster
+        unsigned planar_count = 1;   // TERRAIN_PLANAR_TEXTURE_SAMPLE_COUNT: 1 or 3
+        unsigned height = 0, composition = 0;  // ALTerrainSurfaceMaps' names
+        unsigned ramp = 0, ramp_levels = 1;
+        unsigned detail[4] = {};
+        unsigned detail_levels[4] = {};
+        const float* patches = nullptr;  // per patch: its region-local corner x, y and its edge
+        unsigned patch_count = 0;
+    };
+    static bool gbufferTerrain(const TerrainDraw& draw);
+    static std::string terrainInfo();
     static bool gbufferEnd();
     static void gbufferAbandon();
     static std::string gbufferInfo();

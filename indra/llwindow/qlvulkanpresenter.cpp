@@ -426,6 +426,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCreateComputePipelines);
     QL_VK_FN(vkDestroyPipeline);
     QL_VK_FN(vkCreateDescriptorPool);
+    QL_VK_FN(vkResetDescriptorPool);
     QL_VK_FN(vkDestroyDescriptorPool);
     QL_VK_FN(vkAllocateDescriptorSets);
     QL_VK_FN(vkUpdateDescriptorSets);
@@ -689,6 +690,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCreateComputePipelines);
         QL_VK_DEVICE(vkDestroyPipeline);
         QL_VK_DEVICE(vkCreateDescriptorPool);
+        QL_VK_DEVICE(vkResetDescriptorPool);
         QL_VK_DEVICE(vkDestroyDescriptorPool);
         QL_VK_DEVICE(vkAllocateDescriptorSets);
         QL_VK_DEVICE(vkUpdateDescriptorSets);
@@ -1188,7 +1190,9 @@ struct QLVulkanPresenter::Impl
         enabled.multiDrawIndirect         = supported.multiDrawIndirect;
         enabled.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
         enabled.samplerAnisotropy         = supported.samplerAnisotropy;  // the G-buffer's textures, as GL filters them
+        enabled.tessellationShader        = supported.tessellationShader;  // the terrain Vulkan draws
         mHasAniso        = enabled.samplerAnisotropy == VK_TRUE;
+        mHasTessellation = enabled.tessellationShader == VK_TRUE;
         mHasDepthClamp   = enabled.depthClamp == VK_TRUE;
         mHasMultiIndirect = enabled.multiDrawIndirect == VK_TRUE && enabled.drawIndirectFirstInstance == VK_TRUE;
 
@@ -6284,6 +6288,7 @@ struct QLVulkanPresenter::Impl
         VkRenderPass  pass = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         VkPipeline    pipelines[8] = {};  // [masked * 4 + greater * 2 + double-sided]
+        VkPipeline    terrain[2] = {};    // [greater] (QuasarVulkanTerrainDraws), where the terrain's objects were made
         bool          normHdr = false;    // the normals attachment is RGBA16 (GL's GBUFFER_NORM_HDR)
     };
     struct GbQueued
@@ -6304,6 +6309,38 @@ struct QLVulkanPresenter::Impl
     // A set's images: the four slots, then a batch's sixteen (white where there is none).
     static constexpr U32 GB_SET_IMAGES = 20;
     using GbMatKey = std::array<VkImage, GB_SET_IMAGES>;
+
+    // ---- the terrain in the G-buffer (QuasarVulkanTerrainDraws; terrain step 2) ----
+    // A region a draw: its patches (corner, edge) instanced over four corner vertices with no vertex buffer, tessellated
+    // from its height map (qlterrain.vert/.tesc/.tese/.frag). Each slot has its regions' data and patches in a host
+    // buffer of its own, and a descriptor pool for their textures, reset as the slot is taken again.
+    static constexpr U32          TR_MAX_REGIONS = 16;
+    static constexpr U32          TR_MAX_PATCHES = 8192;
+    static constexpr VkDeviceSize TR_REGION_BYTES = 288;  // qlterrain's Region
+    static constexpr VkDeviceSize TR_PATCHES_AT = ((VkDeviceSize)TR_MAX_REGIONS * TR_REGION_BYTES + 255) & ~(VkDeviceSize)255;
+    static constexpr VkDeviceSize TR_SLOT_BYTES =
+        (TR_PATCHES_AT + (VkDeviceSize)TR_MAX_PATCHES * 16 + 255) & ~(VkDeviceSize)255;
+    struct TrQueued
+    {
+        VkDescriptorSet set;
+        U32             first, count;
+    };
+    bool                  mHasTessellation = false;
+    bool                  mTrReady = false;
+    std::string           mTrNote = "not made yet";
+    VkDescriptorSetLayout mTrSetLayout = VK_NULL_HANDLE, mTrTexLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mTrLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      mTrPool = VK_NULL_HANDLE;
+    VkDescriptorPool      mTrTexPools[16] = {};  // a slot's (GB_SLOTS)
+    VkDescriptorSet       mTrSets[16] = {};      // a slot's set 0
+    VkSampler             mTrPointClamp = VK_NULL_HANDLE, mTrLinearClamp = VK_NULL_HANDLE, mTrAnisoClamp = VK_NULL_HANDLE;
+    VkShaderModule        mTrModules[4] = {};    // vertex, control, evaluation, fragment
+    VkBuffer              mTrHost = VK_NULL_HANDLE;
+    VkDeviceMemory        mTrHostMemory = VK_NULL_HANDLE;
+    U8*                   mTrHostMapped = nullptr;
+    std::vector<TrQueued> mTrQueued;
+    U32                   mTrPatches = 0;       // the open pass's
+    U32                   mTrRegionsLast = 0, mTrRegionsNow = 0, mTrPatchesLast = 0, mTrPatchesNow = 0;
 
     bool        mGbTried = false, mGbReady = false;
     std::string mGbNote = "off (QuasarVulkanProbeDraws)";
@@ -6573,6 +6610,7 @@ struct QLVulkanPresenter::Impl
         }
         mGbReady = true;
         mGbNote  = "ready";
+        mTrReady = createTrObjects();
         LL_INFOS("Vulkan") << "Probe draws in Vulkan ready: an arena of " << (mGbArena.totalBytes() >> 20) << " MB, "
                            << GB_SLOTS << " slots of " << GB_MAX_DRAWS << " draws" << LL_ENDL;
         return true;
@@ -6685,6 +6723,10 @@ struct QLVulkanPresenter::Impl
         {
             if (p) vkDestroyPipeline(mDevice, p, nullptr);
         }
+        for (VkPipeline& p : t.terrain)
+        {
+            if (p) vkDestroyPipeline(mDevice, p, nullptr);
+        }
         if (t.framebuffer) vkDestroyFramebuffer(mDevice, t.framebuffer, nullptr);
         if (t.pass) vkDestroyRenderPass(mDevice, t.pass, nullptr);
         for (VkImageView& v : t.views)
@@ -6769,6 +6811,7 @@ struct QLVulkanPresenter::Impl
             destroyGbTarget(t);
         }
         mGbTargets.clear();
+        destroyTrObjects();
         mGbMatSets.clear();  // the pool goes, and its sets with it
         mGbMatUse.clear();
         destroyGbDefault(mGbWhite);
@@ -7090,6 +7133,17 @@ struct QLVulkanPresenter::Impl
                 return -1;
             }
         }
+        if (mTrReady)
+        {
+            for (U32 g = 0; g < 2; ++g)
+            {
+                if (!createTrPipeline(t, g != 0, t.terrain[g]))
+                {
+                    t.terrain[0] = t.terrain[1] = VK_NULL_HANDLE;  // the terrain stays GL's here; the rest is drawn
+                    break;
+                }
+            }
+        }
         mGbTargets.push_back(t);
         LL_INFOS("Vulkan") << "Probe draws in Vulkan: a " << width << "x" << height << " G-buffer of " << color_count
                            << " colour attachments" << LL_ENDL;
@@ -7210,6 +7264,9 @@ struct QLVulkanPresenter::Impl
             mGbDrawsLast = mGbDrawsNow;
             mGbTexturesLast = mGbTexturesNow;
             mGbPassesNow = mGbDrawsNow = mGbTexturesNow = 0;
+            mTrRegionsLast = mTrRegionsNow;
+            mTrPatchesLast = mTrPatchesNow;
+            mTrRegionsNow = mTrPatchesNow = 0;
         }
     }
 
@@ -7266,6 +7323,12 @@ struct QLVulkanPresenter::Impl
         mGbPassTextures.clear();
         mGbPassImages.clear();
         mGbPassRigged = false;
+        mTrQueued.clear();
+        mTrPatches = 0;
+        if (mTrReady)
+        {
+            vkResetDescriptorPool(mDevice, mTrTexPools[mGbSlot], 0);  // the slot is idle: its sets are done with
+        }
         mGbInPass   = true;
         return true;
     }
@@ -7282,6 +7345,412 @@ struct QLVulkanPresenter::Impl
                           index_count,
                           base_vertex, base_index, uv_offset, color_offset, normal_offset, true, tangent_offset,
                           uv1_offset, uv2_offset);
+    }
+
+    static constexpr VkShaderStageFlags TR_STAGES = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                                    VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                                                    VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    bool trFail(const char* what)
+    {
+        mTrNote = std::string("could not be made: ") + what;
+        LL_WARNS("Vulkan") << "Terrain in Vulkan " << mTrNote << LL_ENDL;
+        destroyTrObjects();
+        return false;
+    }
+
+    // After the G-buffer's objects (its slots, its anisotropic sampler for the detail textures).
+    bool createTrObjects()
+    {
+        if (!mHasTessellation)
+        {
+            mTrNote = "the device has no tessellation";
+            return false;
+        }
+        // Set 0: the slot's regions (every stage) and patches (the vertex stage).
+        VkDescriptorSetLayoutBinding set0[2] = {};
+        for (U32 b = 0; b < 2; ++b)
+        {
+            set0[b].binding         = b;
+            set0[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            set0[b].descriptorCount = 1;
+            set0[b].stageFlags      = TR_STAGES;
+        }
+        VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        set_info.bindingCount = 2;
+        set_info.pBindings    = set0;
+        if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mTrSetLayout) != VK_SUCCESS)
+        {
+            mTrSetLayout = VK_NULL_HANDLE;
+            return trFail("vkCreateDescriptorSetLayout (regions)");
+        }
+        // Set 1: the heights, the composition, the alpha ramp, the four details.
+        VkDescriptorSetLayoutBinding set1[7] = {};
+        for (U32 b = 0; b < 7; ++b)
+        {
+            set1[b].binding         = b;
+            set1[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            set1[b].descriptorCount = 1;
+            set1[b].stageFlags      = TR_STAGES;
+        }
+        set_info.bindingCount = 7;
+        set_info.pBindings    = set1;
+        if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &mTrTexLayout) != VK_SUCCESS)
+        {
+            mTrTexLayout = VK_NULL_HANDLE;
+            return trFail("vkCreateDescriptorSetLayout (textures)");
+        }
+        const VkDescriptorSetLayout layouts[2] = { mTrSetLayout, mTrTexLayout };
+        const VkPushConstantRange push = { TR_STAGES, 0, 16 };
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layout_info.setLayoutCount         = 2;
+        layout_info.pSetLayouts            = layouts;
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges    = &push;
+        if (vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &mTrLayout) != VK_SUCCESS)
+        {
+            mTrLayout = VK_NULL_HANDLE;
+            return trFail("vkCreatePipelineLayout");
+        }
+        // The regions' host buffer, a slot's share each.
+        VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        host_info.size        = TR_SLOT_BYTES * GB_SLOTS;
+        host_info.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        host_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &host_info, nullptr, &mTrHost) != VK_SUCCESS)
+        {
+            mTrHost = VK_NULL_HANDLE;
+            return trFail("vkCreateBuffer");
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, mTrHost, &req);
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (alloc.memoryTypeIndex == U32_MAX || vkAllocateMemory(mDevice, &alloc, nullptr, &mTrHostMemory) != VK_SUCCESS)
+        {
+            mTrHostMemory = VK_NULL_HANDLE;
+            return trFail("no host memory");
+        }
+        vkBindBufferMemory(mDevice, mTrHost, mTrHostMemory, 0);
+        void* mapped = nullptr;
+        if (vkMapMemory(mDevice, mTrHostMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return trFail("vkMapMemory");
+        }
+        mTrHostMapped = static_cast<U8*>(mapped);
+        const VkDescriptorPoolSize buffers = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, GB_SLOTS * 2 };
+        VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool_info.maxSets       = GB_SLOTS;
+        pool_info.poolSizeCount = 1;
+        pool_info.pPoolSizes    = &buffers;
+        if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &mTrPool) != VK_SUCCESS)
+        {
+            mTrPool = VK_NULL_HANDLE;
+            return trFail("vkCreateDescriptorPool");
+        }
+        const VkDescriptorPoolSize samplers = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TR_MAX_REGIONS * 7 };
+        VkDescriptorPoolCreateInfo tex_pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        tex_pool_info.maxSets       = TR_MAX_REGIONS;
+        tex_pool_info.poolSizeCount = 1;
+        tex_pool_info.pPoolSizes    = &samplers;
+        for (U32 i = 0; i < GB_SLOTS; ++i)
+        {
+            if (vkCreateDescriptorPool(mDevice, &tex_pool_info, nullptr, &mTrTexPools[i]) != VK_SUCCESS)
+            {
+                mTrTexPools[i] = VK_NULL_HANDLE;
+                return trFail("vkCreateDescriptorPool (textures)");
+            }
+            VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            set_alloc.descriptorPool     = mTrPool;
+            set_alloc.descriptorSetCount = 1;
+            set_alloc.pSetLayouts        = &mTrSetLayout;
+            if (vkAllocateDescriptorSets(mDevice, &set_alloc, &mTrSets[i]) != VK_SUCCESS)
+            {
+                return trFail("vkAllocateDescriptorSets");
+            }
+            const VkDescriptorBufferInfo infos[2] = {
+                { mTrHost, TR_SLOT_BYTES * i, TR_PATCHES_AT },
+                { mTrHost, TR_SLOT_BYTES * i + TR_PATCHES_AT, (VkDeviceSize)TR_MAX_PATCHES * 16 },
+            };
+            VkWriteDescriptorSet writes[2] = {};
+            for (U32 b = 0; b < 2; ++b)
+            {
+                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[b].dstSet          = mTrSets[i];
+                writes[b].dstBinding      = b;
+                writes[b].descriptorCount = 1;
+                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[b].pBufferInfo     = &infos[b];
+            }
+            vkUpdateDescriptorSets(mDevice, 2, writes, 0, nullptr);
+        }
+        // GL's samplers for them: the heights PointClamp (texelFetch and textureGather ignore the filter, not the
+        // edge), the composition BilinearClamp, the ramp AnisoClamp; the details AnisoWrapSRGB, the G-buffer's own.
+        VkSamplerCreateInfo sampler_info = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sampler_info.magFilter    = VK_FILTER_NEAREST;
+        sampler_info.minFilter    = VK_FILTER_NEAREST;
+        sampler_info.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(mDevice, &sampler_info, nullptr, &mTrPointClamp) != VK_SUCCESS)
+        {
+            mTrPointClamp = VK_NULL_HANDLE;
+            return trFail("vkCreateSampler");
+        }
+        sampler_info.magFilter = sampler_info.minFilter = VK_FILTER_LINEAR;
+        if (vkCreateSampler(mDevice, &sampler_info, nullptr, &mTrLinearClamp) != VK_SUCCESS)
+        {
+            mTrLinearClamp = VK_NULL_HANDLE;
+            return trFail("vkCreateSampler");
+        }
+        sampler_info.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler_info.anisotropyEnable = (mHasAniso && mGbAnisotropy > 1.f) ? VK_TRUE : VK_FALSE;
+        sampler_info.maxAnisotropy    = mHasAniso ? llclamp(mGbAnisotropy, 1.f, 16.f) : 1.f;
+        sampler_info.maxLod           = VK_LOD_CLAMP_NONE;
+        if (vkCreateSampler(mDevice, &sampler_info, nullptr, &mTrAnisoClamp) != VK_SUCCESS)
+        {
+            mTrAnisoClamp = VK_NULL_HANDLE;
+            return trFail("vkCreateSampler");
+        }
+        const struct
+        {
+            const uint32_t* code;
+            size_t          size;
+        } codes[4] = { { ql_spv_qlterrain_vert, sizeof(ql_spv_qlterrain_vert) },
+                       { ql_spv_qlterrain_tesc, sizeof(ql_spv_qlterrain_tesc) },
+                       { ql_spv_qlterrain_tese, sizeof(ql_spv_qlterrain_tese) },
+                       { ql_spv_qlterrain_frag, sizeof(ql_spv_qlterrain_frag) } };
+        for (U32 i = 0; i < 4; ++i)
+        {
+            VkShaderModuleCreateInfo module_info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            module_info.codeSize = codes[i].size;
+            module_info.pCode    = codes[i].code;
+            if (vkCreateShaderModule(mDevice, &module_info, nullptr, &mTrModules[i]) != VK_SUCCESS)
+            {
+                mTrModules[i] = VK_NULL_HANDLE;
+                return trFail("vkCreateShaderModule");
+            }
+        }
+        mTrNote = "ready";
+        LL_INFOS("Vulkan") << "Terrain in Vulkan ready" << LL_ENDL;
+        return true;
+    }
+
+    void destroyTrObjects()
+    {
+        mTrReady = false;
+        if (!mDevice)
+        {
+            return;
+        }
+        for (VkShaderModule& m : mTrModules)
+        {
+            if (m) vkDestroyShaderModule(mDevice, m, nullptr);
+            m = VK_NULL_HANDLE;
+        }
+        for (VkSampler* sampler : { &mTrPointClamp, &mTrLinearClamp, &mTrAnisoClamp })
+        {
+            if (*sampler) vkDestroySampler(mDevice, *sampler, nullptr);
+            *sampler = VK_NULL_HANDLE;
+        }
+        for (U32 i = 0; i < GB_SLOTS; ++i)
+        {
+            if (mTrTexPools[i]) vkDestroyDescriptorPool(mDevice, mTrTexPools[i], nullptr);
+            mTrTexPools[i] = VK_NULL_HANDLE;
+            mTrSets[i]     = VK_NULL_HANDLE;
+        }
+        if (mTrPool) vkDestroyDescriptorPool(mDevice, mTrPool, nullptr);
+        mTrPool = VK_NULL_HANDLE;
+        if (mTrHostMapped)
+        {
+            vkUnmapMemory(mDevice, mTrHostMemory);
+            mTrHostMapped = nullptr;
+        }
+        if (mTrHost) vkDestroyBuffer(mDevice, mTrHost, nullptr);
+        if (mTrHostMemory) vkFreeMemory(mDevice, mTrHostMemory, nullptr);
+        mTrHost = VK_NULL_HANDLE;
+        mTrHostMemory = VK_NULL_HANDLE;
+        if (mTrLayout) vkDestroyPipelineLayout(mDevice, mTrLayout, nullptr);
+        if (mTrSetLayout) vkDestroyDescriptorSetLayout(mDevice, mTrSetLayout, nullptr);
+        if (mTrTexLayout) vkDestroyDescriptorSetLayout(mDevice, mTrTexLayout, nullptr);
+        mTrLayout = VK_NULL_HANDLE;
+        mTrSetLayout = mTrTexLayout = VK_NULL_HANDLE;
+    }
+
+    // As createGbPipeline, for patches of four corners with no vertex input, both faces drawn (the winding through
+    // Vulkan's tessellation domain is no concern then; GL draws the terrain under its back-face cull, which no view of
+    // it from above reaches).
+    bool createTrPipeline(const GbTarget& t, bool greater, VkPipeline& pipeline)
+    {
+        VkPipelineShaderStageCreateInfo stages[4] = {};
+        const VkShaderStageFlagBits stage_bits[4] = { VK_SHADER_STAGE_VERTEX_BIT,
+                                                      VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+                                                      VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                                      VK_SHADER_STAGE_FRAGMENT_BIT };
+        for (U32 i = 0; i < 4; ++i)
+        {
+            stages[i].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[i].stage  = stage_bits[i];
+            stages[i].module = mTrModules[i];
+            stages[i].pName  = "main";
+        }
+        VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+        VkPipelineTessellationStateCreateInfo tess = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+        tess.patchControlPoints = 4;
+        VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        viewport_state.viewportCount = 1;
+        viewport_state.scissorCount  = 1;
+        VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode    = VK_CULL_MODE_NONE;
+        raster.frontFace   = VK_FRONT_FACE_CLOCKWISE;
+        raster.lineWidth   = 1.f;
+        VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        depth.depthTestEnable  = VK_TRUE;
+        depth.depthWriteEnable = VK_TRUE;
+        depth.depthCompareOp   = greater ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_LESS;
+        VkPipelineColorBlendAttachmentState blend_attachments[4] = {};
+        for (VkPipelineColorBlendAttachmentState& b : blend_attachments)
+        {
+            b.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                               VK_COLOR_COMPONENT_A_BIT;
+        }
+        VkPipelineColorBlendStateCreateInfo blend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        blend.attachmentCount = t.colors;
+        blend.pAttachments    = blend_attachments;
+        const VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates    = dynamic_states;
+        VkGraphicsPipelineCreateInfo pipeline_info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pipeline_info.stageCount          = 4;
+        pipeline_info.pStages             = stages;
+        pipeline_info.pVertexInputState   = &vertex_input;
+        pipeline_info.pInputAssemblyState = &assembly;
+        pipeline_info.pTessellationState  = &tess;
+        pipeline_info.pViewportState      = &viewport_state;
+        pipeline_info.pRasterizationState = &raster;
+        pipeline_info.pMultisampleState   = &multisample;
+        pipeline_info.pDepthStencilState  = &depth;
+        pipeline_info.pColorBlendState    = &blend;
+        pipeline_info.pDynamicState       = &dynamic;
+        pipeline_info.layout              = mTrLayout;
+        pipeline_info.renderPass          = t.pass;
+        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        {
+            pipeline = VK_NULL_HANDLE;
+            mTrNote = "its pipeline could not be made";
+            LL_WARNS("Vulkan") << "Terrain in Vulkan: vkCreateGraphicsPipelines failed" << LL_ENDL;
+            return false;
+        }
+        return true;
+    }
+
+    // A region's terrain into the open pass. False where Vulkan cannot draw it (its maps or textures not Vulkan's,
+    // the pass full, no pipeline): GL draws it.
+    bool gbufferTerrain(const QLVulkanPresenter::TerrainDraw& d)
+    {
+        if (!mGbInPass || !mTrReady || mTrQueued.size() >= TR_MAX_REGIONS || !d.patch_count ||
+            mTrPatches + d.patch_count > TR_MAX_PATCHES || !mGbTargets[mGbTarget].terrain[mGbGreater ? 1 : 0])
+        {
+            return false;
+        }
+        VkFormat height_format = VK_FORMAT_UNDEFINED, composition_format = VK_FORMAT_UNDEFINED;
+        VkImageView views[7] = {};
+        VkImage images[7] = {};
+        GLuint names[7] = { d.height, d.composition, d.ramp, d.detail[0], d.detail[1], d.detail[2], d.detail[3] };
+        views[0] = d.height ? extView(d.height, VK_IMAGE_ASPECT_COLOR_BIT, &height_format, 1) : VK_NULL_HANDLE;
+        views[1] = d.composition ? extView(d.composition, VK_IMAGE_ASPECT_COLOR_BIT, &composition_format, 1)
+                                 : VK_NULL_HANDLE;
+        if (!views[0] || !views[1] || height_format != VK_FORMAT_R32_SFLOAT ||
+            composition_format != VK_FORMAT_R16G16_SFLOAT)
+        {
+            return false;
+        }
+        images[0] = extImageOf(d.height);
+        images[1] = extImageOf(d.composition);
+        for (U32 i = 2; i < 7; ++i)
+        {
+            bool srgb = false;
+            const U32 levels = i == 2 ? d.ramp_levels : d.detail_levels[i - 3];
+            views[i] = names[i] ? gbSlotView(names[i], levels, 0, images[i], srgb) : VK_NULL_HANDLE;
+            if (!views[i])
+            {
+                return false;
+            }
+        }
+        VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        set_alloc.descriptorPool     = mTrTexPools[mGbSlot];
+        set_alloc.descriptorSetCount = 1;
+        set_alloc.pSetLayouts        = &mTrTexLayout;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(mDevice, &set_alloc, &set) != VK_SUCCESS)
+        {
+            return false;
+        }
+        const VkSampler samplers[7] = { mTrPointClamp, mTrLinearClamp, mTrAnisoClamp, mGbSampler,
+                                        mGbSampler,    mGbSampler,     mGbSampler };
+        VkDescriptorImageInfo infos[7];
+        VkWriteDescriptorSet writes[7];
+        for (U32 i = 0; i < 7; ++i)
+        {
+            infos[i] = { samplers[i], views[i], VK_IMAGE_LAYOUT_GENERAL };
+            writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            writes[i].dstSet          = set;
+            writes[i].dstBinding      = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo      = &infos[i];
+        }
+        vkUpdateDescriptorSets(mDevice, 7, writes, 0, nullptr);
+
+        // The region's data (qlterrain's Region) and its patches.
+        const U32 region = (U32)mTrQueued.size();
+        F32* out = reinterpret_cast<F32*>(mTrHostMapped + TR_SLOT_BYTES * mGbSlot + TR_REGION_BYTES * region);
+        memcpy(out + 0, d.mvp, 16 * sizeof(F32));
+        memcpy(out + 16, d.normal_matrix, 16 * sizeof(F32));
+        memcpy(out + 32, d.tess_clip, 16 * sizeof(F32));
+        memcpy(out + 48, d.tess_clip_origin, 4 * sizeof(F32));
+        const F32 rest[20] = { d.tess_origin[0], d.tess_origin[1], d.tess_origin[2], d.density,
+                               d.grid_scale, d.region_scale, d.smoothing ? 1.f : 0.f, d.triplanar_blend,
+                               d.plane_s[0], d.plane_s[1], d.plane_s[2], d.plane_s[3],
+                               d.plane_t[0], d.plane_t[1], d.plane_t[2], d.plane_t[3],
+                               d.raster[0], d.raster[1], (F32)d.planar_count, 0.f };
+        memcpy(out + 52, rest, sizeof(rest));
+        F32* patches = reinterpret_cast<F32*>(mTrHostMapped + TR_SLOT_BYTES * mGbSlot + TR_PATCHES_AT) + 4 * mTrPatches;
+        for (U32 i = 0; i < d.patch_count; ++i)
+        {
+            patches[4 * i + 0] = d.patches[3 * i + 0];
+            patches[4 * i + 1] = d.patches[3 * i + 1];
+            patches[4 * i + 2] = d.patches[3 * i + 2];
+            patches[4 * i + 3] = (F32)region;
+        }
+        mTrQueued.push_back({ set, mTrPatches, d.patch_count });
+        mTrPatches += d.patch_count;
+        for (U32 i = 0; i < 7; ++i)
+        {
+            if (std::find(mGbPassTextures.begin(), mGbPassTextures.end(), names[i]) == mGbPassTextures.end())
+            {
+                mGbPassTextures.push_back(names[i]);
+                mGbPassImages.push_back(images[i]);
+            }
+        }
+        return true;
+    }
+
+    std::string terrainInfo() const
+    {
+        if (!mTrReady)
+        {
+            return mTrNote;
+        }
+        return llformat("%u region(s), %u patches last frame", mTrRegionsLast, mTrPatchesLast);
     }
 
     bool gbufferDraw(const QLVulkanPresenter::GbDraw& d)
@@ -7378,7 +7847,7 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         mGbInPass = false;
-        if (mGbDraws.empty())
+        if (mGbDraws.empty() && mTrQueued.empty())
         {
             return true;
         }
@@ -7458,6 +7927,19 @@ struct QLVulkanPresenter::Impl
         vkCmdSetScissor(slot.cmd, 0, 1, &scissor);
         // Flags: the depth remap, the normals' format (GBUFFER_NORM_HDR), whether there is an emissive attachment.
         const float flags[4] = { mGbRemap ? 1.f : 0.f, target.normHdr ? 1.f : 0.f, target.colors > 3 ? 1.f : 0.f, 0.f };
+        // The terrain first: the largest occluder, so the depth it lays turns away what it hides of the rest.
+        if (!mTrQueued.empty())
+        {
+            vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, target.terrain[mGbGreater ? 1 : 0]);
+            vkCmdPushConstants(slot.cmd, mTrLayout, TR_STAGES, 0, sizeof(flags), flags);
+            vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mTrLayout, 0, 1, &mTrSets[mGbSlot], 0,
+                                    nullptr);
+            for (const TrQueued& q : mTrQueued)
+            {
+                vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mTrLayout, 1, 1, &q.set, 0, nullptr);
+                vkCmdDraw(slot.cmd, 4, q.count, 0, q.first);
+            }
+        }
         vkCmdPushConstants(slot.cmd, mGbLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(flags), flags);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mGbLayout, 0, 1, &slot.set, 0, nullptr);
@@ -7567,6 +8049,8 @@ struct QLVulkanPresenter::Impl
             gl.WaitSemaphoreEXT(mGbVKDoneGL, 1, &mGbArena.gl, (GLuint)textures.size(), textures.data(), layouts.data());
         }
         ++mGbPassesNow;
+        mTrRegionsNow += (U32)mTrQueued.size();
+        mTrPatchesNow += mTrPatches;
         mGbDrawsNow += (U32)mGbDraws.size();
         mGbTexturesNow += (U32)texture_images.size();
         return true;
@@ -9272,6 +9756,18 @@ bool QLVulkanPresenter::gbufferArena(unsigned long long stamp, unsigned vertex_b
 bool QLVulkanPresenter::gbufferDraw(const GbDraw& draw)
 {
     return sActive && sActive->gbufferDraw(draw);
+}
+
+// static
+bool QLVulkanPresenter::gbufferTerrain(const TerrainDraw& draw)
+{
+    return sActive && sActive->gbufferTerrain(draw);
+}
+
+// static
+std::string QLVulkanPresenter::terrainInfo()
+{
+    return sActive ? sActive->terrainInfo() : std::string("no Vulkan presenter");
 }
 
 // static

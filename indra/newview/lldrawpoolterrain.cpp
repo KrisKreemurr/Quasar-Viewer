@@ -51,6 +51,13 @@
 #include "llsettingsvo.h"
 #include "llappviewer.h"
 
+#if LL_WINDOWS && !LL_SDL_WINDOW
+#include "qlvulkanpresenter.h"
+#define QL_VULKAN_TERRAIN 1
+void ql_normal_matrix(const LLMatrix4a& modelview, F32 out[16]);  // pipeline.cpp
+U32  ql_sampled_levels(const LLImageGL* image);                   // pipeline.cpp
+#endif
+
 extern bool gCubeSnapshot;
 
 const F32 DETAIL_SCALE = 1.f/16.f;
@@ -251,6 +258,11 @@ void LLDrawPoolTerrain::renderDeferred(S32 pass)
     }
 
     boostTerrainDetailTextures();
+
+    if (qlVulkanDraw())
+    {
+        return;
+    }
 
     // Probe and hero faces render through this pass too; only the main view counts.
     const bool count_primitives = gPipeline.mRT == &gPipeline.mMainRT;
@@ -852,4 +864,218 @@ LLViewerTexture *LLDrawPoolTerrain::getDebugTexture()
 LLColor3 LLDrawPoolTerrain::getDebugColor() const
 {
     return LLColor3(0.f, 0.f, 1.f);
+}
+
+// ---- Quasar: the terrain drawn into the G-buffer by Vulkan (QuasarVulkanTerrainDraws) ----
+
+static std::vector<LLDrawPoolTerrain*> sQLTerrainTaken;  // this pass's
+static bool sQLTerrainMainView = false;
+static U32  sQLTerrainLastTaken = 0, sQLTerrainLastKept = 0, sQLTerrainTakenNow = 0, sQLTerrainKeptNow = 0;
+static std::string sQLTerrainWhy;  // why the last region kept by GL was
+
+//static
+void LLDrawPoolTerrain::qlBeginPass(bool main_view)
+{
+    sQLTerrainTaken.clear();
+    if (main_view)
+    {
+        sQLTerrainLastTaken = sQLTerrainTakenNow;
+        sQLTerrainLastKept  = sQLTerrainKeptNow;
+        sQLTerrainTakenNow = sQLTerrainKeptNow = 0;
+    }
+    sQLTerrainMainView = main_view;
+}
+
+//static
+U32 LLDrawPoolTerrain::qlTakenCount()
+{
+    return (U32)sQLTerrainTaken.size();
+}
+
+//static
+void LLDrawPoolTerrain::qlDrawLost()
+{
+    std::vector<LLDrawPoolTerrain*> lost;
+    lost.swap(sQLTerrainTaken);  // so renderDeferred does not hand them to Vulkan again
+    for (LLDrawPoolTerrain* pool : lost)
+    {
+        pool->beginDeferredPass(0);
+        pool->renderFullShader();
+        pool->endDeferredPass(0);
+    }
+}
+
+std::string ql_vulkan_terrain_draws_info()
+{
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanTerrainDraws", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanTerrainDraws)";
+    }
+#if QL_VULKAN_TERRAIN
+    return llformat("main view last frame %u region(s) Vulkan, %u GL", sQLTerrainLastTaken, sQLTerrainLastKept) +
+           (sQLTerrainWhy.empty() ? std::string() : " (GL's: " + sQLTerrainWhy + ")") + " | " +
+           QLVulkanPresenter::terrainInfo();
+#else
+    return "not on this platform";
+#endif
+}
+
+bool LLDrawPoolTerrain::qlVulkanDraw()
+{
+#if QL_VULKAN_TERRAIN
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanTerrainDraws", false);
+    static LLCachedControl<bool> show_parcel_owners(gSavedSettings, "ShowParcelOwners");
+    if (!wanted())
+    {
+        return false;
+    }
+    const auto kept = [](const char* why)
+    {
+        if (sQLTerrainMainView)
+        {
+            sQLTerrainWhy = why;
+            ++sQLTerrainKeptNow;
+        }
+        return false;
+    };
+    // The four-texture terrain only (PBR terrain is a later step), through the variants Vulkan has: flat or
+    // triplanar, levels not pinned, no hex tiling, no parcel overlay.
+    const bool use_local_materials = gLocalTerrainMaterials.makeMaterialsReady(true, false);
+    LLViewerRegion* regionp = mDrawFace[0]->getDrawable()->getVObj()->getRegion();
+    LLVLComposition* compp = regionp->getComposition();
+    if (use_local_materials || compp->getMaterialType() != LLTerrainMaterials::Type::TEXTURE)
+    {
+        return kept("PBR terrain");
+    }
+    const ALShaderInputs& inputs = gPipeline.shaderInputs();
+    if (inputs.mGlobal.mTerrainHexTiling || inputs.mLocal.mTerrainTessPinned)
+    {
+        return kept("hex tiling or pinned levels");
+    }
+    if (show_parcel_owners)
+    {
+        LLViewerParcelOverlay* overlayp = regionp->getParcelOverlay();
+        if (overlayp && overlayp->getTexture())
+        {
+            return kept("parcel owners shown");
+        }
+    }
+
+    QLVulkanPresenter::TerrainDraw d;
+    LLSurface& land = regionp->getLand();
+    ALTerrainSurfaceMaps& maps = land.getSurfaceMaps();
+    maps.ensureUploaded();
+    d.height      = maps.heightName();
+    d.composition = maps.compositionName();
+
+    // The matrices, as applyModelMatrix and syncMatrices work them for drawLoop.
+    const LLMatrix4a view = LLViewerCamera::getCurrent().getModelview();
+    const LLMatrix4a proj = gGL.getProjectionMatrix();
+    LLMatrix4a modelview;
+    modelview.setMul(regionp->mRenderMatrix, view);
+    LLMatrix4a mvp;
+    mvp.setMul(modelview, proj);
+    memcpy(d.mvp, mvp.getF32ptr(), sizeof(d.mvp));
+    ql_normal_matrix(modelview, d.normal_matrix);
+
+    // bindSurface's uniforms.
+    const LLVector3& camera_origin = LLViewerCamera::getInstance()->getOrigin();
+    const LLVector3 origin = camera_origin - regionp->getOriginAgent();
+    d.tess_origin[0] = origin.mV[VX];
+    d.tess_origin[1] = origin.mV[VY];
+    d.tess_origin[2] = origin.mV[VZ];
+    const TessLevels levels = tess_levels();
+    d.density = levels.mDensity;
+    memcpy(d.tess_clip, LLMatrix4a::identity().getF32ptr(), sizeof(d.tess_clip));
+    d.tess_clip_origin[0] = d.tess_clip_origin[1] = d.tess_clip_origin[2] = d.tess_clip_origin[3] = 0.f;
+    const F32 segment = levels.mSegment;
+    if (gCubeSnapshot && segment > 0.f && levels.mDensity > 0.f)
+    {
+        // A capture holds each edge to the segments its raster resolves (the main view's levels are the distance's).
+        const LLCamera& pass = LLViewerCamera::getCurrent();
+        LLMatrix4a clip;
+        clip.setMul(pass.getModelview(), pass.getProjection());
+        LLVector4a clip_origin;
+        clip.transform4(LLVector4a(camera_origin.mV[VX], camera_origin.mV[VY], camera_origin.mV[VZ], 1.f), clip_origin);
+        memcpy(d.tess_clip, clip.getF32ptr(), sizeof(d.tess_clip));
+        memcpy(d.tess_clip_origin, clip_origin.getF32ptr(), sizeof(d.tess_clip_origin));
+        d.raster[0] = 0.5f * (F32)LLRenderTarget::sCurResX / segment;
+        d.raster[1] = 0.5f * (F32)LLRenderTarget::sCurResY / segment;
+    }
+    d.grid_scale   = land.getMetersPerGrid();
+    d.region_scale = regionp->getWidth();
+    d.smoothing    = LLSurface::isSmoothing();
+    static LLCachedControl<F32> triplanar_blend(gSavedSettings, "RenderTerrainPBRTriplanarBlendFactor", 8.f);
+    d.triplanar_blend = triplanar_blend;
+    d.planar_count    = inputs.mGlobal.mTerrainPlanarSampleCount == 3 ? 3u : 1u;
+
+    // renderFullShaderTextures' texgen: planar in world space, this region's phase within a tile added back.
+    const LLVector3d region_origin_global = regionp->getOriginGlobal();
+    const F32 offset_x = (F32)fmod(region_origin_global.mdV[VX], 1.0 / (F64)sDetailScale) * sDetailScale;
+    const F32 offset_y = (F32)fmod(region_origin_global.mdV[VY], 1.0 / (F64)sDetailScale) * sDetailScale;
+    const F32 plane_s[4] = { sDetailScale, 0.f, 0.f, offset_x };
+    const F32 plane_t[4] = { 0.f, sDetailScale, 0.f, offset_y };
+    memcpy(d.plane_s, plane_s, sizeof(plane_s));
+    memcpy(d.plane_t, plane_t, sizeof(plane_t));
+
+    // The textures, as renderFullShaderTextures binds them.
+    for (U32 i = 0; i < 4; ++i)
+    {
+        LLViewerTexture* detail = LLPipeline::sRenderTextures ? compp->mDetailTextures[i].get()
+                                                              : LLViewerFetchedTexture::sDefaultDiffuseImagep.get();
+        const LLImageGL* image = detail ? detail->getGLTexture() : nullptr;
+        d.detail[i]        = image ? image->getTexName() : 0;
+        d.detail_levels[i] = image ? ql_sampled_levels(image) : 1;
+        if (!d.detail[i])
+        {
+            return kept("a detail texture not loaded");
+        }
+    }
+    const LLImageGL* ramp = m2DAlphaRampImagep.notNull() ? m2DAlphaRampImagep->getGLTexture() : nullptr;
+    d.ramp        = ramp ? ramp->getTexName() : 0;
+    d.ramp_levels = ramp ? ql_sampled_levels(ramp) : 1;
+    if (!d.ramp || !d.height || !d.composition)
+    {
+        return kept("its ramp or maps not made");
+    }
+
+    // The patches drawLoop draws: each face's surface patch's corner and edge.
+    static std::vector<F32> patches;
+    patches.clear();
+    for (LLFace* facep : mDrawFace)
+    {
+        LLVOSurfacePatch* patchp = facep && facep->getDrawable()
+                                       ? dynamic_cast<LLVOSurfacePatch*>(facep->getDrawable()->getVObj().get())
+                                       : nullptr;
+        LLSurfacePatch* surface_patch = patchp ? patchp->getPatch() : nullptr;
+        if (!surface_patch || !facep->getVertexBuffer())
+        {
+            continue;  // drawLoop draws nothing of it either
+        }
+        const LLSurface* surfacep = surface_patch->getSurface();
+        const LLVector3& corner = surface_patch->getOriginRegion();
+        patches.push_back(corner.mV[VX]);
+        patches.push_back(corner.mV[VY]);
+        patches.push_back(surfacep->getGridsPerPatchEdge() * surfacep->getMetersPerGrid());
+    }
+    d.patches     = patches.data();
+    d.patch_count = (U32)(patches.size() / 3);
+    if (!d.patch_count)
+    {
+        return false;
+    }
+    if (!QLVulkanPresenter::gbufferTerrain(d))
+    {
+        return kept("not taken by Vulkan (its maps or textures not in Vulkan's memory, or the pass not open)");
+    }
+    sQLTerrainTaken.push_back(this);
+    if (sQLTerrainMainView)
+    {
+        ++sQLTerrainTakenNow;
+    }
+    return true;
+#else
+    return false;
+#endif
 }
