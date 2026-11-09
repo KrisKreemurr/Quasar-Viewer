@@ -8387,7 +8387,7 @@ struct QLVulkanPresenter::Impl
     std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
 
     static constexpr U32          GP_SLOTS = 4;
-    static constexpr VkDeviceSize GP_SLOT_BYTES = 8ull << 20;  // a pass's blocks and vertices
+    static constexpr VkDeviceSize GP_SLOT_BYTES = 32ull << 20;  // a pass's blocks and vertices (8 MB filled in the club)
     static constexpr U32          GP_SETS = 1024;               // a pass's draws
     static constexpr VkDeviceSize GP_NONE = ~(VkDeviceSize)0;  // no room
     struct GpSlot
@@ -8403,6 +8403,18 @@ struct QLVulkanPresenter::Impl
     VkDeviceMemory   mGpHostMemory = VK_NULL_HANDLE;
     U8*              mGpMapped = nullptr;
     VkDeviceSize     mGpTop = 0;  // the pass's next free byte, from its slot's start
+    // Blocks already written this pass, by what they hold: a draw whose block reads the same bytes as one before it
+    // binds that one (the engine's blocks barely change within a pass, and many draws share their loose uniforms).
+    struct GpWritten
+    {
+        VkDeviceSize    at = 0;
+        std::vector<U8> bytes;
+    };
+    std::unordered_map<U64, GpWritten> mGpBlocksDone;
+    std::vector<U8>                    mGpBlockScratch;
+    U32                                mGpBlocksReused = 0, mGpBlocksWritten = 0;
+    U32                                mGpBlocksReusedLast = 0, mGpBlocksWrittenLast = 0;
+    VkDeviceSize                       mGpHostPeak = 0, mGpHostPeakLast = 0;
     VkDeviceSize     mGpAlign = 256;
     VkSemaphore      mGpGLDoneVK = VK_NULL_HANDLE, mGpVKDoneVK = VK_NULL_HANDLE;
     GLuint           mGpGLDoneGL = 0, mGpVKDoneGL = 0;
@@ -8740,12 +8752,14 @@ struct QLVulkanPresenter::Impl
     enum GpStream : U32
     {
         GP_POSITION = 0, GP_NORMAL, GP_TEXCOORD0, GP_TEXCOORD1, GP_TEXCOORD2, GP_COLOR, GP_TANGENT, GP_WEIGHT4,
+        GP_TEXTURE_INDEX,  // GL keeps it as position.w, read as an int: the positions' stream, 12 bytes in
         GP_STREAMS
     };
     static S32 gpStreamOf(const std::string& name)
     {
         static const char* const names[GP_STREAMS] = { "position", "normal", "texcoord0", "texcoord1",
-                                                       "texcoord2", "diffuse_color", "tangent", "weight4" };
+                                                       "texcoord2", "diffuse_color", "tangent", "weight4",
+                                                       "texture_index" };
         for (U32 i = 0; i < GP_STREAMS; ++i)
         {
             if (name == names[i])
@@ -8769,6 +8783,7 @@ struct QLVulkanPresenter::Impl
         switch (stream)
         {
             case GP_POSITION: return 0;
+            case GP_TEXTURE_INDEX: return 12;
             case GP_NORMAL: return mGbArena.normalStart();
             case GP_TEXCOORD0: return mGbArena.uvStart();
             case GP_TEXCOORD1: return mGbArena.uv1Start();
@@ -8935,6 +8950,11 @@ struct QLVulkanPresenter::Impl
             switch (a.gl_type)
             {
                 case GL_FLOAT: in.format = VK_FORMAT_R32_SFLOAT; break;
+                case GL_INT: in.format = VK_FORMAT_R32_SINT; break;
+                case GL_UNSIGNED_INT: in.format = VK_FORMAT_R32_UINT; break;
+                case GL_INT_VEC2: in.format = VK_FORMAT_R32G32_SINT; break;
+                case GL_INT_VEC4: in.format = VK_FORMAT_R32G32B32A32_SINT; break;
+                case GL_UNSIGNED_INT_VEC4: in.format = VK_FORMAT_R32G32B32A32_UINT; break;
                 case GL_FLOAT_VEC2: in.format = VK_FORMAT_R32G32_SFLOAT; break;
                 case GL_FLOAT_VEC3: in.format = VK_FORMAT_R32G32B32_SFLOAT; break;
                 default: in.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
@@ -9467,6 +9487,7 @@ struct QLVulkanPresenter::Impl
             return GP_NONE;
         }
         mGpTop = at + bytes;
+        mGpHostPeak = llmax(mGpHostPeak, mGpTop);
         return GP_SLOT_BYTES * mGpSlot + at;
     }
 
@@ -9650,6 +9671,7 @@ struct QLVulkanPresenter::Impl
         mGpSlot     = mGpNextSlot;
         mGpNextSlot = (mGpNextSlot + 1) % GP_SLOTS;
         mGpTop      = 0;
+        mGpBlocksDone.clear();
         vkResetDescriptorPool(mDevice, slot.pool, 0);
         vkResetCommandBuffer(slot.cmd, 0);
         VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -9749,7 +9771,8 @@ struct QLVulkanPresenter::Impl
         {
             // Every attribute the program reads, from the mesh.
             const unsigned offsets[GP_STREAMS] = { d.mesh.position, d.mesh.normal, d.mesh.texcoord0, d.mesh.texcoord1,
-                                                   d.mesh.texcoord2, d.mesh.color, d.mesh.tangent, d.mesh.weight4 };
+                                                   d.mesh.texcoord2, d.mesh.color, d.mesh.tangent, d.mesh.weight4,
+                                                   d.mesh.position };
             for (const GpProgram::Input& in : p.inputs)
             {
                 if (offsets[in.stream] == ~0u)
@@ -9816,7 +9839,15 @@ struct QLVulkanPresenter::Impl
         bound.reserve(p.refl.resources.size());
         VkDeviceSize vertices_at = GP_NONE;
         const VkDeviceSize mark = mGpTop;
-        auto give_back = [this, mark]() { mGpTop = mark; };
+        auto give_back = [this, mark]()
+        {
+            mGpTop = mark;
+            const VkDeviceSize slot_mark = GP_SLOT_BYTES * mGpSlot + mark;
+            for (auto it = mGpBlocksDone.begin(); it != mGpBlocksDone.end();)
+            {
+                it = it->second.at >= slot_mark ? mGpBlocksDone.erase(it) : std::next(it);
+            }
+        };
         for (const ql_glsl::Resource& r : p.refl.resources)
         {
             Bound b = {};
@@ -9824,20 +9855,19 @@ struct QLVulkanPresenter::Impl
             if (r.kind == ql_glsl::RES_UNIFORM_BLOCK)
             {
                 const VkDeviceSize bytes = llmax((VkDeviceSize)r.size, (VkDeviceSize)16);
-                const VkDeviceSize at = gpAllocate(bytes);
-                if (at == GP_NONE)
-                {
-                    give_back();
-                    gpWhy("the pass's host memory is full");
-                    return false;
-                }
-                U8* dst = mGpMapped + at;
+                // Filled here first (the host buffer is write-combined: never read back), then written only where no
+                // block of this pass holds the same bytes.
+                mGpBlockScratch.assign((size_t)bytes, 0);
+                U8* dst = mGpBlockScratch.data();
+                U64 key = 0;
                 if (r.default_block)
                 {
+                    key = 0x8000000000000000ull | (U64)(U32)d.program;
                     gpFillDefaults(p, d, dst);
                 }
                 else
                 {
+                    key = std::hash<std::string>()(r.name) & 0x7fffffffffffffffull;
                     const QLVulkanPresenter::GpBlock* block = nullptr;
                     for (U32 i = 0; i < d.block_count; ++i)
                     {
@@ -9852,10 +9882,29 @@ struct QLVulkanPresenter::Impl
                         gpWhy(p.name + ": the block " + r.name + " is not bound");
                         return false;
                     }
-                    memset(dst, 0, (size_t)bytes);
                     memcpy(dst, block->data, llmin((size_t)r.size, block->bytes));
                 }
-                b.buffer = { mGpHost, at, bytes };
+                GpWritten& written = mGpBlocksDone[key];
+                if (!written.bytes.empty() && written.bytes == mGpBlockScratch)
+                {
+                    ++mGpBlocksReused;
+                }
+                else
+                {
+                    const VkDeviceSize at = gpAllocate(bytes);
+                    if (at == GP_NONE)
+                    {
+                        mGpBlocksDone.erase(key);
+                        give_back();
+                        gpWhy("the pass's host memory is full");
+                        return false;
+                    }
+                    memcpy(mGpMapped + at, dst, (size_t)bytes);
+                    written.at    = at;
+                    written.bytes = mGpBlockScratch;
+                    ++mGpBlocksWritten;
+                }
+                b.buffer = { mGpHost, written.at, bytes };
             }
             else if (r.kind == ql_glsl::RES_SAMPLER)
             {
@@ -10282,6 +10331,11 @@ struct QLVulkanPresenter::Impl
         mGpPassesLast = mGpPassesNow;
         mGpKeptLast   = mGpKeptNow;
         mGpDrawsNow = mGpPassesNow = mGpKeptNow = 0;
+        mGpBlocksReusedLast  = mGpBlocksReused;
+        mGpBlocksWrittenLast = mGpBlocksWritten;
+        mGpBlocksReused = mGpBlocksWritten = 0;
+        mGpHostPeakLast = mGpHostPeak;
+        mGpHostPeak     = 0;
     }
 
     std::string gpInfo() const
@@ -10295,8 +10349,11 @@ struct QLVulkanPresenter::Impl
         {
             programs += p.ok ? 1 : 0;
         }
-        return llformat("%u draws in %u passes last frame, %u kept by GL | %u of %u programs compiled", mGpDrawsLast,
-                        mGpPassesLast, mGpKeptLast, programs, (U32)mGpPrograms.size()) +
+        return llformat("%u draws in %u passes last frame, %u kept by GL | %u of %u programs compiled | blocks %u "
+                        "written, %u reused, fullest pass %.1f of %u MB",
+                        mGpDrawsLast, mGpPassesLast, mGpKeptLast, programs, (U32)mGpPrograms.size(),
+                        mGpBlocksWrittenLast, mGpBlocksReusedLast, (double)mGpHostPeakLast / (1 << 20),
+                        (U32)(GP_SLOT_BYTES >> 20)) +
                (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);
     }
 
