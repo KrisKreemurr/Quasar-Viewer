@@ -9985,7 +9985,17 @@ struct QLVulkanPresenter::Impl
                                 return false;
                             }
                         }
-                        if (view && (cube != wants_cube || (wants_depth && !is_depth)))
+                        if (view && cube != wants_cube && !wants_depth)
+                        {
+                            // A unit still holding what an earlier draw left there, of another kind (an indexed batch
+                            // binds tex0..texN for the textures it has, and its texture_index never reaches the rest):
+                            // GL cannot sample it through this sampler, so a correct program does not. Black of the
+                            // kind it reads stands in.
+                            view     = wants_cube ? mGbBlackCube.view : mGbBlack.view;
+                            image    = VK_NULL_HANDLE;
+                            is_depth = false;
+                        }
+                        else if (view && (cube != wants_cube || (wants_depth && !is_depth)))
                         {
                             give_back();
                             gpWhy(llformat("%s: %s (GL name %u) is not the kind of texture it reads", p.name.c_str(),
