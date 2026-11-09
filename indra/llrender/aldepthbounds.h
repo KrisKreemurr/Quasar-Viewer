@@ -57,6 +57,10 @@ public:
     /// Moves the range while the scope stands.
     void set(F64 zmin, F64 zmax);
 
+    /// The bounds it holds now (Quasar: for Vulkan's copy of the draw, QuasarVulkanLighting).
+    F64 getMin() const { return mMin; }
+    F64 getMax() const { return mMax; }
+
     /// Every stored depth but the clear's, under the current convention: what the world drew, and not the sky.
     static void drawn(F64& zmin, F64& zmax);
 

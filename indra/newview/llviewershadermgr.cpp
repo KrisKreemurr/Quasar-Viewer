@@ -546,9 +546,14 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         LLShaderMgr::sQLKeepSources = ql_lighting;
         ALUniformBuffer::sQLMirror  = ql_lighting;
         for (LLGLSLShader* program : { &gDeferredSunProgram, &gDeferredBlurLightProgram, &gDeferredSoftenProgram,
-                                       &gDeferredSkyCompositeProgram })
+                                       &gDeferredSkyCompositeProgram, &gDeferredLightProgram, &gDeferredSpotLightProgram,
+                                       &gDeferredMultiSpotLightProgram })
         {
             program->mQLWanted = ql_lighting;
+        }
+        for (LLGLSLShader& program : gDeferredMultiLightProgram)
+        {
+            program.mQLWanted = ql_lighting;
         }
     }
 

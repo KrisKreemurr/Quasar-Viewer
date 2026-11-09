@@ -12570,14 +12570,33 @@ namespace
                (type >= 0x9108 && type <= 0x910D);
     }
 
+    // GL's state for a draw Vulkan makes: the depth function as GL tests with it (remapped for reverse-Z; 0 no test),
+    // blending (0 none, 1 additive, BT_ADD), the depth bounds (none where max <= min), back faces culled, the topology.
+    struct QLGLState
+    {
+        U32  depth_func = 0;
+        U32  blend = 0;
+        F32  bounds_min = 0.f, bounds_max = 0.f;
+        bool cull_back = true;
+        U32  topology = GL_TRIANGLES;
+    };
+
+    // The depth bounds ALDrawnOnly holds GL's full-screen passes to: what the world drew.
+    QLGLState ql_drawn_only()
+    {
+        QLGLState state;
+        F64 zmin, zmax;
+        ALDepthBounds::drawn(zmin, zmax);
+        state.bounds_min = (F32)zmin;
+        state.bounds_max = (F32)zmax;
+        return state;
+    }
+
     // One draw of a GL program by Vulkan, from what GL holds for it now: bound, its uniforms set, its textures on their
-    // units, the engine's blocks bound. Its target is the render target's colours (and depth, where `depth`), cleared
-    // first where `clear`; its state GL's (depth_func 0: no depth test; drawn_only: held by the depth bounds to what
-    // the world drew, as ALDrawnOnly holds GL). Positions three floats a vertex. False: nothing was recorded, and why
-    // is kept for the status line.
-    bool ql_gl_program_draw(LLGLSLShader& shader, LLRenderTarget* target, bool depth, bool clear,
-                            const LLColor4& clear_color, U32 depth_func, bool drawn_only, const F32* positions,
-                            U32 vertex_count)
+    // units, the engine's blocks bound. Its target is the render target's colours and depth, cleared first (colours)
+    // where `clear`. Positions three floats a vertex. False: nothing was recorded, and why is kept for the status line.
+    bool ql_gl_program_draw(LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
+                            const QLGLState& state, const F32* positions, U32 vertex_count)
     {
         if (!target || !target->getNumTextures())
         {
@@ -12698,7 +12717,7 @@ namespace
         {
             d.colors[i] = target->getTexture(i);
         }
-        d.depth  = depth ? target->getDepth() : 0;
+        d.depth  = target->getDepth();
         d.width  = target->getWidth();
         d.height = target->getHeight();
         d.clear  = clear;
@@ -12706,20 +12725,15 @@ namespace
         {
             d.clear_color[i] = clear_color.mV[i];
         }
-        d.blend       = 0;
-        d.depth_func  = depth_func;
-        d.depth_write = false;
-        if (drawn_only)
-        {
-            F64 zmin, zmax;
-            ALDepthBounds::drawn(zmin, zmax);
-            d.bounds_min = (F32)zmin;
-            d.bounds_max = (F32)zmax;
-        }
-        d.cull_back    = true;
+        d.blend        = state.blend;
+        d.depth_func   = state.depth_func;
+        d.depth_write  = false;
+        d.bounds_min   = state.bounds_min;
+        d.bounds_max   = state.bounds_max;
+        d.cull_back    = state.cull_back;
         d.positions    = positions;
         d.vertex_count = vertex_count;
-        d.topology     = GL_TRIANGLES;
+        d.topology     = state.topology;
         if (!QLVulkanPresenter::glDraw(d))
         {
             ql_lighting_kept(QLVulkanPresenter::glInfo());
@@ -12866,7 +12880,9 @@ void LLPipeline::renderDeferredLighting()
                 {
                     // The screen triangle's corners (mScreenTriangleVB's).
                     static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
-                    if (ql_gl_program_draw(shader, target, true, clear, clear_color, depth_func, drawn_only, triangle, 3))
+                    QLGLState state = drawn_only ? ql_drawn_only() : QLGLState();
+                    state.depth_func = depth_func;
+                    if (ql_gl_program_draw(shader, target, clear, clear_color, state, triangle, 3))
                     {
                         ++ql_run.recorded;
                         return;
@@ -13056,28 +13072,68 @@ void LLPipeline::renderDeferredLighting()
                 }
             }
         }
-        ql_run.whole = ql_run.open;
-        // The local lights are GL's: what Vulkan drew goes first.
-        ql_run.handOver();
 #if QL_VULKAN_SHADOWS
-        if (ql_lighting_wanted())
+        // A local light's draw into the screen, Vulkan's while its run is open (the run handed over at the first it
+        // cannot take, which GL then draws, as it does every one after).
+        auto ql_light = [&](LLGLSLShader& shader, const QLGLState& state, const F32* positions, U32 count) -> bool
         {
-            sQLLightingShare = ql_run.whole ? U32_MAX : ql_run.recorded;
-            if (ql_run.recorded > 0)
+            if (!ql_run.open)
             {
-                ++sQLLightingPasses;
-                ++sQLLightingNowVK;
+                return false;
             }
-            if (!ql_run.whole)
+            if (ql_gl_program_draw(shader, screen_target, false, LLColor4::transparent, state, positions, count))
             {
-                ++sQLLightingKept;
-                ++sQLLightingNowGL;
+                ++ql_run.recorded;
+                return true;
             }
-        }
-        else
+            ql_run.handOver();
+            return false;
+        };
+        // A light volume's state and corners: the box mCubeVB draws, its eight fan indices (get_box_fan_indices) as
+        // corners, additive, tested against the scene's depth, held to the light's depths where `bounds`.
+        auto ql_volume = [&](LLGLSLShader& shader, const LLVector4a& center, const ALDepthBounds* bounds) -> bool
         {
-            sQLLightingShare = 0;
-        }
+            if (!ql_run.open)
+            {
+                return false;
+            }
+            const U16* fan = reinterpret_cast<const U16*>(get_box_fan_indices_ptr(camera, center));
+            F32 corners[24];
+            for (U32 k = 0; k < 8; ++k)
+            {
+                const U16 i = fan[k];
+                corners[k * 3 + 0] = (i & 4) ? 1.f : -1.f;
+                corners[k * 3 + 1] = (i & 2) ? 1.f : -1.f;
+                corners[k * 3 + 2] = (i & 1) ? 1.f : -1.f;
+            }
+            QLGLState state;
+            state.depth_func = LLGLDepthTest::remap(GL_LEQUAL);
+            state.blend      = 1;
+            state.topology   = GL_TRIANGLE_FAN;
+            if (bounds)
+            {
+                state.bounds_min = (F32)bounds->getMin();
+                state.bounds_max = (F32)bounds->getMax();
+            }
+            return ql_light(shader, state, corners, 8);
+        };
+        // A full-screen light: the screen triangle, additive, held to what the world drew (and to its lights' depths).
+        auto ql_fullscreen = [&](LLGLSLShader& shader, const ALDepthBounds* bounds) -> bool
+        {
+            if (!ql_run.open)
+            {
+                return false;
+            }
+            static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
+            QLGLState state = ql_drawn_only();
+            state.blend = 1;
+            if (bounds)
+            {
+                state.bounds_min = (F32)bounds->getMin();
+                state.bounds_max = (F32)bounds->getMax();
+            }
+            return ql_light(shader, state, triangle, 3);
+        };
 #endif
 
         static LLCachedControl<S32> local_light_count(gSavedSettings, "RenderLocalLightCount", 256);
@@ -13217,6 +13273,12 @@ void LLPipeline::renderDeferredLighting()
 
                         gGL.syncMatrices();
 
+#if QL_VULKAN_SHADOWS
+                        if (ql_volume(light_shader, center, bounds ? &*bounds : nullptr))
+                        {
+                            continue;
+                        }
+#endif
                         mCubeVB->drawRange(LLRender::TRIANGLE_FAN, 0, 7, 8, get_box_fan_indices(camera, center));
                     }
                     else
@@ -13291,6 +13353,12 @@ void LLPipeline::renderDeferredLighting()
 
                     gGL.syncMatrices();
 
+#if QL_VULKAN_SHADOWS
+                    if (ql_volume(spot_shader, center, bounds ? &*bounds : nullptr))
+                    {
+                        continue;
+                    }
+#endif
                     mCubeVB->drawRange(LLRender::TRIANGLE_FAN, 0, 7, 8, get_box_fan_indices(camera, center));
                 }
                 spot_shader.disableTexture(LLShaderMgr::DEFERRED_PROJECTION);
@@ -13351,8 +13419,13 @@ void LLPipeline::renderDeferredLighting()
                         }
                         far_z = 0.f;
                         count = 0;
-                        mScreenTriangleVB->setBuffer();
-                        mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+#if QL_VULKAN_SHADOWS
+                        if (!ql_fullscreen(multi_light_shader, bounds))
+#endif
+                        {
+                            mScreenTriangleVB->setBuffer();
+                            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                        }
                         unbindDeferredShader(multi_light_shader);
                     }
                 }
@@ -13390,6 +13463,13 @@ void LLPipeline::renderDeferredLighting()
                     multi_spot_shader.uniform3fv(LLShaderMgr::DIFFUSE_COLOR, 1, spot.col.mV);
                     multi_spot_shader.uniform1f(LLShaderMgr::LIGHT_FALLOFF, light_falloff_final);
 
+#if QL_VULKAN_SHADOWS
+                    if (ql_fullscreen(multi_spot_shader, bounds))
+                    {
+                        continue;
+                    }
+                    mScreenTriangleVB->setBuffer();
+#endif
                     mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
                 }
 
@@ -13406,6 +13486,30 @@ void LLPipeline::renderDeferredLighting()
             fullscreen_spot_lights.clear();
             light_colors.clear();
         }
+
+        // What Vulkan drew of the lighting, handed over before anything after it reads the screen.
+        ql_run.whole = ql_run.open;
+        ql_run.handOver();
+#if QL_VULKAN_SHADOWS
+        if (ql_lighting_wanted())
+        {
+            sQLLightingShare = ql_run.whole ? U32_MAX : ql_run.recorded;
+            if (ql_run.recorded > 0)
+            {
+                ++sQLLightingPasses;
+                ++sQLLightingNowVK;
+            }
+            if (!ql_run.whole)
+            {
+                ++sQLLightingKept;
+                ++sQLLightingNowGL;
+            }
+        }
+        else
+        {
+            sQLLightingShare = 0;
+        }
+#endif
 
         gGL.setColorMask(true, true);
     }
