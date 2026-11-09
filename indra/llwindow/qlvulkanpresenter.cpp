@@ -6528,7 +6528,7 @@ struct QLVulkanPresenter::Impl
     std::vector<GbQueued> mGbDraws;
     std::vector<GLuint>   mGbPassTextures;        // the textures the pass draws with, each once, for the hand-over
     std::vector<VkImage>  mGbPassImages;
-    GbDefault             mGbWhite, mGbFlat, mGbBlack;
+    GbDefault             mGbWhite, mGbFlat, mGbBlack, mGbBlackCube;  // the cube: a cube array of one, black
     bool                  mGbPassRigged = false;  // the open pass took a rigged draw
     U64                   mGbSubmitSerial = 0;
     // The G-buffer submissions that read a palette segment (slot, serial): shadowPalette reuses the segment only once
@@ -6794,18 +6794,21 @@ struct QLVulkanPresenter::Impl
         vkBeginCommandBuffer(cmd, &begin);
         bool made = true;
         // Black too: what GL's programs read through a unit with nothing bound (QuasarVulkanLighting).
-        const float colors[3][4] = { { 1.f, 1.f, 1.f, 1.f }, { 128.f / 255.f, 128.f / 255.f, 1.f, 1.f },
-                                     { 0.f, 0.f, 0.f, 1.f } };
-        GbDefault* defaults[3] = { &mGbWhite, &mGbFlat, &mGbBlack };
-        for (U32 i = 0; i < 3 && made; ++i)
+        const float colors[4][4] = { { 1.f, 1.f, 1.f, 1.f }, { 128.f / 255.f, 128.f / 255.f, 1.f, 1.f },
+                                     { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f, 1.f } };
+        GbDefault* defaults[4] = { &mGbWhite, &mGbFlat, &mGbBlack, &mGbBlackCube };
+        for (U32 i = 0; i < 4 && made; ++i)
         {
             GbDefault& d = *defaults[i];
+            const bool cube = i == 3;  // what GL reads through a cube array unit with nothing bound
+            const U32 layers = cube ? 6 : 1;
             VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            info.flags         = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
             info.imageType     = VK_IMAGE_TYPE_2D;
             info.format        = VK_FORMAT_R8G8B8A8_UNORM;
             info.extent        = { 4, 4, 1 };
             info.mipLevels     = 1;
-            info.arrayLayers   = 1;
+            info.arrayLayers   = layers;
             info.samples       = VK_SAMPLE_COUNT_1_BIT;
             info.tiling        = VK_IMAGE_TILING_OPTIMAL;
             info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -6831,9 +6834,9 @@ struct QLVulkanPresenter::Impl
             vkBindImageMemory(mDevice, d.image, d.memory, 0);
             VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
             view_info.image            = d.image;
-            view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.viewType         = cube ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
             view_info.format           = VK_FORMAT_R8G8B8A8_UNORM;
-            view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers };
             if (vkCreateImageView(mDevice, &view_info, nullptr, &d.view) != VK_SUCCESS)
             {
                 d.view = VK_NULL_HANDLE;
@@ -6847,7 +6850,7 @@ struct QLVulkanPresenter::Impl
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.image               = d.image;
-            b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers };
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
                                  0, nullptr, 1, &b);
             VkClearColorValue value = {};
@@ -6979,6 +6982,7 @@ struct QLVulkanPresenter::Impl
         mGbMatUse.clear();
         destroyGbDefault(mGbWhite);
         destroyGbDefault(mGbBlack);
+        destroyGbDefault(mGbBlackCube);
         destroyGbDefault(mGbFlat);
         for (GbSlot& slot : mGbSlots)
         {
@@ -8488,7 +8492,13 @@ struct QLVulkanPresenter::Impl
     {
         mGpWhy = why;
         ++mGpKeptNow;
+        // Each reason once in the log (the status line runs off a narrow screen): the first 64.
+        if (mGpWhysLogged.size() < 64 && mGpWhysLogged.insert(why).second)
+        {
+            LL_INFOS("QuasarVulkan") << "GL keeps a draw: " << why << LL_ENDL;
+        }
     }
+    std::set<std::string> mGpWhysLogged;
 
     bool createGpObjects()
     {
@@ -9808,7 +9818,7 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         // The default textures, made again if the G-buffer's failure took them (destroyGbObjects).
-        if ((!mGbWhite.view || !mGbBlack.view) && !createGbDefaults())
+        if ((!mGbWhite.view || !mGbBlack.view || !mGbBlackCube.view) && !createGbDefaults())
         {
             gpWhy("its default textures could not be made");
             return false;
@@ -9935,13 +9945,20 @@ struct QLVulkanPresenter::Impl
                     // GL's shadow samplers (2D, 2D array, cube, cube array) compare against a depth texture.
                     const bool wants_depth = r.gl_type == 0x8B62 || r.gl_type == 0x8DC4 || r.gl_type == 0x8DC5 ||
                                              r.gl_type == 0x900D;
-                    if ((wants_cube || wants_depth) && (tex->texture == 0 || tex->texture == d.white_texture))
+                    // A cube array unit with nothing bound reads black in GL (an incomplete texture): so here. A shadow
+                    // sampler's has no answer GL defines.
+                    if (wants_cube && !wants_depth && (tex->texture == 0 || tex->texture == d.white_texture))
+                    {
+                        view  = mGbBlackCube.view;
+                        image = VK_NULL_HANDLE;
+                    }
+                    else if ((wants_cube || wants_depth) && (tex->texture == 0 || tex->texture == d.white_texture))
                     {
                         give_back();
                         gpWhy(p.name + ": " + element + " has nothing of its kind bound");
                         return false;
                     }
-                    if (tex->texture == 0)
+                    else if (tex->texture == 0)
                     {
                         view  = mGbBlack.view;
                         image = VK_NULL_HANDLE;
