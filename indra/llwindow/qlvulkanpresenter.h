@@ -371,6 +371,95 @@ public:
 
     static std::string shadowInfo();
 
+    // ---- GL's own programs drawn by Vulkan (QuasarVulkanLighting) -----------------------------------------------
+
+    /// A GL program Vulkan draws, from the sources GL linked (LLGLSLShader::qlSources: each object's text as GL compiled
+    /// it), compiled once for Vulkan (qlvkglsl.h) and kept under key until its link count changes. -1: it does not
+    /// compile for Vulkan, or Vulkan is not drawing (glProgramNote says why); GL draws it.
+    struct GpSource
+    {
+        unsigned    type = 0;  // GL's stage: GL_VERTEX_SHADER...
+        const char* name = nullptr;
+        const char* text = nullptr;
+        size_t      length = 0;
+    };
+    static int glProgram(unsigned long long key, unsigned link_count, const char* name, const GpSource* sources,
+                         unsigned source_count);
+    static std::string glProgramNote(unsigned long long key);
+
+    /// What a draw of such a program reads: its loose uniforms as GL holds them (LLGLSLShader::qlRegions and qlWords),
+    /// the engine's blocks bound now (by name), and each sampler's texture and sampling (by the uniform's name).
+    struct GpRegion
+    {
+        const char* name = nullptr;
+        unsigned    type = 0;        // GL's
+        unsigned    elements = 1;
+        unsigned    components = 1;
+        unsigned    words = 0;       // first word in GpDraw::words
+        unsigned    kind = 0;        // 0 float, 1 int, 2 uint
+        bool        transpose = false;
+    };
+    struct GpBlock
+    {
+        const char* name = nullptr;
+        const void* data = nullptr;
+        size_t      bytes = 0;
+    };
+    struct GpTexture
+    {
+        const char* name = nullptr;  // the sampler uniform's
+        unsigned    texture = 0;     // GL's name: 0 none bound (reads black), white_texture GL's white
+        unsigned    min_filter = 0x2601, mag_filter = 0x2601;    // GL_LINEAR
+        unsigned    wrap_s = 0x812F, wrap_t = 0x812F, wrap_r = 0x812F;  // GL_CLAMP_TO_EDGE
+        float       anisotropy = 1.f;
+        unsigned    compare_func = 0;  // 0 none, else GL's (GL_GEQUAL...)
+        bool        srgb_decode = false;
+    };
+    struct GpDraw
+    {
+        int               program = -1;
+        const GpRegion*   regions = nullptr;
+        unsigned          region_count = 0;
+        const unsigned*   words = nullptr;
+        const GpBlock*    blocks = nullptr;
+        unsigned          block_count = 0;
+        const GpTexture*  textures = nullptr;
+        unsigned          texture_count = 0;
+        unsigned          white_texture = 0;
+        // Its target, as GL's framebuffer has it: colour attachments' and depth's GL names (each in Vulkan's memory),
+        // cleared to clear_color first where clear is set (colour only).
+        unsigned          colors[4] = {};
+        unsigned          color_count = 0;
+        unsigned          depth = 0;
+        unsigned          width = 0, height = 0;
+        bool              clear = false;
+        float             clear_color[4] = {};
+        // GL's state for it: blending off, additive (ONE, ONE) or alpha (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, as BT_ALPHA),
+        // the depth test (GL's function; 0 off) and writes, the depth bounds test (where bounds_max > bounds_min) and
+        // back-face culling.
+        unsigned          blend = 0;  // 0 none, 1 add, 2 alpha
+        unsigned          depth_func = 0;
+        bool              depth_write = false;
+        float             bounds_min = 0.f, bounds_max = 0.f;
+        bool              cull_back = false;
+        // Its vertices: positions alone, three floats each (the "position" attribute), GL's topology (GL_TRIANGLES,
+        // GL_TRIANGLE_STRIP or GL_TRIANGLE_FAN).
+        const float*      positions = nullptr;
+        unsigned          vertex_count = 0;
+        unsigned          topology = 0x0004;  // GL_TRIANGLES
+    };
+
+    /// A run of such draws, handed over as G-buffer draws are: glPassBegin, glDraw each (false: that draw is GL's, and
+    /// nothing of it was recorded), glPassEnd once GL has drawn what comes before them and before GL reads what they
+    /// draw (false: none of them were drawn, and GL draws them all again). GL must draw nothing into what the draws
+    /// read or write between glPassBegin and glPassEnd.
+    static bool glPassBegin();
+    static bool glDraw(const GpDraw& draw);
+    static bool glPassEnd();
+    static void glPassAbandon();
+    static void glFrame(unsigned frame);
+    static std::string glInfo();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> mImpl;

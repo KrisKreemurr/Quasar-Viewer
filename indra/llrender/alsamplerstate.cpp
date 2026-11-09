@@ -103,6 +103,31 @@ ALSamplerDesc ALSamplerCache::makeDesc(ALSampler key)
     return desc;
 }
 
+bool ALSamplerCache::describe(U32 name, ALSamplerDesc& out) const
+{
+    if (name == 0)
+    {
+        return false;
+    }
+    for (U32 i = 0; i < NUM_SAMPLERS; ++i)
+    {
+        if (mSamplers[i] == name)
+        {
+            out = makeDesc(static_cast<ALSampler>(i));
+            return true;
+        }
+    }
+    for (const auto& custom : mCustomSamplers)
+    {
+        if (custom.second == name)
+        {
+            out = custom.first;
+            return true;
+        }
+    }
+    return false;
+}
+
 // static
 U32 ALSamplerCache::create(const ALSamplerDesc& desc)
 {

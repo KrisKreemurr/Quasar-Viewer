@@ -795,6 +795,18 @@ public:
     // a program is still linking. A count that only grows is a leak.
     static U32 sLiveObjects;
 
+    // Quasar: each compiled object's source as GL compiled it (version line, defines and engine blocks spliced in),
+    // kept while sQLKeepSources is on (QuasarVulkanLighting): a program that Vulkan draws (LLGLSLShader::mQLWanted)
+    // takes copies of its objects' as it links, and Vulkan compiles them for itself. Freed with the object.
+    struct QLObjectSource
+    {
+        GLenum      type = 0;
+        std::string name;
+        std::string text;
+    };
+    static bool sQLKeepSources;
+    static const QLObjectSource* qlObjectSource(GLuint object);
+
     // The binding point of `element` of a reserved storage block (eGLSLReservedStorageBlocks), the same in every
     // program; -1 for an index or element the table does not have.
     S32 getStorageBlockBinding(S32 block, U32 element = 0) const;

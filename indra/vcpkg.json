@@ -53,6 +53,10 @@
         "zlib"
       ]
     },
+    {
+      "name": "glslang",
+      "platform": "windows"
+    },
     "harfbuzz",
     "icu",
     {

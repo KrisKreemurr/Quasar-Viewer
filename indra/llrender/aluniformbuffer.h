@@ -230,6 +230,12 @@ public:
     // at `binding`, as far as the bind cache knows.
     static bool scratchIsBound(U32 binding, S64 offset, size_t bytes);
 
+    // Quasar: what each uniform-buffer point holds, as CPU bytes, while sQLMirror is on (QuasarVulkanLighting): Vulkan
+    // fills its copies of the engine's blocks from them as it draws a GL program. A store given by update() is copied
+    // as it is given; a shadowed one is its shadow. False where nothing this class knows of is bound at `binding`.
+    static bool sQLMirror;
+    static bool qlBound(U32 binding, const U8*& data, size_t& bytes);
+
     bool   allocated() const { return mName != 0; }
     size_t size() const { return mSize; }
     U32    getGLName() const { return mName; }
@@ -257,4 +263,9 @@ private:
     // persistent rings keep independent generation counters, so mRingGeneration alone can't tell
     // them apart -- this can. (U32 not GLuint: this header is included where GL types aren't.)
     U32    mSliceRing = 0;
+
+    // Quasar (sQLMirror): update()'s bytes, and the note of what is bound where.
+    std::vector<U8> mQLCopy;
+    void qlNoteBound(U32 binding, size_t offset, size_t bytes, bool shadow) const;
+    void qlForget() const;
 };

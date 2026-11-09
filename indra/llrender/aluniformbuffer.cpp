@@ -757,8 +757,63 @@ S32 ALUniformBuffer::effectiveMode()
     }
 }
 
+namespace
+{
+    // Per uniform-buffer point, what ALUniformBuffer last bound there (sQLMirror): main thread only.
+    struct QLBinding
+    {
+        const ALUniformBuffer* mBuffer = nullptr;
+        size_t mOffset = 0;
+        size_t mBytes = 0;
+        bool   mShadow = false;
+    };
+    constexpr U32 QL_BINDINGS = 32;
+    QLBinding sQLBindings[QL_BINDINGS];
+}
+
+bool ALUniformBuffer::sQLMirror = false;
+
+void ALUniformBuffer::qlNoteBound(U32 binding, size_t offset, size_t bytes, bool shadow) const
+{
+    if (!sQLMirror || binding >= QL_BINDINGS)
+    {
+        return;
+    }
+    sQLBindings[binding] = { this, offset, bytes, shadow };
+}
+
+void ALUniformBuffer::qlForget() const
+{
+    for (QLBinding& b : sQLBindings)
+    {
+        if (b.mBuffer == this)
+        {
+            b = QLBinding();
+        }
+    }
+}
+
+// static
+bool ALUniformBuffer::qlBound(U32 binding, const U8*& data, size_t& bytes)
+{
+    if (binding >= QL_BINDINGS || !sQLBindings[binding].mBuffer)
+    {
+        return false;
+    }
+    const QLBinding& b = sQLBindings[binding];
+    const std::vector<U8>& store = b.mShadow ? b.mBuffer->mShadow : b.mBuffer->mQLCopy;
+    if (b.mOffset >= store.size())
+    {
+        return false;
+    }
+    data  = store.data() + b.mOffset;
+    bytes = llmin(b.mBytes, store.size() - b.mOffset);
+    return bytes != 0;
+}
+
 ALUniformBuffer::~ALUniformBuffer()
 {
+    qlForget();
     release();
 }
 
@@ -777,12 +832,15 @@ ALUniformBuffer::ALUniformBuffer(ALUniformBuffer&& other) noexcept
     other.mRingOffset = 0;
     other.mRingGeneration = 0;
     other.mSliceRing = 0;
+    other.qlForget();
 }
 
 ALUniformBuffer& ALUniformBuffer::operator=(ALUniformBuffer&& other) noexcept
 {
     if (this != &other)
     {
+        qlForget();
+        other.qlForget();
         release();
         mName = other.mName;
         mSize = other.mSize;
@@ -815,6 +873,11 @@ void ALUniformBuffer::update(const void* data, size_t bytes, EUsage usage)
     store_data(mName, mSize, bytes, data, to_gl_usage(usage));
 
     mSliceRing = mName; // valid data now lives in the own store
+
+    if (sQLMirror)
+    {
+        mQLCopy.assign((const U8*)data, (const U8*)data + bytes);
+    }
 }
 
 // Another buffer claiming the scratch ring's binding point invalidates the
@@ -839,6 +902,7 @@ void ALUniformBuffer::bind(U32 binding) const
     }
     scratch_note_foreign_bind(binding, mName);
     glBindBufferBase(GL_UNIFORM_BUFFER, binding, mName);
+    qlNoteBound(binding, 0, mShadow.empty() ? mQLCopy.size() : mShadow.size(), !mShadow.empty());
 }
 
 void ALUniformBuffer::bindRange(U32 binding, size_t offset, size_t size) const
@@ -849,6 +913,7 @@ void ALUniformBuffer::bindRange(U32 binding, size_t offset, size_t size) const
     }
     scratch_note_foreign_bind(binding, mName);
     glBindBufferRange(GL_UNIFORM_BUFFER, binding, mName, (GLintptr)offset, (GLsizeiptr)size);
+    qlNoteBound(binding, offset, size, !mShadow.empty());
 }
 
 void ALUniformBuffer::initShadowed(size_t bytes)
@@ -884,6 +949,7 @@ void ALUniformBuffer::endWrite(size_t offset, size_t bytes)
 
 void ALUniformBuffer::flush(U32 binding)
 {
+    qlNoteBound(binding, 0, mShadow.size(), true);
     if (!mDirty)
     {
         return;
@@ -1026,6 +1092,7 @@ void ALUniformBuffer::flushRing(U32 binding)
 
 void ALUniformBuffer::bindCurrent(U32 binding)
 {
+    qlNoteBound(binding, 0, mShadow.size(), true);
     const S32 mode = effectiveMode();
     const bool persistent = (mode == UPDATE_PERSISTENT || mode == UPDATE_PERSISTENT_FLUSH);
     const bool streaming  = (mode == UPDATE_RING || persistent);
@@ -1116,6 +1183,7 @@ U32 ALUniformBuffer::ringWrapEpoch()
 
 void ALUniformBuffer::ensureCurrent(U32 binding)
 {
+    qlNoteBound(binding, 0, mShadow.size(), true);
     if (mDirty)
     {
         flush(binding);
@@ -1175,6 +1243,8 @@ void ALUniformBuffer::release()
     }
     mShadow.clear();
     mShadow.shrink_to_fit();
+    mQLCopy.clear();
+    qlForget();
     mDirty = false;
     mRingGeneration = 0;
     mSliceRing = 0;

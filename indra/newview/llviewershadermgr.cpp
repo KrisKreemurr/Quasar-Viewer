@@ -538,6 +538,20 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
     // Every loader below reads these, and nothing else of the settings.
     mInputs = inputs;
 
+    // Quasar: the lighting stage's programs, which Vulkan draws itself (QuasarVulkanLighting, read at start), keep
+    // their sources as they link and what GL holds for their uniforms, and the engine's blocks are kept as bytes.
+    // Before any object is compiled: a program attaches the shared objects built below.
+    {
+        static const bool ql_lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
+        LLShaderMgr::sQLKeepSources = ql_lighting;
+        ALUniformBuffer::sQLMirror  = ql_lighting;
+        for (LLGLSLShader* program : { &gDeferredSunProgram, &gDeferredBlurLightProgram, &gDeferredSoftenProgram,
+                                       &gDeferredSkyCompositeProgram })
+        {
+            program->mQLWanted = ql_lighting;
+        }
+    }
+
     ALUniformBuffer::sUpdateMode = ALUniformBuffer::clampUpdateMode(gSavedSettings.getS32("AlchemyRenderUBOUpdateMode"));
 
     // Latch reverse-Z before anything downstream reads it: every shader compile below injects

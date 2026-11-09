@@ -310,6 +310,10 @@ public:
     // inspect what get() will produce; get() is the normal entry point.
     static ALSamplerDesc makeDesc(ALSampler key);
 
+    // Quasar: the descriptor of one of this cache's sampler objects, by its GL name (what a slot binds); false where
+    // the name is none of its. For Vulkan's copy of a GL program's sampling (QuasarVulkanLighting).
+    bool describe(U32 name, ALSamplerDesc& out) const;
+
 private:
     // Builds the descriptor and the GL object for one slot. Returns 0 if sampler objects are
     // unavailable at all, which only happens on a driver that cannot do them.

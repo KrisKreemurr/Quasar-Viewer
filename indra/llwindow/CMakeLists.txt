@@ -98,16 +98,33 @@ if(WINDOWS)
   if(NOT AL_USE_SDL_WINDOW)
     target_sources(
       llwindow
-      PRIVATE llwindowwin32.cpp llkeyboardwin32.cpp lldragdropwin32.cpp qlvulkanpresenter.cpp
+      PRIVATE
+        llwindowwin32.cpp
+        llkeyboardwin32.cpp
+        lldragdropwin32.cpp
+        qlvulkanpresenter.cpp
+        qlvkglsl.cpp
     )
 
     # Quasar: Vulkan presentation (QuasarVulkanPresent). Only the headers: the runtime is loaded when it is asked for,
-    # so the viewer starts on a machine without one.
+    # so the viewer starts on a machine without one. glslang compiles GL's own programs for Vulkan
+    # (QuasarVulkanLighting).
     find_package(VulkanHeaders CONFIG REQUIRED)
-    target_link_libraries(llwindow PRIVATE Vulkan::Headers ql::streamline)
+    find_package(glslang CONFIG REQUIRED)
+    target_link_libraries(
+      llwindow
+      PRIVATE
+        Vulkan::Headers
+        ql::streamline
+        glslang::glslang
+        glslang::glslang-default-resource-limits
+        glslang::SPIRV
+    )
   endif()
   target_sources(
     llwindow
-    PUBLIC FILE_SET HEADERS FILES llwindowwin32.h llkeyboardwin32.h lldragdropwin32.h qlvulkanpresenter.h
+    PUBLIC
+      FILE_SET HEADERS
+      FILES llwindowwin32.h llkeyboardwin32.h lldragdropwin32.h qlvulkanpresenter.h qlvkglsl.h
   )
 endif()

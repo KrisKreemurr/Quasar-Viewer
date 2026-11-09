@@ -623,6 +623,9 @@ public:
     // Lets a hot path cache a resolved name and revalidate it with one compare.
     U32 getSamplerGeneration() const { return mSamplerCache.getGeneration(); }
 
+    // Quasar: the description of a sampler object this context's cache made (ALSamplerCache::describe).
+    bool describeSampler(U32 name, ALSamplerDesc& out) const { return mSamplerCache.describe(name, out); }
+
     // Delete this context's sampler objects and forget the per-unit bindings that pointed
     // at them. Both halves belong together: GL unbinds a deleted sampler automatically, but
     // ALTextureSlot::mCurrSampler would still claim it is bound, and GL may hand the same name

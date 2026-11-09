@@ -48,6 +48,7 @@
 #endif
 
 #include "qlvulkanshaders.h"
+#include "qlvkglsl.h"  // GL's own programs compiled for Vulkan (QuasarVulkanLighting)
 
 #include <algorithm>
 #include <chrono>
@@ -453,6 +454,7 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCmdSetScissor);
     QL_VK_FN(vkCmdCopyBufferToImage);
     QL_VK_FN(vkCmdDrawIndexedIndirect);
+    QL_VK_FN(vkCmdSetDepthBounds);
     QL_VK_FN(vkCreateDebugUtilsMessengerEXT);
     QL_VK_FN(vkDestroyDebugUtilsMessengerEXT);
     QL_VK_FN(vkQueueSubmit);
@@ -717,6 +719,7 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCmdSetScissor);
         QL_VK_DEVICE(vkCmdCopyBufferToImage);
         QL_VK_DEVICE(vkCmdDrawIndexedIndirect);
+        QL_VK_DEVICE(vkCmdSetDepthBounds);
 #undef QL_VK_DEVICE
         return true;
     }
@@ -1106,6 +1109,7 @@ struct QLVulkanPresenter::Impl
     }
 
     bool mHasDepthClamp = false;
+    bool mHasDepthBounds = false;
     bool mHasAniso = false;
     bool mHasMultiIndirect = false;
     bool mHasMemoryBudget = false;
@@ -1191,6 +1195,12 @@ struct QLVulkanPresenter::Impl
         enabled.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
         enabled.samplerAnisotropy         = supported.samplerAnisotropy;  // the G-buffer's textures, as GL filters them
         enabled.tessellationShader        = supported.tessellationShader;  // the terrain Vulkan draws
+        // GL's own programs drawn by Vulkan (QuasarVulkanLighting): the lighting's depth bounds (ALDrawnOnly), the
+        // probes' cube arrays, blending per attachment.
+        enabled.depthBounds               = supported.depthBounds;
+        enabled.imageCubeArray            = supported.imageCubeArray;
+        enabled.independentBlend          = supported.independentBlend;
+        mHasDepthBounds  = enabled.depthBounds == VK_TRUE;
         mHasAniso        = enabled.samplerAnisotropy == VK_TRUE;
         mHasTessellation = enabled.tessellationShader == VK_TRUE;
         mHasDepthClamp   = enabled.depthClamp == VK_TRUE;
@@ -6448,7 +6458,7 @@ struct QLVulkanPresenter::Impl
     std::vector<GbQueued> mGbDraws;
     std::vector<GLuint>   mGbPassTextures;        // the textures the pass draws with, each once, for the hand-over
     std::vector<VkImage>  mGbPassImages;
-    GbDefault             mGbWhite, mGbFlat;
+    GbDefault             mGbWhite, mGbFlat, mGbBlack;
     bool                  mGbPassRigged = false;  // the open pass took a rigged draw
     U64                   mGbSubmitSerial = 0;
     // The G-buffer submissions that read a palette segment (slot, serial): shadowPalette reuses the segment only once
@@ -6685,7 +6695,7 @@ struct QLVulkanPresenter::Impl
         {
             return gbFail("its semaphores could not be shared");
         }
-        if (!createGbDefaults())
+        if (!mGbWhite.image && !createGbDefaults())
         {
             return gbFail("its default textures");
         }
@@ -6713,9 +6723,11 @@ struct QLVulkanPresenter::Impl
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &begin);
         bool made = true;
-        const float colors[2][4] = { { 1.f, 1.f, 1.f, 1.f }, { 128.f / 255.f, 128.f / 255.f, 1.f, 1.f } };
-        GbDefault* defaults[2] = { &mGbWhite, &mGbFlat };
-        for (U32 i = 0; i < 2 && made; ++i)
+        // Black too: what GL's programs read through a unit with nothing bound (QuasarVulkanLighting).
+        const float colors[3][4] = { { 1.f, 1.f, 1.f, 1.f }, { 128.f / 255.f, 128.f / 255.f, 1.f, 1.f },
+                                     { 0.f, 0.f, 0.f, 1.f } };
+        GbDefault* defaults[3] = { &mGbWhite, &mGbFlat, &mGbBlack };
+        for (U32 i = 0; i < 3 && made; ++i)
         {
             GbDefault& d = *defaults[i];
             VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
@@ -6896,6 +6908,7 @@ struct QLVulkanPresenter::Impl
         mGbMatSets.clear();  // the pool goes, and its sets with it
         mGbMatUse.clear();
         destroyGbDefault(mGbWhite);
+        destroyGbDefault(mGbBlack);
         destroyGbDefault(mGbFlat);
         for (GbSlot& slot : mGbSlots)
         {
@@ -8262,6 +8275,1567 @@ struct QLVulkanPresenter::Impl
                (mGbWhy.empty() ? std::string() : " | last kept by GL: " + mGbWhy);
     }
 
+    // ---- GL's own programs drawn by Vulkan (QuasarVulkanLighting) ---------------------------------------------
+    //
+    // A GL program's sources (as GL compiled them) are compiled for Vulkan as they stand (qlvkglsl.h): loose uniforms in
+    // one block, every resource in set 0 at the binding glslang gave it. A draw fills that block from what GL holds for
+    // the program (its regions, by name), copies the engine's blocks bound now, and binds each sampler's texture, every
+    // one in Vulkan's memory. Draws are recorded as they come and handed over at glPassEnd as the G-buffer's are: one GL
+    // signal naming every image they touch, one submission, one GL wait. Images stay GENERAL; between a draw that writes
+    // an image and one that reads it, a barrier.
+    struct GpPipe
+    {
+        U64        key = 0;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+    };
+    struct GpProgram
+    {
+        U64                   key = 0;
+        U32                   link = 0;
+        std::string           name;
+        bool                  ok = false;
+        std::string           note;
+        ql_glsl::Program      refl;
+        VkShaderModule        modules[ql_glsl::STAGE_COUNT] = {};
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        VkPipelineLayout      layout = VK_NULL_HANDLE;
+        std::unordered_map<std::string, U32> members;  // the default block's, by name
+        S32                   position = -1;            // the "position" attribute's location
+        U32                   outputs = 0;              // colour outputs (the highest location + 1)
+        std::vector<GpPipe>   pipes;
+    };
+    std::vector<GpProgram> mGpPrograms;
+
+    static constexpr U32          GP_SLOTS = 4;
+    static constexpr VkDeviceSize GP_SLOT_BYTES = 8ull << 20;  // a pass's blocks and vertices
+    static constexpr U32          GP_SETS = 1024;               // a pass's draws
+    static constexpr VkDeviceSize GP_NONE = ~(VkDeviceSize)0;  // no room
+    struct GpSlot
+    {
+        VkCommandBuffer  cmd = VK_NULL_HANDLE;
+        VkFence          fence = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        bool             submitted = false;
+    };
+    GpSlot           mGpSlots[GP_SLOTS];
+    U32              mGpSlot = 0, mGpNextSlot = 0;
+    VkBuffer         mGpHost = VK_NULL_HANDLE;
+    VkDeviceMemory   mGpHostMemory = VK_NULL_HANDLE;
+    U8*              mGpMapped = nullptr;
+    VkDeviceSize     mGpTop = 0;  // the pass's next free byte, from its slot's start
+    VkDeviceSize     mGpAlign = 256;
+    VkSemaphore      mGpGLDoneVK = VK_NULL_HANDLE, mGpVKDoneVK = VK_NULL_HANDLE;
+    GLuint           mGpGLDoneGL = 0, mGpVKDoneGL = 0;
+    HANDLE           mGpGLDoneHandle = nullptr, mGpVKDoneHandle = nullptr;
+    bool             mGpTried = false, mGpReady = false;
+    std::string      mGpNote = "not used yet";
+    std::string      mGpWhy;  // the last draw or pass GL kept, and why
+
+    // A target: its attachments' views, a render pass that loads them (and one that clears the colours), its framebuffer.
+    struct GpTarget
+    {
+        GLuint        names[5] = {};
+        VkImage       images[5] = {};
+        VkImageView   views[5] = {};
+        VkFormat      formats[5] = {};
+        U32           colors = 0;
+        bool          depth = false;
+        U32           width = 0, height = 0;
+        VkRenderPass  load = VK_NULL_HANDLE, clear = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        U64           formatKey = 0;
+    };
+    std::vector<GpTarget> mGpTargets;
+
+    // Sampled views (a texture's whole, one aspect), and samplers by their description.
+    struct GpView
+    {
+        GLuint             name = 0;
+        VkImage            image = VK_NULL_HANDLE;
+        VkImageAspectFlags aspect = 0;
+        VkImageView        view = VK_NULL_HANDLE;
+    };
+    std::vector<GpView> mGpViews;
+    std::vector<VkImageView> mGpRetired;  // views of images GL has made again, destroyed as a pass begins
+    struct GpSamplerKey
+    {
+        U32 min = 0, mag = 0, s = 0, t = 0, r = 0, compare = 0;
+        F32 aniso = 1.f;
+        bool operator==(const GpSamplerKey&) const = default;
+    };
+    std::vector<std::pair<GpSamplerKey, VkSampler>> mGpSamplers;
+
+    // The pass being recorded.
+    bool                 mGpInPass = false;
+    bool                 mGpRecorded = false;   // a draw is in the command buffer
+    S32                  mGpOpenTarget = -1;    // the target whose render pass is open
+    std::vector<GLuint>  mGpNames;              // every GL texture the pass touches, once each
+    struct GpAcquired
+    {
+        VkImage            image;
+        VkImageAspectFlags aspect;
+        bool               attachment;
+    };
+    std::vector<GpAcquired> mGpAcquired;
+    std::set<VkImage>    mGpWritten;   // written since the last barrier
+    std::set<VkImage>    mGpRead;      // sampled since the last barrier
+    U32                  mGpDrawsNow = 0, mGpDrawsLast = 0, mGpPassesNow = 0, mGpPassesLast = 0;
+    U32                  mGpKeptNow = 0, mGpKeptLast = 0;
+
+    bool gpFail(const std::string& why)
+    {
+        mGpNote = "could not be made: " + why;
+        LL_WARNS("Vulkan") << "GL programs in Vulkan " << mGpNote << LL_ENDL;
+        return false;
+    }
+
+    void gpWhy(const std::string& why)
+    {
+        mGpWhy = why;
+        ++mGpKeptNow;
+    }
+
+    bool createGpObjects()
+    {
+        if (mGpTried)
+        {
+            return mGpReady;
+        }
+        mGpTried = true;
+        if (!mActive || !mDevice || !mExtPassed)
+        {
+            mGpNote = "needs QuasarVulkanTargets, its self-test passed";
+            return false;
+        }
+        if (!mGbWhite.image && !createGbDefaults())
+        {
+            return gpFail("its default textures");
+        }
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(mPhysical, &props);
+        mGpAlign = llmax((VkDeviceSize)props.limits.minUniformBufferOffsetAlignment, (VkDeviceSize)16);
+        VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        host_info.size        = GP_SLOT_BYTES * GP_SLOTS;
+        host_info.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        host_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(mDevice, &host_info, nullptr, &mGpHost) != VK_SUCCESS)
+        {
+            mGpHost = VK_NULL_HANDLE;
+            return gpFail("vkCreateBuffer");
+        }
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(mDevice, mGpHost, &req);
+        VkMemoryAllocateInfo alloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        alloc.allocationSize  = req.size;
+        alloc.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (alloc.memoryTypeIndex == U32_MAX || vkAllocateMemory(mDevice, &alloc, nullptr, &mGpHostMemory) != VK_SUCCESS)
+        {
+            mGpHostMemory = VK_NULL_HANDLE;
+            return gpFail("its host memory");
+        }
+        vkBindBufferMemory(mDevice, mGpHost, mGpHostMemory, 0);
+        void* mapped = nullptr;
+        if (vkMapMemory(mDevice, mGpHostMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+        {
+            return gpFail("vkMapMemory");
+        }
+        mGpMapped = (U8*)mapped;
+        const VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GP_SETS * 6 },
+                                                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GP_SETS * 16 },
+                                                { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64 } };
+        for (GpSlot& slot : mGpSlots)
+        {
+            VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cmd_info.commandPool        = mCommandPool;
+            cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cmd_info.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(mDevice, &cmd_info, &slot.cmd) != VK_SUCCESS)
+            {
+                slot.cmd = VK_NULL_HANDLE;
+                return gpFail("vkAllocateCommandBuffers");
+            }
+            VkFenceCreateInfo fence = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            if (vkCreateFence(mDevice, &fence, nullptr, &slot.fence) != VK_SUCCESS)
+            {
+                slot.fence = VK_NULL_HANDLE;
+                return gpFail("vkCreateFence");
+            }
+            VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            pool_info.maxSets       = GP_SETS;
+            pool_info.poolSizeCount = 3;
+            pool_info.pPoolSizes    = sizes;
+            if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &slot.pool) != VK_SUCCESS)
+            {
+                slot.pool = VK_NULL_HANDLE;
+                return gpFail("vkCreateDescriptorPool");
+            }
+        }
+        if (!createSharedSemaphore(mGpGLDoneVK, mGpGLDoneGL, mGpGLDoneHandle) ||
+            !createSharedSemaphore(mGpVKDoneVK, mGpVKDoneGL, mGpVKDoneHandle))
+        {
+            return gpFail("its semaphores could not be shared");
+        }
+        ql_glsl::initialize();
+        mGpReady = true;
+        mGpNote  = "ready";
+        LL_INFOS("Vulkan") << "GL programs in Vulkan: ready" << LL_ENDL;
+        return true;
+    }
+
+    void destroyGpProgram(GpProgram& p)
+    {
+        for (GpPipe& pipe : p.pipes)
+        {
+            if (pipe.pipeline) vkDestroyPipeline(mDevice, pipe.pipeline, nullptr);
+        }
+        p.pipes.clear();
+        for (VkShaderModule& m : p.modules)
+        {
+            if (m) vkDestroyShaderModule(mDevice, m, nullptr);
+            m = VK_NULL_HANDLE;
+        }
+        if (p.layout) vkDestroyPipelineLayout(mDevice, p.layout, nullptr);
+        if (p.setLayout) vkDestroyDescriptorSetLayout(mDevice, p.setLayout, nullptr);
+        p.layout    = VK_NULL_HANDLE;
+        p.setLayout = VK_NULL_HANDLE;
+        p.ok        = false;
+    }
+
+    void destroyGpTarget(GpTarget& t)
+    {
+        if (t.framebuffer) vkDestroyFramebuffer(mDevice, t.framebuffer, nullptr);
+        if (t.load) vkDestroyRenderPass(mDevice, t.load, nullptr);
+        if (t.clear) vkDestroyRenderPass(mDevice, t.clear, nullptr);
+        for (VkImageView& v : t.views)
+        {
+            if (v) vkDestroyImageView(mDevice, v, nullptr);
+            v = VK_NULL_HANDLE;
+        }
+        t = GpTarget();
+    }
+
+    // Every slot's work done: before a program, target or view still named by a recorded pass goes.
+    void gpWaitSlots()
+    {
+        for (GpSlot& slot : mGpSlots)
+        {
+            if (slot.submitted)
+            {
+                vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+                slot.submitted = false;
+            }
+        }
+    }
+
+    void destroyGpObjects()
+    {
+        if (!mDevice)
+        {
+            return;
+        }
+        if (mGpTried)
+        {
+            vkDeviceWaitIdle(mDevice);
+        }
+        mGpInPass = false;
+        for (GpProgram& p : mGpPrograms)
+        {
+            destroyGpProgram(p);
+        }
+        mGpPrograms.clear();
+        for (GpTarget& t : mGpTargets)
+        {
+            destroyGpTarget(t);
+        }
+        mGpTargets.clear();
+        for (GpView& v : mGpViews)
+        {
+            if (v.view) vkDestroyImageView(mDevice, v.view, nullptr);
+        }
+        mGpViews.clear();
+        for (VkImageView view : mGpRetired)
+        {
+            if (view) vkDestroyImageView(mDevice, view, nullptr);
+        }
+        mGpRetired.clear();
+        for (auto& s : mGpSamplers)
+        {
+            vkDestroySampler(mDevice, s.second, nullptr);
+        }
+        mGpSamplers.clear();
+        for (GpSlot& slot : mGpSlots)
+        {
+            if (slot.pool) vkDestroyDescriptorPool(mDevice, slot.pool, nullptr);
+            if (slot.fence) vkDestroyFence(mDevice, slot.fence, nullptr);
+            if (slot.cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &slot.cmd);
+            slot = GpSlot();
+        }
+        if (mGpMapped)
+        {
+            vkUnmapMemory(mDevice, mGpHostMemory);
+            mGpMapped = nullptr;
+        }
+        if (mGpHost) vkDestroyBuffer(mDevice, mGpHost, nullptr);
+        if (mGpHostMemory) vkFreeMemory(mDevice, mGpHostMemory, nullptr);
+        mGpHost       = VK_NULL_HANDLE;
+        mGpHostMemory = VK_NULL_HANDLE;
+        if (mGpGLDoneGL) gl.DeleteSemaphoresEXT(1, &mGpGLDoneGL);
+        if (mGpVKDoneGL) gl.DeleteSemaphoresEXT(1, &mGpVKDoneGL);
+        if (mGpGLDoneVK) vkDestroySemaphore(mDevice, mGpGLDoneVK, nullptr);
+        if (mGpVKDoneVK) vkDestroySemaphore(mDevice, mGpVKDoneVK, nullptr);
+        mGpGLDoneGL = mGpVKDoneGL = 0;
+        mGpGLDoneVK = mGpVKDoneVK = VK_NULL_HANDLE;
+        for (HANDLE* h : { &mGpGLDoneHandle, &mGpVKDoneHandle })
+        {
+            if (*h)
+            {
+                CloseHandle(*h);
+                *h = nullptr;
+            }
+        }
+        if (mGpTried)
+        {
+            ql_glsl::finalize();
+        }
+        mGpReady = false;
+        mGpTried = false;
+    }
+
+    static ql_glsl::Stage gpStage(unsigned gl_type, bool& known)
+    {
+        known = true;
+        switch (gl_type)
+        {
+            case GL_VERTEX_SHADER: return ql_glsl::STAGE_VERTEX;
+            case GL_TESS_CONTROL_SHADER: return ql_glsl::STAGE_TESS_CONTROL;
+            case GL_TESS_EVALUATION_SHADER: return ql_glsl::STAGE_TESS_EVALUATION;
+            case GL_FRAGMENT_SHADER: return ql_glsl::STAGE_FRAGMENT;
+            case GL_COMPUTE_SHADER: return ql_glsl::STAGE_COMPUTE;
+            default: known = false; return ql_glsl::STAGE_VERTEX;
+        }
+    }
+
+    static VkShaderStageFlags gpStages(U32 bits)
+    {
+        VkShaderStageFlags flags = 0;
+        if (bits & (1u << ql_glsl::STAGE_VERTEX)) flags |= VK_SHADER_STAGE_VERTEX_BIT;
+        if (bits & (1u << ql_glsl::STAGE_TESS_CONTROL)) flags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        if (bits & (1u << ql_glsl::STAGE_TESS_EVALUATION)) flags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        if (bits & (1u << ql_glsl::STAGE_FRAGMENT)) flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
+        if (bits & (1u << ql_glsl::STAGE_COMPUTE)) flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+        return flags;
+    }
+
+    // What made the program what it is, for the note: its first lines of complaint.
+    static std::string gpFirstLines(const std::string& log, size_t lines)
+    {
+        std::string out;
+        size_t start = 0;
+        for (size_t n = 0; n < lines && start < log.size(); ++n)
+        {
+            size_t end = log.find('\n', start);
+            if (end == std::string::npos)
+            {
+                end = log.size();
+            }
+            if (end > start)
+            {
+                out += (out.empty() ? "" : " / ") + log.substr(start, end - start);
+            }
+            start = end + 1;
+        }
+        return out;
+    }
+
+    int gpProgram(U64 key, U32 link, const char* name, const QLVulkanPresenter::GpSource* sources, U32 count)
+    {
+        if (!createGpObjects())
+        {
+            return -1;
+        }
+        S32 index = -1;
+        for (size_t i = 0; i < mGpPrograms.size(); ++i)
+        {
+            if (mGpPrograms[i].key == key)
+            {
+                index = (S32)i;
+                break;
+            }
+        }
+        if (index >= 0 && mGpPrograms[index].link == link)
+        {
+            return mGpPrograms[index].ok ? index : -1;
+        }
+        if (index >= 0 && mGpRecorded)
+        {
+            return -1;  // relinked while a pass that may name its pipelines is recorded: made again at the next
+        }
+        if (index < 0)
+        {
+            index = (S32)mGpPrograms.size();
+            mGpPrograms.emplace_back();
+        }
+        else
+        {
+            gpWaitSlots();  // a pass may still name the old pipelines
+            destroyGpProgram(mGpPrograms[index]);
+        }
+        GpProgram& p = mGpPrograms[index];
+        p      = GpProgram();
+        p.key  = key;
+        p.link = link;
+        p.name = name ? name : "";
+        LL_PROFILE_ZONE_NAMED("vulkan gl program compile");
+        std::vector<ql_glsl::Source> src;
+        for (U32 i = 0; i < count; ++i)
+        {
+            bool known = false;
+            const ql_glsl::Stage stage = gpStage(sources[i].type, known);
+            if (!known || !sources[i].text)
+            {
+                p.note = "a stage Vulkan is not given";
+                return -1;
+            }
+            src.push_back({ stage, sources[i].name ? sources[i].name : "", std::string(sources[i].text, sources[i].length) });
+        }
+        if (src.empty())
+        {
+            p.note = "GL kept none of its sources (LLShaderMgr::sQLKeepSources was off as it linked)";
+            return -1;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        if (!ql_glsl::compile(src, p.refl))
+        {
+            p.note = "does not compile for Vulkan: " + gpFirstLines(p.refl.log, 3);
+            LL_WARNS("Vulkan") << "GL program " << p.name << " " << p.note << "\n" << p.refl.log << LL_ENDL;
+            return -1;
+        }
+        if (p.refl.stage_mask & ((1u << ql_glsl::STAGE_TESS_CONTROL) | (1u << ql_glsl::STAGE_TESS_EVALUATION)))
+        {
+            p.note = "is tessellated (not yet drawn by Vulkan)";
+            return -1;
+        }
+        for (U32 st = 0; st < ql_glsl::STAGE_COUNT; ++st)
+        {
+            if (p.refl.spirv[st].empty())
+            {
+                continue;
+            }
+            VkShaderModuleCreateInfo module = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            module.codeSize = p.refl.spirv[st].size() * sizeof(uint32_t);
+            module.pCode    = p.refl.spirv[st].data();
+            if (vkCreateShaderModule(mDevice, &module, nullptr, &p.modules[st]) != VK_SUCCESS)
+            {
+                p.modules[st] = VK_NULL_HANDLE;
+                p.note        = "vkCreateShaderModule failed";
+                destroyGpProgram(p);
+                return -1;
+            }
+        }
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        for (const ql_glsl::Resource& r : p.refl.resources)
+        {
+            if (r.set != 0)
+            {
+                p.note = "a resource outside set 0";
+                destroyGpProgram(p);
+                return -1;
+            }
+            VkDescriptorSetLayoutBinding b = {};
+            b.binding         = r.binding;
+            b.descriptorCount = r.count;
+            b.stageFlags      = gpStages(r.stages ? r.stages : p.refl.stage_mask);
+            switch (r.kind)
+            {
+                case ql_glsl::RES_UNIFORM_BLOCK: b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b.descriptorCount = 1; break;
+                case ql_glsl::RES_SAMPLER: b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; break;
+                case ql_glsl::RES_STORAGE_IMAGE: b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; break;
+                default:
+                    p.note = "reads " + r.name + ", a kind of resource Vulkan is not given yet";
+                    destroyGpProgram(p);
+                    return -1;
+            }
+            bindings.push_back(b);
+        }
+        VkDescriptorSetLayoutCreateInfo set_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        set_info.bindingCount = (U32)bindings.size();
+        set_info.pBindings    = bindings.data();
+        if (vkCreateDescriptorSetLayout(mDevice, &set_info, nullptr, &p.setLayout) != VK_SUCCESS)
+        {
+            p.setLayout = VK_NULL_HANDLE;
+            p.note      = "vkCreateDescriptorSetLayout failed";
+            destroyGpProgram(p);
+            return -1;
+        }
+        VkPipelineLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts    = &p.setLayout;
+        if (vkCreatePipelineLayout(mDevice, &layout_info, nullptr, &p.layout) != VK_SUCCESS)
+        {
+            p.layout = VK_NULL_HANDLE;
+            p.note   = "vkCreatePipelineLayout failed";
+            destroyGpProgram(p);
+            return -1;
+        }
+        for (size_t m = 0; m < p.refl.members.size(); ++m)
+        {
+            p.members[p.refl.members[m].name] = (U32)m;
+        }
+        for (const ql_glsl::Attribute& a : p.refl.inputs)
+        {
+            if (a.name == "position")
+            {
+                p.position = (S32)a.location;
+            }
+            else
+            {
+                p.note = "reads the attribute " + a.name + " (Vulkan gives positions alone)";
+                destroyGpProgram(p);
+                return -1;
+            }
+        }
+        for (const ql_glsl::Attribute& a : p.refl.outputs)
+        {
+            p.outputs = llmax(p.outputs, a.location + 1);
+        }
+        p.ok = true;
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        p.note = llformat("compiled in %.0f ms: %u loose uniforms in %u bytes, %u resources", ms,
+                          (U32)p.refl.members.size(), p.refl.default_size, (U32)p.refl.resources.size());
+        LL_INFOS("Vulkan") << "GL program " << p.name << " in Vulkan: " << p.note << LL_ENDL;
+        return index;
+    }
+
+    std::string gpProgramNote(U64 key) const
+    {
+        for (const GpProgram& p : mGpPrograms)
+        {
+            if (p.key == key)
+            {
+                return p.note;
+            }
+        }
+        return "not asked for";
+    }
+
+    // A render pass for a target's formats: its attachments loaded, or its colours cleared (the depth loaded either way).
+    VkRenderPass gpRenderPass(const GpTarget& t, bool clear)
+    {
+        VkAttachmentDescription attachments[5] = {};
+        VkAttachmentReference   color_refs[4] = {};
+        const U32 count = t.colors + (t.depth ? 1 : 0);
+        for (U32 i = 0; i < count; ++i)
+        {
+            const bool is_depth = t.depth && i == t.colors;
+            const bool stencil  = t.formats[i] == VK_FORMAT_D24_UNORM_S8_UINT || t.formats[i] == VK_FORMAT_D32_SFLOAT_S8_UINT;
+            VkAttachmentDescription& a = attachments[i];
+            a.format         = t.formats[i];
+            a.samples        = VK_SAMPLE_COUNT_1_BIT;
+            a.loadOp         = (clear && !is_depth) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            a.stencilLoadOp  = stencil ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            a.stencilStoreOp = stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            a.initialLayout  = VK_IMAGE_LAYOUT_GENERAL;
+            a.finalLayout    = VK_IMAGE_LAYOUT_GENERAL;
+            if (!is_depth)
+            {
+                color_refs[i] = { i, VK_IMAGE_LAYOUT_GENERAL };
+            }
+        }
+        const VkAttachmentReference depth_ref = { t.colors, VK_IMAGE_LAYOUT_GENERAL };
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount    = t.colors;
+        subpass.pColorAttachments       = color_refs;
+        subpass.pDepthStencilAttachment = t.depth ? &depth_ref : nullptr;
+        VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        pass_info.attachmentCount = count;
+        pass_info.pAttachments    = attachments;
+        pass_info.subpassCount    = 1;
+        pass_info.pSubpasses      = &subpass;
+        VkRenderPass pass = VK_NULL_HANDLE;
+        if (vkCreateRenderPass(mDevice, &pass_info, nullptr, &pass) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return pass;
+    }
+
+    S32 gpTarget(const QLVulkanPresenter::GpDraw& d)
+    {
+        const U32 count = d.color_count + (d.depth ? 1 : 0);
+        if (d.color_count > 4 || count == 0 || !d.width || !d.height)
+        {
+            gpWhy("a target of no attachments or more than four colours");
+            return -1;
+        }
+        GLuint names[5] = {};
+        VkImage images[5] = {};
+        VkFormat formats[5] = {};
+        for (U32 i = 0; i < count; ++i)
+        {
+            names[i] = i < d.color_count ? d.colors[i] : d.depth;
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            const auto found = mExtTextures.find(names[i]);
+            if (found == mExtTextures.end() || found->second.block >= 0)
+            {
+                gpWhy(llformat("its %s (GL name %u) is not in Vulkan's memory",
+                               i < d.color_count ? "colour attachment" : "depth", names[i]));
+                return -1;
+            }
+            images[i]  = found->second.image;
+            formats[i] = found->second.vk;
+        }
+        for (size_t t = 0; t < mGpTargets.size(); ++t)
+        {
+            const GpTarget& g = mGpTargets[t];
+            bool same = g.colors == d.color_count && g.depth == (d.depth != 0) && g.width == d.width && g.height == d.height;
+            for (U32 i = 0; i < count && same; ++i)
+            {
+                same = g.names[i] == names[i] && g.images[i] == images[i];
+            }
+            if (same)
+            {
+                return (S32)t;
+            }
+        }
+        // Past 64 targets the oldest goes, before anything of the pass is recorded (a recorded draw names its target,
+        // and the open render pass its framebuffer).
+        if (mGpTargets.size() >= 64 && !mGpRecorded)
+        {
+            gpEndRenderPass();
+            gpWaitSlots();
+            destroyGpTarget(mGpTargets.front());
+            mGpTargets.erase(mGpTargets.begin());
+        }
+        GpTarget t;
+        t.colors = d.color_count;
+        t.depth  = d.depth != 0;
+        t.width  = d.width;
+        t.height = d.height;
+        for (U32 i = 0; i < count; ++i)
+        {
+            const bool is_depth = t.depth && i == t.colors;
+            const bool stencil  = formats[i] == VK_FORMAT_D24_UNORM_S8_UINT || formats[i] == VK_FORMAT_D32_SFLOAT_S8_UINT;
+            t.names[i]   = names[i];
+            t.images[i]  = images[i];
+            t.formats[i] = formats[i];
+            t.formatKey  = t.formatKey * 131 + (U64)formats[i] + 1;
+            VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            view_info.image            = images[i];
+            view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format           = formats[i];
+            view_info.subresourceRange = { is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                                           (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
+                                                    : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT,
+                                           0, 1, 0, 1 };
+            if (vkCreateImageView(mDevice, &view_info, nullptr, &t.views[i]) != VK_SUCCESS)
+            {
+                t.views[i] = VK_NULL_HANDLE;
+                destroyGpTarget(t);
+                gpWhy("vkCreateImageView failed for an attachment");
+                return -1;
+            }
+        }
+        t.formatKey = t.formatKey * 7 + (t.depth ? 1 : 0);
+        t.load  = gpRenderPass(t, false);
+        t.clear = gpRenderPass(t, true);
+        if (!t.load || !t.clear)
+        {
+            destroyGpTarget(t);
+            gpWhy("vkCreateRenderPass failed");
+            return -1;
+        }
+        VkFramebufferCreateInfo fb_info = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fb_info.renderPass      = t.load;
+        fb_info.attachmentCount = count;
+        fb_info.pAttachments    = t.views;
+        fb_info.width           = t.width;
+        fb_info.height          = t.height;
+        fb_info.layers          = 1;
+        if (vkCreateFramebuffer(mDevice, &fb_info, nullptr, &t.framebuffer) != VK_SUCCESS)
+        {
+            t.framebuffer = VK_NULL_HANDLE;
+            destroyGpTarget(t);
+            gpWhy("vkCreateFramebuffer failed");
+            return -1;
+        }
+        mGpTargets.push_back(t);
+        return (S32)mGpTargets.size() - 1;
+    }
+
+    static VkCompareOp gpCompare(unsigned func)
+    {
+        switch (func)
+        {
+            case GL_NEVER: return VK_COMPARE_OP_NEVER;
+            case GL_LESS: return VK_COMPARE_OP_LESS;
+            case GL_EQUAL: return VK_COMPARE_OP_EQUAL;
+            case GL_LEQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+            case GL_GREATER: return VK_COMPARE_OP_GREATER;
+            case GL_NOTEQUAL: return VK_COMPARE_OP_NOT_EQUAL;
+            case GL_GEQUAL: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+            default: return VK_COMPARE_OP_ALWAYS;
+        }
+    }
+
+    VkPipeline gpPipeline(GpProgram& p, const GpTarget& t, const QLVulkanPresenter::GpDraw& d)
+    {
+        const bool bounds = d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth;
+        const U64 key = t.formatKey * 1000003ull + ((U64)d.blend) + ((U64)d.depth_func << 4) +
+                        ((U64)(d.depth_write ? 1 : 0) << 20) + ((U64)(bounds ? 1 : 0) << 21) +
+                        ((U64)(d.cull_back ? 1 : 0) << 22) + ((U64)d.topology << 24) + ((U64)t.colors << 40);
+        for (const GpPipe& pipe : p.pipes)
+        {
+            if (pipe.key == key)
+            {
+                return pipe.pipeline;
+            }
+        }
+        VkPipelineShaderStageCreateInfo stages[2] = {};
+        U32 stage_count = 0;
+        for (U32 st : { (U32)ql_glsl::STAGE_VERTEX, (U32)ql_glsl::STAGE_FRAGMENT })
+        {
+            if (!p.modules[st])
+            {
+                continue;
+            }
+            VkPipelineShaderStageCreateInfo& s = stages[stage_count++];
+            s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            s.stage  = st == ql_glsl::STAGE_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+            s.module = p.modules[st];
+            s.pName  = "main";
+        }
+        VkVertexInputBindingDescription binding = { 0, 12, VK_VERTEX_INPUT_RATE_VERTEX };
+        VkVertexInputAttributeDescription attribute = { (U32)llmax(p.position, 0), 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+        VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        if (p.position >= 0)
+        {
+            vertex_input.vertexBindingDescriptionCount   = 1;
+            vertex_input.pVertexBindingDescriptions      = &binding;
+            vertex_input.vertexAttributeDescriptionCount = 1;
+            vertex_input.pVertexAttributeDescriptions    = &attribute;
+        }
+        VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        assembly.topology = d.topology == GL_TRIANGLE_STRIP ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                            : d.topology == GL_TRIANGLE_FAN ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN
+                                                            : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        viewport_state.viewportCount = 1;
+        viewport_state.scissorCount  = 1;
+        // GL's counter-clockwise front, turned over by Vulkan's framebuffer rows (as the G-buffer's pipelines).
+        VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode    = d.cull_back ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+        raster.frontFace   = VK_FRONT_FACE_CLOCKWISE;
+        raster.lineWidth   = 1.f;
+        VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        depth.depthTestEnable       = d.depth_func != 0 && t.depth ? VK_TRUE : VK_FALSE;
+        depth.depthWriteEnable      = d.depth_write && t.depth ? VK_TRUE : VK_FALSE;
+        depth.depthCompareOp        = gpCompare(d.depth_func);
+        depth.depthBoundsTestEnable = bounds ? VK_TRUE : VK_FALSE;
+        depth.minDepthBounds        = 0.f;
+        depth.maxDepthBounds        = 1.f;
+        VkPipelineColorBlendAttachmentState blends[4] = {};
+        for (U32 i = 0; i < t.colors; ++i)
+        {
+            VkPipelineColorBlendAttachmentState& b = blends[i];
+            // An attachment the program writes nothing to keeps what it holds (Vulkan would leave it undefined).
+            b.colorWriteMask = i < p.outputs ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+                                             : 0;
+            if (d.blend != 0)
+            {
+                b.blendEnable         = VK_TRUE;
+                b.srcColorBlendFactor = d.blend == 1 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
+                b.dstColorBlendFactor = d.blend == 1 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                b.colorBlendOp        = VK_BLEND_OP_ADD;
+                b.srcAlphaBlendFactor = d.blend == 1 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
+                b.dstAlphaBlendFactor = d.blend == 1 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                b.alphaBlendOp        = VK_BLEND_OP_ADD;
+            }
+        }
+        VkPipelineColorBlendStateCreateInfo blend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        blend.attachmentCount = t.colors;
+        blend.pAttachments    = blends;
+        VkDynamicState dynamic_states[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                                             VK_DYNAMIC_STATE_DEPTH_BOUNDS };
+        VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dynamic.dynamicStateCount = bounds ? 3 : 2;
+        dynamic.pDynamicStates    = dynamic_states;
+        VkGraphicsPipelineCreateInfo info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        info.stageCount          = stage_count;
+        info.pStages             = stages;
+        info.pVertexInputState   = &vertex_input;
+        info.pInputAssemblyState = &assembly;
+        info.pViewportState      = &viewport_state;
+        info.pRasterizationState = &raster;
+        info.pMultisampleState   = &multisample;
+        info.pDepthStencilState  = &depth;
+        info.pColorBlendState    = &blend;
+        info.pDynamicState       = &dynamic;
+        info.layout              = p.layout;
+        info.renderPass          = t.load;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        LL_PROFILE_ZONE_NAMED("vulkan gl program pipeline");
+        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        p.pipes.push_back({ key, pipeline });
+        return pipeline;
+    }
+
+    VkSampler gpSampler(const QLVulkanPresenter::GpTexture& tex)
+    {
+        GpSamplerKey key;
+        key.min     = tex.min_filter;
+        key.mag     = tex.mag_filter;
+        key.s       = tex.wrap_s;
+        key.t       = tex.wrap_t;
+        key.r       = tex.wrap_r;
+        key.compare = tex.compare_func;
+        key.aniso   = mHasAniso ? llmax(tex.anisotropy, 1.f) : 1.f;
+        for (const auto& s : mGpSamplers)
+        {
+            if (s.first == key)
+            {
+                return s.second;
+            }
+        }
+        auto address = [](U32 wrap)
+        {
+            switch (wrap)
+            {
+                case GL_REPEAT: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+                case GL_MIRRORED_REPEAT: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+                case GL_CLAMP_TO_BORDER: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+                default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            }
+        };
+        const bool min_linear = key.min == GL_LINEAR || key.min == GL_LINEAR_MIPMAP_NEAREST ||
+                                key.min == GL_LINEAR_MIPMAP_LINEAR;
+        const bool mip_linear = key.min == GL_LINEAR_MIPMAP_LINEAR || key.min == GL_NEAREST_MIPMAP_LINEAR;
+        const bool mipmapped  = key.min != GL_LINEAR && key.min != GL_NEAREST;
+        VkSamplerCreateInfo info = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        info.magFilter     = key.mag == GL_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        info.minFilter     = min_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        info.mipmapMode    = mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.addressModeU  = address(key.s);
+        info.addressModeV  = address(key.t);
+        info.addressModeW  = address(key.r);
+        info.anisotropyEnable = key.aniso > 1.f ? VK_TRUE : VK_FALSE;
+        info.maxAnisotropy    = key.aniso;
+        info.compareEnable    = key.compare ? VK_TRUE : VK_FALSE;
+        info.compareOp        = gpCompare(key.compare);
+        info.minLod           = 0.f;
+        // GL_LINEAR / GL_NEAREST minification reads level 0 alone.
+        info.maxLod           = mipmapped ? VK_LOD_CLAMP_NONE : 0.f;
+        info.borderColor      = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        VkSampler sampler = VK_NULL_HANDLE;
+        if (vkCreateSampler(mDevice, &info, nullptr, &sampler) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        mGpSamplers.emplace_back(key, sampler);
+        return sampler;
+    }
+
+    // A sampled view of a GL texture in Vulkan's memory (a depth texture's depth alone); null where it is not there.
+    VkImageView gpView(GLuint name, VkImage& image, VkFormat& format, bool& is_depth)
+    {
+        U32 levels = 1;
+        {
+            std::lock_guard<std::mutex> lock(mExtMutex);
+            const auto found = mExtTextures.find(name);
+            if (found == mExtTextures.end())
+            {
+                return VK_NULL_HANDLE;
+            }
+            image  = found->second.image;
+            format = found->second.vk;
+            levels = llmax(1u, found->second.levels);
+        }
+        is_depth = format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+                   format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+        const VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        for (GpView& v : mGpViews)
+        {
+            if (v.name == name && v.aspect == aspect)
+            {
+                if (v.image == image)
+                {
+                    return v.view;
+                }
+                // The name has another image now (GL made it again): the old view goes once nothing reads it (the
+                // pass being recorded may: it goes as the next pass begins, every slot done).
+                mGpRetired.push_back(v.view);
+                v.view  = VK_NULL_HANDLE;
+                v.image = image;
+                VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+                view_info.image            = image;
+                view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+                view_info.format           = format;
+                view_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+                if (vkCreateImageView(mDevice, &view_info, nullptr, &v.view) != VK_SUCCESS)
+                {
+                    v.view = VK_NULL_HANDLE;
+                }
+                return v.view;
+            }
+        }
+        GpView v;
+        v.name   = name;
+        v.image  = image;
+        v.aspect = aspect;
+        VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        view_info.image            = image;
+        view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format           = format;
+        view_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+        if (vkCreateImageView(mDevice, &view_info, nullptr, &v.view) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        mGpViews.push_back(v);
+        return v.view;
+    }
+
+    // Room in the slot's share of the host buffer; GP_NONE when the pass has used it all.
+    VkDeviceSize gpAllocate(VkDeviceSize bytes)
+    {
+        const VkDeviceSize at = (mGpTop + mGpAlign - 1) / mGpAlign * mGpAlign;
+        if (at + bytes > GP_SLOT_BYTES)
+        {
+            return GP_NONE;
+        }
+        mGpTop = at + bytes;
+        return GP_SLOT_BYTES * mGpSlot + at;
+    }
+
+    // The default block's bytes, from what GL holds for the program's loose uniforms (std140, as glslang laid it out).
+    void gpFillDefaults(const GpProgram& p, const QLVulkanPresenter::GpDraw& d, U8* out)
+    {
+        memset(out, 0, p.refl.default_size);
+        for (U32 r = 0; r < d.region_count; ++r)
+        {
+            const QLVulkanPresenter::GpRegion& region = d.regions[r];
+            if (!region.name)
+            {
+                continue;
+            }
+            const auto found = p.members.find(region.name);
+            if (found == p.members.end())
+            {
+                continue;  // not read by the program (GL keeps what Vulkan's compiler dropped, and samplers' units)
+            }
+            const ql_glsl::Member& m = p.refl.members[found->second];
+            const U32* words = d.words + region.words;
+            const U32 elements = llmin(region.elements, m.count);
+            const U32 stride = m.array_stride ? m.array_stride : 16;
+            const bool is_bool = m.gl_type == GL_BOOL || m.gl_type == GL_BOOL_VEC2 || m.gl_type == GL_BOOL_VEC3 ||
+                                 m.gl_type == GL_BOOL_VEC4;
+            for (U32 e = 0; e < elements; ++e)
+            {
+                U8* dst = out + m.offset + (size_t)e * stride;
+                const U32* src = words + (size_t)e * region.components;
+                if (dst + 4 > out + p.refl.default_size)
+                {
+                    break;
+                }
+                if (m.matrix_stride)
+                {
+                    // Columns (GL's, or its rows where it was handed over transposed) of `rows` floats each.
+                    U32 cols = 4, rows = 4;
+                    switch (m.gl_type)
+                    {
+                        case GL_FLOAT_MAT2: cols = 2; rows = 2; break;
+                        case GL_FLOAT_MAT3: cols = 3; rows = 3; break;
+                        case GL_FLOAT_MAT2x3: cols = 2; rows = 3; break;
+                        case GL_FLOAT_MAT2x4: cols = 2; rows = 4; break;
+                        case GL_FLOAT_MAT3x2: cols = 3; rows = 2; break;
+                        case GL_FLOAT_MAT3x4: cols = 3; rows = 4; break;
+                        case GL_FLOAT_MAT4x2: cols = 4; rows = 2; break;
+                        case GL_FLOAT_MAT4x3: cols = 4; rows = 3; break;
+                        default: break;
+                    }
+                    for (U32 c = 0; c < cols; ++c)
+                    {
+                        for (U32 row = 0; row < rows; ++row)
+                        {
+                            const U32 at = region.transpose ? row * cols + c : c * rows + row;
+                            U8* cell = dst + c * m.matrix_stride + row * 4;
+                            if (at < region.components && cell + 4 <= out + p.refl.default_size)
+                            {
+                                memcpy(cell, src + at, 4);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                const U32 comps = llmin(region.components, 4u);
+                for (U32 c = 0; c < comps; ++c)
+                {
+                    U32 value = src[c];
+                    if (is_bool)
+                    {
+                        F32 f;
+                        memcpy(&f, &value, 4);
+                        value = region.kind == 0 ? (f != 0.f ? 1u : 0u) : (value != 0 ? 1u : 0u);
+                    }
+                    if (dst + c * 4 + 4 <= out + p.refl.default_size)
+                    {
+                        memcpy(dst + c * 4, &value, 4);
+                    }
+                }
+            }
+        }
+    }
+
+    bool gpPassBegin()
+    {
+        if (!createGpObjects())
+        {
+            return false;
+        }
+        if (mGpInPass)
+        {
+            gpWhy("a pass began inside another");
+            return false;
+        }
+        if (!mGpRetired.empty())
+        {
+            gpWaitSlots();
+            for (VkImageView view : mGpRetired)
+            {
+                if (view) vkDestroyImageView(mDevice, view, nullptr);
+            }
+            mGpRetired.clear();
+        }
+        GpSlot& slot = mGpSlots[mGpNextSlot];
+        if (slot.submitted)
+        {
+            if (vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS)
+            {
+                gpWhy("all its submission slots still busy");
+                return false;
+            }
+            slot.submitted = false;
+        }
+        mGpSlot     = mGpNextSlot;
+        mGpNextSlot = (mGpNextSlot + 1) % GP_SLOTS;
+        mGpTop      = 0;
+        vkResetDescriptorPool(mDevice, slot.pool, 0);
+        vkResetCommandBuffer(slot.cmd, 0);
+        VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(slot.cmd, &begin);
+        mGpInPass     = true;
+        mGpRecorded   = false;
+        mGpOpenTarget = -1;
+        mGpNames.clear();
+        mGpAcquired.clear();
+        mGpWritten.clear();
+        mGpRead.clear();
+        return true;
+    }
+
+    void gpEndRenderPass()
+    {
+        if (mGpOpenTarget >= 0)
+        {
+            vkCmdEndRenderPass(mGpSlots[mGpSlot].cmd);
+            mGpOpenTarget = -1;
+        }
+    }
+
+    // Everything written so far visible to everything after: between a draw that writes an image and one that reads it
+    // (or writes it from another target).
+    void gpBarrier()
+    {
+        gpEndRenderPass();
+        VkMemoryBarrier b = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                          VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(mGpSlots[mGpSlot].cmd,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+        mGpWritten.clear();
+        mGpRead.clear();
+    }
+
+    // A GL name's image taken from GL's queue the first time the pass touches it (outside a render pass).
+    void gpAcquire(GLuint name, VkImage image, VkImageAspectFlags aspect, bool attachment)
+    {
+        for (const GpAcquired& a : mGpAcquired)
+        {
+            if (a.image == image)
+            {
+                return;
+            }
+        }
+        gpEndRenderPass();
+        VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        b.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        b.dstQueueFamilyIndex = mQueueFamily;
+        b.image               = image;
+        b.subresourceRange    = { aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
+        vkCmdPipelineBarrier(mGpSlots[mGpSlot].cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        mGpAcquired.push_back({ image, aspect, attachment });
+        if (std::find(mGpNames.begin(), mGpNames.end(), name) == mGpNames.end())
+        {
+            mGpNames.push_back(name);
+        }
+    }
+
+    bool gpDraw(const QLVulkanPresenter::GpDraw& d)
+    {
+        if (!mGpInPass)
+        {
+            return false;
+        }
+        if (d.program < 0 || (size_t)d.program >= mGpPrograms.size() || !mGpPrograms[d.program].ok)
+        {
+            gpWhy("a program Vulkan does not have");
+            return false;
+        }
+        GpProgram& p = mGpPrograms[d.program];
+        if (p.position >= 0 && (!d.positions || d.vertex_count == 0))
+        {
+            gpWhy(p.name + ": no vertices");
+            return false;
+        }
+        if (p.outputs > d.color_count)
+        {
+            gpWhy(llformat("%s writes %u colours into a target of %u", p.name.c_str(), p.outputs, d.color_count));
+            return false;
+        }
+        const S32 target_index = gpTarget(d);
+        if (target_index < 0)
+        {
+            return false;
+        }
+        const GpTarget& t = mGpTargets[target_index];
+        const VkPipeline pipeline = gpPipeline(p, t, d);
+        if (!pipeline)
+        {
+            gpWhy(p.name + ": its pipeline failed");
+            return false;
+        }
+
+        // Every resource found before anything is recorded: a draw that cannot be made leaves the pass as it was.
+        struct Bound
+        {
+            const ql_glsl::Resource* r;
+            VkDescriptorBufferInfo   buffer;
+            VkDescriptorImageInfo    images[16];
+            GLuint                   names[16];
+            VkImage                  vk_images[16];
+        };
+        std::vector<Bound> bound;
+        bound.reserve(p.refl.resources.size());
+        VkDeviceSize vertices_at = GP_NONE;
+        const VkDeviceSize mark = mGpTop;
+        auto give_back = [this, mark]() { mGpTop = mark; };
+        for (const ql_glsl::Resource& r : p.refl.resources)
+        {
+            Bound b = {};
+            b.r = &r;
+            if (r.kind == ql_glsl::RES_UNIFORM_BLOCK)
+            {
+                const VkDeviceSize bytes = llmax((VkDeviceSize)r.size, (VkDeviceSize)16);
+                const VkDeviceSize at = gpAllocate(bytes);
+                if (at == GP_NONE)
+                {
+                    give_back();
+                    gpWhy("the pass's host memory is full");
+                    return false;
+                }
+                U8* dst = mGpMapped + at;
+                if (r.default_block)
+                {
+                    gpFillDefaults(p, d, dst);
+                }
+                else
+                {
+                    const QLVulkanPresenter::GpBlock* block = nullptr;
+                    for (U32 i = 0; i < d.block_count; ++i)
+                    {
+                        if (d.blocks[i].name && r.name == d.blocks[i].name)
+                        {
+                            block = &d.blocks[i];
+                        }
+                    }
+                    if (!block || !block->data)
+                    {
+                        give_back();
+                        gpWhy(p.name + ": the block " + r.name + " is not bound");
+                        return false;
+                    }
+                    memset(dst, 0, (size_t)bytes);
+                    memcpy(dst, block->data, llmin((size_t)r.size, block->bytes));
+                }
+                b.buffer = { mGpHost, at, bytes };
+            }
+            else if (r.kind == ql_glsl::RES_SAMPLER)
+            {
+                for (U32 e = 0; e < r.count && e < 16; ++e)
+                {
+                    const std::string element = r.count > 1 ? llformat("%s[%u]", r.name.c_str(), e) : r.name;
+                    const QLVulkanPresenter::GpTexture* tex = nullptr;
+                    for (U32 i = 0; i < d.texture_count; ++i)
+                    {
+                        if (d.textures[i].name && (element == d.textures[i].name || (e == 0 && r.name == d.textures[i].name)))
+                        {
+                            tex = &d.textures[i];
+                        }
+                    }
+                    if (!tex)
+                    {
+                        give_back();
+                        gpWhy(p.name + ": no texture for " + element);
+                        return false;
+                    }
+                    VkImageView view = VK_NULL_HANDLE;
+                    VkImage image = VK_NULL_HANDLE;
+                    bool is_depth = false;
+                    if (tex->texture == 0)
+                    {
+                        view  = mGbBlack.view;
+                        image = VK_NULL_HANDLE;
+                    }
+                    else if (tex->texture == d.white_texture)
+                    {
+                        view  = mGbWhite.view;
+                        image = VK_NULL_HANDLE;
+                    }
+                    else
+                    {
+                        VkFormat format = VK_FORMAT_UNDEFINED;
+                        view = gpView(tex->texture, image, format, is_depth);
+                        if (!view)
+                        {
+                            give_back();
+                            gpWhy(llformat("%s: %s (GL name %u) is not in Vulkan's memory", p.name.c_str(),
+                                           element.c_str(), tex->texture));
+                            return false;
+                        }
+                        const bool srgb = format == VK_FORMAT_R8G8B8A8_SRGB;
+                        if (srgb && !tex->srgb_decode)
+                        {
+                            give_back();
+                            gpWhy(p.name + ": " + element + " is sRGB, read without decoding (not yet in Vulkan)");
+                            return false;
+                        }
+                    }
+                    const VkSampler sampler = gpSampler(*tex);
+                    if (!sampler)
+                    {
+                        give_back();
+                        gpWhy(p.name + ": vkCreateSampler failed");
+                        return false;
+                    }
+                    b.images[e]    = { sampler, view, VK_IMAGE_LAYOUT_GENERAL };
+                    b.names[e]     = image ? tex->texture : 0;
+                    b.vk_images[e] = image;
+                }
+            }
+            else
+            {
+                give_back();
+                gpWhy(p.name + ": reads " + r.name + ", a kind of resource Vulkan does not bind yet");
+                return false;
+            }
+            bound.push_back(b);
+        }
+        if (p.position >= 0)
+        {
+            vertices_at = gpAllocate((VkDeviceSize)d.vertex_count * 12);
+            if (vertices_at == GP_NONE)
+            {
+                give_back();
+                gpWhy("the pass's host memory is full");
+                return false;
+            }
+            memcpy(mGpMapped + vertices_at, d.positions, (size_t)d.vertex_count * 12);
+        }
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        set_alloc.descriptorPool     = mGpSlots[mGpSlot].pool;
+        set_alloc.descriptorSetCount = 1;
+        set_alloc.pSetLayouts        = &p.setLayout;
+        if (vkAllocateDescriptorSets(mDevice, &set_alloc, &set) != VK_SUCCESS)
+        {
+            give_back();
+            gpWhy("the pass's descriptor pool is full");
+            return false;
+        }
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(bound.size());
+        for (const Bound& b : bound)
+        {
+            VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            w.dstSet          = set;
+            w.dstBinding      = b.r->binding;
+            if (b.r->kind == ql_glsl::RES_UNIFORM_BLOCK)
+            {
+                w.descriptorCount = 1;
+                w.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                w.pBufferInfo     = &b.buffer;
+            }
+            else
+            {
+                w.descriptorCount = llmin(b.r->count, 16u);
+                w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                w.pImageInfo      = b.images;
+            }
+            writes.push_back(w);
+        }
+        vkUpdateDescriptorSets(mDevice, (U32)writes.size(), writes.data(), 0, nullptr);
+
+        // Recorded from here: GL's images taken over, a barrier where this draw reads what an earlier one wrote (or
+        // writes what one read), then the render pass.
+        const U32 attachments = t.colors + (t.depth ? 1 : 0);
+        for (U32 i = 0; i < attachments; ++i)
+        {
+            const bool is_depth = t.depth && i == t.colors;
+            const bool stencil  = t.formats[i] == VK_FORMAT_D24_UNORM_S8_UINT || t.formats[i] == VK_FORMAT_D32_SFLOAT_S8_UINT;
+            gpAcquire(t.names[i], t.images[i],
+                      is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
+                               : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT,
+                      true);
+        }
+        bool hazard = false;
+        for (const Bound& b : bound)
+        {
+            for (U32 e = 0; e < 16; ++e)
+            {
+                if (b.vk_images[e])
+                {
+                    VkFormat format = VK_FORMAT_UNDEFINED;
+                    VkImage image = VK_NULL_HANDLE;
+                    bool is_depth = false;
+                    gpView(b.names[e], image, format, is_depth);
+                    const bool stencil = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+                    gpAcquire(b.names[e], b.vk_images[e],
+                              is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                              (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
+                                       : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT,
+                              false);
+                    // The depth a draw both tests against and reads (depth bounds, read-only) is no hazard.
+                    const bool own_depth = t.depth && b.vk_images[e] == t.images[t.colors] && !d.depth_write;
+                    hazard = hazard || (mGpWritten.count(b.vk_images[e]) != 0 && !own_depth);
+                }
+            }
+        }
+        for (U32 i = 0; i < t.colors; ++i)
+        {
+            hazard = hazard || mGpRead.count(t.images[i]) != 0;
+        }
+        if (d.depth_write && t.depth)
+        {
+            hazard = hazard || mGpRead.count(t.images[t.colors]) != 0;
+        }
+        // A target other than the open one, written before: a barrier as well (its writes are ordered by nothing).
+        if (hazard || d.clear)
+        {
+            if (mGpRecorded)
+            {
+                gpBarrier();
+            }
+            else
+            {
+                gpEndRenderPass();
+            }
+        }
+        VkCommandBuffer cmd = mGpSlots[mGpSlot].cmd;
+        if (mGpOpenTarget != target_index || d.clear)
+        {
+            gpEndRenderPass();
+            VkClearValue clears[5] = {};
+            for (U32 i = 0; i < t.colors; ++i)
+            {
+                memcpy(clears[i].color.float32, d.clear_color, sizeof(d.clear_color));
+            }
+            VkRenderPassBeginInfo pass_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            pass_begin.renderPass      = d.clear ? t.clear : t.load;
+            pass_begin.framebuffer     = t.framebuffer;
+            pass_begin.renderArea      = { { 0, 0 }, { t.width, t.height } };
+            pass_begin.clearValueCount = attachments;
+            pass_begin.pClearValues    = clears;
+            vkCmdBeginRenderPass(cmd, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+            mGpOpenTarget = target_index;
+            const VkViewport viewport = { 0.f, 0.f, (float)t.width, (float)t.height, 0.f, 1.f };
+            const VkRect2D scissor = { { 0, 0 }, { t.width, t.height } };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        if (d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth)
+        {
+            vkCmdSetDepthBounds(cmd, d.bounds_min, d.bounds_max);
+        }
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set, 0, nullptr);
+        if (vertices_at != GP_NONE)
+        {
+            vkCmdBindVertexBuffers(cmd, 0, 1, &mGpHost, &vertices_at);
+        }
+        vkCmdDraw(cmd, llmax(d.vertex_count, 3u), 1, 0, 0);
+        mGpRecorded = true;
+        for (U32 i = 0; i < t.colors; ++i)
+        {
+            mGpWritten.insert(t.images[i]);
+        }
+        if (d.depth_write && t.depth)
+        {
+            mGpWritten.insert(t.images[t.colors]);
+        }
+        for (const Bound& b : bound)
+        {
+            for (U32 e = 0; e < 16; ++e)
+            {
+                if (b.vk_images[e])
+                {
+                    mGpRead.insert(b.vk_images[e]);
+                }
+            }
+        }
+        ++mGpDrawsNow;
+        return true;
+    }
+
+    void gpPassAbandon()
+    {
+        if (!mGpInPass)
+        {
+            return;
+        }
+        gpEndRenderPass();
+        vkEndCommandBuffer(mGpSlots[mGpSlot].cmd);  // recorded, never submitted: reset at the slot's next pass
+        mGpInPass = false;
+    }
+
+    bool gpPassEnd()
+    {
+        if (!mGpInPass)
+        {
+            return false;
+        }
+        if (!mGpRecorded)
+        {
+            gpPassAbandon();
+            return true;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan gl programs");
+        gpEndRenderPass();
+        GpSlot& slot = mGpSlots[mGpSlot];
+        // Back to GL's queue, every image taken.
+        std::vector<VkImageMemoryBarrier> releases;
+        for (const GpAcquired& a : mGpAcquired)
+        {
+            VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.srcAccessMask       = a.attachment ? (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+                                                 : 0;
+            b.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+            b.srcQueueFamilyIndex = mQueueFamily;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+            b.image               = a.image;
+            b.subresourceRange    = { a.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
+            releases.push_back(b);
+        }
+        vkCmdPipelineBarrier(slot.cmd,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, (U32)releases.size(),
+                             releases.data());
+        vkEndCommandBuffer(slot.cmd);
+        mGpInPass = false;
+
+        const std::vector<GLenum> layouts(mGpNames.size(), GL_LAYOUT_GENERAL_EXT);
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl signal");
+            gl.SignalSemaphoreEXT(mGpGLDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+            gl.Flush();
+        }
+        vkResetFences(mDevice, 1, &slot.fence);
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &mGpGLDoneVK;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &slot.cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &mGpVKDoneVK;
+        VkResult result = VK_SUCCESS;
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan gl programs - vk submit");
+            result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+        }
+        if (result != VK_SUCCESS)
+        {
+            // GL signalled, which nothing will wait for: the semaphore is left signalled, so the pass is given up for
+            // good rather than risk the next wait.
+            mGpReady = false;
+            mGpNote  = llformat("stopped: a pass could not be submitted (VkResult %d)", (S32)result);
+            LL_WARNS("Vulkan") << "GL programs in Vulkan " << mGpNote << LL_ENDL;
+            return false;
+        }
+        slot.submitted = true;
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl wait");
+            gl.WaitSemaphoreEXT(mGpVKDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+        }
+        ++mGpPassesNow;
+        return true;
+    }
+
+    void gpFrame()
+    {
+        mGpDrawsLast  = mGpDrawsNow;
+        mGpPassesLast = mGpPassesNow;
+        mGpKeptLast   = mGpKeptNow;
+        mGpDrawsNow = mGpPassesNow = mGpKeptNow = 0;
+    }
+
+    std::string gpInfo() const
+    {
+        if (!mGpReady)
+        {
+            return mGpNote + (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);
+        }
+        U32 programs = 0;
+        for (const GpProgram& p : mGpPrograms)
+        {
+            programs += p.ok ? 1 : 0;
+        }
+        return llformat("%u draws in %u passes last frame, %u kept by GL | %u of %u programs compiled", mGpDrawsLast,
+                        mGpPassesLast, mGpKeptLast, programs, (U32)mGpPrograms.size()) +
+               (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);
+    }
+
     // ---- the interface layer (QuasarUILayer) ----------------------------------------------------------------
 
     // GL draws the viewer's 2D interface into a layer of its own (newview's QLUILayer), premultiplied, and hands it over
@@ -9077,6 +10651,7 @@ struct QLVulkanPresenter::Impl
         {
             destroyPassObjects();
             destroyCompositeObjects();
+            destroyGpObjects();  // before the G-buffer's, whose default textures it reads
             destroyGbObjects();  // before the targets and textures whose views and sets it holds
             destroyShadowObjects();
         }
@@ -10026,6 +11601,61 @@ std::string QLVulkanPresenter::shadowInfo()
         return "needs Vulkan presentation (QuasarVulkanPresent)";
     }
     return sActive->shadowInfo();
+}
+
+// static
+int QLVulkanPresenter::glProgram(unsigned long long key, unsigned link_count, const char* name, const GpSource* sources,
+                                 unsigned source_count)
+{
+    return sActive ? sActive->gpProgram(key, link_count, name, sources, source_count) : -1;
+}
+
+// static
+std::string QLVulkanPresenter::glProgramNote(unsigned long long key)
+{
+    return sActive ? sActive->gpProgramNote(key) : std::string("needs Vulkan presentation (QuasarVulkanPresent)");
+}
+
+// static
+bool QLVulkanPresenter::glPassBegin()
+{
+    return sActive && sActive->gpPassBegin();
+}
+
+// static
+bool QLVulkanPresenter::glDraw(const GpDraw& draw)
+{
+    return sActive && sActive->gpDraw(draw);
+}
+
+// static
+bool QLVulkanPresenter::glPassEnd()
+{
+    return sActive && sActive->gpPassEnd();
+}
+
+// static
+void QLVulkanPresenter::glPassAbandon()
+{
+    if (sActive)
+    {
+        sActive->gpPassAbandon();
+    }
+}
+
+// static
+void QLVulkanPresenter::glFrame(unsigned)
+{
+    if (sActive)
+    {
+        sActive->gpFrame();
+    }
+}
+
+// static
+std::string QLVulkanPresenter::glInfo()
+{
+    return sActive ? sActive->gpInfo() : std::string("needs Vulkan presentation (QuasarVulkanPresent)");
 }
 
 // static

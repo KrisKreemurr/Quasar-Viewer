@@ -207,6 +207,7 @@ std::string ql_vulkan_pbr_draws_info();    // pipeline.cpp (QuasarVulkanPBRDraws
 std::string ql_vulkan_material_draws_info();  // pipeline.cpp (QuasarVulkanMaterialDraws)
 std::string ql_vulkan_mask_draws_info();  // pipeline.cpp (QuasarVulkanMaskDraws)
 std::string ql_vulkan_bump_draws_info();  // pipeline.cpp (QuasarVulkanBumpDraws)
+std::string ql_vulkan_lighting_info();    // pipeline.cpp (QuasarVulkanLighting)
 std::string ql_vulkan_terrain_maps_info();  // pipeline.cpp (terrain step 1)
 std::string ql_vulkan_rigged_draws_info();    // pipeline.cpp (QuasarVulkanRiggedDraws)
 std::string ql_probe_cull_info();          // pipeline.cpp (QuasarProbeCullPixels, QuasarProbeCullDistance)
@@ -720,6 +721,8 @@ public:
             addText(xpos, ypos, "Quasar Vulkan bump draws: " + ql_vulkan_bump_draws_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan terrain maps: " + ql_vulkan_terrain_maps_info());
+            ypos += y_inc;
+            addText(xpos, ypos, "Quasar Vulkan lighting: " + ql_vulkan_lighting_info());
             ypos += y_inc;
             addText(xpos, ypos, "Quasar Vulkan rigged draws: " + ql_vulkan_rigged_draws_info());
             ypos += y_inc;

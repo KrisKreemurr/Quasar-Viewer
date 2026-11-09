@@ -838,11 +838,27 @@ void LLPipeline::applyRenderInputs()
             const U32 name = gbuffer.getNumTextures() ? gbuffer.getTexture(0) : 0;
             return name && gQLExternalStorage && !gQLExternalStorage->owns(name);
         };
-        if (in_gl(mAuxillaryRT.deferredScreen) || (main_wanted && in_gl(mMainRT.deferredScreen)))
+        // The sun's first cascade stands for the shadow maps, where Vulkan draws the lighting (QuasarVulkanLighting).
+        LLRenderTarget* cascade = getSunShadowTarget(0);
+        static const bool ql_lighting_maps = gSavedSettings.getBOOL("QuasarVulkanLighting");
+        const bool shadows_in_gl = ql_lighting_maps && cascade && cascade->getDepth() && gQLExternalStorage &&
+                                   !gQLExternalStorage->owns(cascade->getDepth());
+        if (in_gl(mAuxillaryRT.deferredScreen) || (main_wanted && in_gl(mMainRT.deferredScreen)) || shadows_in_gl)
         {
             LL_INFOS("Vulkan") << "The probe" << (main_wanted ? " and main" : "")
-                               << " packs were made in GL's memory: reconciled again for Vulkan's" << LL_ENDL;
+                               << (shadows_in_gl ? " packs and the shadow maps were" : " packs were")
+                               << " made in GL's memory: reconciled again for Vulkan's" << LL_ENDL;
             rebuildGLBuffers(mLatchedInputs, RebuildCause::Setting);
+        }
+        // The lighting's noise map too, where Vulkan draws the lighting (QuasarVulkanLighting): made again, now in
+        // Vulkan's memory (createResourceTexture).
+        static const bool ql_lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
+        if (ql_lighting && mNoiseMap && gQLExternalStorage && !gQLExternalStorage->owns(mNoiseMap))
+        {
+            LL_INFOS("Vulkan") << "The noise map was made in GL's memory: made again in Vulkan's" << LL_ENDL;
+            LLImageGL::deleteTextures(1, &mNoiseMap);
+            mNoiseMap = 0;
+            createResourceTexture(ALRenderResourcePlan::Id::Noise);
         }
     }
 #endif
@@ -1028,6 +1044,19 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
 #endif
 }
 
+// Quasar: the shadow maps in Vulkan's memory too where Vulkan draws the lighting that reads them (QuasarVulkanLighting,
+// read at start), once the render target self-test has passed.
+static bool ql_vulkan_shadow_maps_wanted(ALRenderResourcePlan::Id id)
+{
+#if QL_VULKAN_SHADOWS
+    static const bool lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
+    return lighting && ALRenderResourcePlan::isShadowMap(id) && gQLExternalStorage && QLVulkanPresenter::targetTest();
+#else
+    (void)id;
+    return false;
+#endif
+}
+
 void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRenderResourcePlan::IdSet& ids,
                                  ResourceChanges& changes)
 {
@@ -1086,7 +1115,7 @@ void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRende
             // Quasar: the probe pack's targets in Vulkan's memory (QuasarVulkanTargets, read at start), once the
             // presenter's render target self-test has passed: piece 1 of the probes and the main view in Vulkan. GL
             // draws into them as ever; nothing changes on screen.
-            const bool vulkan_memory = ql_vulkan_targets_wanted(Plan::packOf(id));
+            const bool vulkan_memory = ql_vulkan_targets_wanted(Plan::packOf(id)) || ql_vulkan_shadow_maps_wanted(id);
             // A target kept from before the self-test passed (the first reconcile runs before Vulkan presents) is GL's:
             // it is made again, in Vulkan's memory.
             if (vulkan_memory && gQLExternalStorage)
@@ -1119,6 +1148,21 @@ void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRende
     }
 
     gGL.getTextureSlot(0)->unbind();
+}
+
+// Quasar: the main view's light map, and the scratch its blur goes through (the light map's description), in Vulkan's
+// memory where the lighting is Vulkan's to draw (QuasarVulkanLighting, read at start): pool targets made under the scope.
+static bool ql_vulkan_transient_wanted(ALRenderResourcePlan::Id id)
+{
+#if QL_VULKAN_SHADOWS
+    static const bool lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
+    static const bool main     = gSavedSettings.getBOOL("QuasarVulkanMainTargets");
+    return lighting && main && id == ALRenderResourcePlan::Id::MainLight && gQLExternalStorage &&
+           QLVulkanPresenter::targetTest();
+#else
+    (void)id;
+    return false;
+#endif
 }
 
 void LLPipeline::prewarmTransients(const ALRenderResourcePlan& plan, const ALRenderResourcePlan::IdSet& ids,
@@ -1160,6 +1204,7 @@ void LLPipeline::prewarmTransients(const ALRenderResourcePlan& plan, const ALRen
             }
 
             LLRenderTarget* target = nullptr;
+            QLExternalStorageScope vulkan_storage(ql_vulkan_transient_wanted(id));  // Quasar: see acquireResource
             if (!resource.mDepthFrom)
             {
                 target = scope.acquire(*resource.mDesc, Plan::name(id));
@@ -1200,14 +1245,34 @@ LLRenderTarget* LLPipeline::acquireResource(ALTransientTargets& scope, ALRenderR
     {
         name = ALRenderResourcePlan::name(id);
     }
-    if (!resource.mDepthFrom)
+    const bool vulkan_memory = ql_vulkan_transient_wanted(id);
+    QLExternalStorageScope vulkan_storage(vulkan_memory);
+    auto acquire = [&]() -> LLRenderTarget*
     {
-        return scope.acquire(*resource.mDesc, name);
+        if (!resource.mDepthFrom)
+        {
+            return scope.acquire(*resource.mDesc, name);
+        }
+        // Nothing over an owner left unbuilt, as a render size that fits nothing leaves the G-buffer.
+        LLRenderTarget* owner = ALRenderResourcePlan::isTransient(*resource.mDepthFrom) ? depth_from
+                                                                                         : resourceTarget(*resource.mDepthFrom);
+        return owner && owner->getDepth() ? scope.acquire(*resource.mDesc, *owner, name) : nullptr;
+    };
+    LLRenderTarget* target = acquire();
+    // One the pool made before Vulkan presented (or before the setting) is GL's: the pool is let go of (each target is
+    // made again as it is next asked for), a few times at most, and the target asked for again, now in Vulkan's memory.
+    static U32 ql_pool_clears = 0;
+    if (vulkan_memory && target && target->getNumTextures() && !gQLExternalStorage->owns(target->getTexture(0)) &&
+        ql_pool_clears < 3)
+    {
+        ++ql_pool_clears;
+        LL_INFOS("Vulkan") << "The light map was made in GL's memory: the transient pool is made again for Vulkan's"
+                           << LL_ENDL;
+        scope.release(target);
+        mTransientTargets.clear();
+        target = acquire();
     }
-    // Nothing over an owner left unbuilt, as a render size that fits nothing leaves the G-buffer.
-    LLRenderTarget* owner = ALRenderResourcePlan::isTransient(*resource.mDepthFrom) ? depth_from
-                                                                                     : resourceTarget(*resource.mDepthFrom);
-    return owner && owner->getDepth() ? scope.acquire(*resource.mDesc, *owner, name) : nullptr;
+    return target;
 }
 
 // static
@@ -1973,6 +2038,30 @@ void LLPipeline::createResourceTexture(ALRenderResourcePlan::Id id)
 
             LLImageGL::generateTextures(1, &mNoiseMap);
             gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_TEXTURE, mNoiseMap);
+#if QL_VULKAN_SHADOWS
+            // Quasar: in Vulkan's memory where Vulkan draws the lighting that reads it (QuasarVulkanLighting): RGBA,
+            // the format Vulkan can give, made empty and filled after.
+            static const bool ql_lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
+            if (ql_lighting && gQLExternalStorage && QLVulkanPresenter::targetTest())
+            {
+                std::vector<F32> rgba(noise.size() * 4);
+                for (size_t i = 0; i < noise.size(); ++i)
+                {
+                    rgba[i * 4 + 0] = noise[i].mV[0];
+                    rgba[i * 4 + 1] = noise[i].mV[1];
+                    rgba[i * 4 + 2] = noise[i].mV[2];
+                    rgba[i * 4 + 3] = 1.f;
+                }
+                {
+                    QLExternalStorageScope vulkan_storage(true);
+                    LLImageGL::allocateTexture2D(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), GL_RGBA16F,
+                                                 noise_res, noise_res, GL_RGBA, GL_FLOAT, nullptr);
+                }
+                LLImageGL::setManualSubImage(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), 0, noise_res,
+                                             noise_res, GL_RGBA, GL_FLOAT, rgba.data());
+                break;
+            }
+#endif
             LLImageGL::allocateTexture2D(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), GL_RGB16F, noise_res,
                                          noise_res, GL_RGB, GL_FLOAT, noise.data());
             break;
@@ -12432,6 +12521,204 @@ LLVector4 pow4fsrgb(LLVector4 v, F32 f)
     return v;
 }
 
+#if QL_VULKAN_SHADOWS
+namespace
+{
+    // ---- Quasar: GL's lighting programs drawn by Vulkan (QuasarVulkanLighting) ----------------------------------
+    // What it keeps (each program's sources, what GL holds for its uniforms, the engine's blocks as bytes, the light
+    // maps in Vulkan's memory) is read at start; the drawing follows the setting live.
+    U64         sQLLightingPasses = 0, sQLLightingKept = 0;
+    U32         sQLLightingLastVK = 0, sQLLightingLastGL = 0, sQLLightingNowVK = 0, sQLLightingNowGL = 0;
+    std::string sQLLightingWhy;
+    U32         sQLLightingShare = 0;  // the draws of the stage Vulkan had last (U32_MAX: all)
+
+    bool ql_lighting_started()
+    {
+        static const bool started = gSavedSettings.getBOOL("QuasarVulkanLighting");
+        return started;
+    }
+
+    bool ql_lighting_wanted()
+    {
+        static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanLighting", false);
+        return wanted() && ql_lighting_started() && LLRender::sReverseZ && !gCubeSnapshot;
+    }
+
+    void ql_lighting_kept(const std::string& why)
+    {
+        if (why != sQLLightingWhy)
+        {
+            LL_INFOS("Vulkan") << "Lighting kept by GL: " << why << LL_ENDL;
+        }
+        sQLLightingWhy = why;
+    }
+
+    bool ql_is_sampler_type(U32 type)
+    {
+        return (type >= 0x8B5D && type <= 0x8B64) || (type >= 0x8DC0 && type <= 0x8DC5) ||
+               (type >= 0x8DC9 && type <= 0x8DD8) || (type >= 0x900C && type <= 0x900F) ||
+               (type >= 0x9108 && type <= 0x910D);
+    }
+
+    // One draw of a GL program by Vulkan, from what GL holds for it now: bound, its uniforms set, its textures on their
+    // units, the engine's blocks bound. Its target is the render target's colours (and depth, where `depth`), cleared
+    // first where `clear`; its state GL's (depth_func 0: no depth test; drawn_only: held by the depth bounds to what
+    // the world drew, as ALDrawnOnly holds GL). Positions three floats a vertex. False: nothing was recorded, and why
+    // is kept for the status line.
+    bool ql_gl_program_draw(LLGLSLShader& shader, LLRenderTarget* target, bool depth, bool clear,
+                            const LLColor4& clear_color, U32 depth_func, bool drawn_only, const F32* positions,
+                            U32 vertex_count)
+    {
+        if (!target || !target->getNumTextures())
+        {
+            ql_lighting_kept(shader.mName + ": no target");
+            return false;
+        }
+        const std::vector<LLGLSLShader::QLSource>& sources = shader.qlSources();
+        static std::vector<QLVulkanPresenter::GpSource> gp_sources;
+        gp_sources.clear();
+        for (const LLGLSLShader::QLSource& src : sources)
+        {
+            gp_sources.push_back({ src.type, src.name.c_str(), src.text.c_str(), src.text.size() });
+        }
+        const U64 key = (U64)(uintptr_t)&shader;
+        const int program = QLVulkanPresenter::glProgram(key, shader.qlLinkCount(), shader.mName.c_str(),
+                                                         gp_sources.data(), (U32)gp_sources.size());
+        if (program < 0)
+        {
+            ql_lighting_kept(shader.mName + " " + QLVulkanPresenter::glProgramNote(key));
+            return false;
+        }
+
+        // The matrices' blocks current, as a draw makes them.
+        gGL.syncMatrices();
+
+        static std::vector<QLVulkanPresenter::GpRegion>  regions;
+        static std::vector<QLVulkanPresenter::GpTexture> textures;
+        static std::vector<std::string>                  texture_names;
+        static std::vector<QLVulkanPresenter::GpBlock>   blocks;
+        regions.clear();
+        textures.clear();
+        texture_names.clear();
+        blocks.clear();
+        const U32* words = shader.qlWords();
+        for (const LLGLSLShader::QLRegion& r : shader.qlRegions())
+        {
+            QLVulkanPresenter::GpRegion g;
+            g.name       = r.mName.c_str();
+            g.type       = r.mType;
+            g.elements   = r.mElements;
+            g.components = r.mComponents;
+            g.words      = r.mWords;
+            g.kind       = r.mKind;
+            g.transpose  = r.mTranspose;
+            regions.push_back(g);
+            if (!ql_is_sampler_type(r.mType))
+            {
+                continue;
+            }
+            for (U32 e = 0; e < r.mElements; ++e)
+            {
+                texture_names.push_back(r.mElements > 1 ? llformat("%s[%u]", r.mName.c_str(), e) : r.mName);
+            }
+        }
+        // Each sampler's texture and sampling, from the unit GL gave it at link.
+        size_t named = 0;
+        for (const LLGLSLShader::QLRegion& r : shader.qlRegions())
+        {
+            if (!ql_is_sampler_type(r.mType))
+            {
+                continue;
+            }
+            for (U32 e = 0; e < r.mElements; ++e, ++named)
+            {
+                QLVulkanPresenter::GpTexture t;
+                t.name = texture_names[named].c_str();
+                const S32 unit = (S32)words[r.mWords + e];
+                ALTextureSlot* slot = unit >= 0 ? gGL.getTextureSlot((U32)unit) : nullptr;
+                if (slot && slot->getCurrType() != ALTextureSlot::TT_NONE)
+                {
+                    if (slot->getCurrType() != ALTextureSlot::TT_TEXTURE)
+                    {
+                        ql_lighting_kept(llformat("%s: %s is a cube map or array (not yet in Vulkan)",
+                                                  shader.mName.c_str(), t.name));
+                        return false;
+                    }
+                    t.texture = slot->getCurrTexture();
+                    ALSamplerDesc desc;
+                    if (!gGL.describeSampler(slot->getCurrSampler(), desc))
+                    {
+                        desc.mMinFilter = desc.mMagFilter = GL_NEAREST;  // a texture object's own state: GL's default
+                    }
+                    t.min_filter   = desc.mMinFilter;
+                    t.mag_filter   = desc.mMagFilter;
+                    t.wrap_s       = desc.mWrapS;
+                    t.wrap_t       = desc.mWrapT;
+                    t.wrap_r       = desc.mWrapR;
+                    t.anisotropy   = desc.mMaxAnisotropy;
+                    t.compare_func = desc.mCompareMode != GL_NONE ? desc.mCompareFunc : 0;
+                    t.srgb_decode  = desc.mSRGBDecode == GL_DECODE_EXT;
+                }
+                textures.push_back(t);
+            }
+        }
+        for (U32 b = 0; b < LLGLSLShader::NUM_UNIFORM_BLOCKS; ++b)
+        {
+            const U8* data = nullptr;
+            size_t bytes = 0;
+            if (ALUniformBuffer::qlBound(b, data, bytes))
+            {
+                blocks.push_back({ LLGLSLShader::UNIFORM_BLOCK_NAMES[b], data, bytes });
+            }
+        }
+
+        QLVulkanPresenter::GpDraw d;
+        d.program       = program;
+        d.regions       = regions.data();
+        d.region_count  = (U32)regions.size();
+        d.words         = words;
+        d.blocks        = blocks.data();
+        d.block_count   = (U32)blocks.size();
+        d.textures      = textures.data();
+        d.texture_count = (U32)textures.size();
+        d.white_texture = ALTextureSlot::sWhiteTexture.load();
+        d.color_count   = llmin(target->getNumTextures(), 4u);
+        for (U32 i = 0; i < d.color_count; ++i)
+        {
+            d.colors[i] = target->getTexture(i);
+        }
+        d.depth  = depth ? target->getDepth() : 0;
+        d.width  = target->getWidth();
+        d.height = target->getHeight();
+        d.clear  = clear;
+        for (U32 i = 0; i < 4; ++i)
+        {
+            d.clear_color[i] = clear_color.mV[i];
+        }
+        d.blend       = 0;
+        d.depth_func  = depth_func;
+        d.depth_write = false;
+        if (drawn_only)
+        {
+            F64 zmin, zmax;
+            ALDepthBounds::drawn(zmin, zmax);
+            d.bounds_min = (F32)zmin;
+            d.bounds_max = (F32)zmax;
+        }
+        d.cull_back    = true;
+        d.positions    = positions;
+        d.vertex_count = vertex_count;
+        d.topology     = GL_TRIANGLES;
+        if (!QLVulkanPresenter::glDraw(d))
+        {
+            ql_lighting_kept(QLVulkanPresenter::glInfo());
+            return false;
+        }
+        return true;
+    }
+}
+#endif
+
 void LLPipeline::renderDeferredLighting()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
@@ -12510,175 +12797,331 @@ void LLPipeline::renderDeferredLighting()
         // ~13 constants from UB_DEFERRED instead of having them re-pushed on every bind.
         packDeferredUBO();
 
-        // The light map's sun pass runs wherever the pack has a light map: for shadows, and in the main view for SSAO.
-        // It clears the map, so whatever the pool's target held before is gone.
-        if (deferred_light_target)
-        {
-            LL_PROFILE_GPU_ZONE("sun program");
-            deferred_light_target->bindTarget();
-            {  // paint shadow/SSAO light map (direct lighting lightmap)
-                LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - sun shadow");
-
-                LLGLSLShader& sun_shader = gCubeSnapshot ? gDeferredSunProbeProgram : gDeferredSunProgram;
-                bindDeferredShader(sun_shader, deferred_light_target);
-                mScreenTriangleVB->setBuffer();
-                gGL.setClearColor(LLColor4::white);
-                deferred_light_target->clear(GL_COLOR_BUFFER_BIT);
-                gGL.setClearColor(LLColor4::transparent);
-
-                sun_shader.uniform2f(LLShaderMgr::DEFERRED_SCREEN_RES,
-                                              (GLfloat)deferred_light_target->getWidth(),
-                                              (GLfloat)deferred_light_target->getHeight());
-
-                // A spot shadow channel only a shadowing spot light reads (setupSpotLight's
-                // proj_shadow_idx): the program leaves the other's filter out.
-                sun_shader.uniform2f(LLShaderMgr::DEFERRED_SPOT_SHADOW_LIVE,
-                                     mShadowSpotLight[0].notNull() ? 1.f : 0.f,
-                                     mShadowSpotLight[1].notNull() ? 1.f : 0.f);
-
-                {
-                    // The triangle lies on the far plane (sunLightV.glsl) and the target shares the scene's
-                    // depth: only geometry is shadowed and occluded, and the sky keeps the clear's white, which
-                    // nothing reads there (the sky's pass lights nothing).
-                    LLGLDisable   blend(GL_BLEND);
-                    ALDrawnOnly   drawn;
-                    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
-                }
-
-                unbindDeferredShader(sun_shader);
-            }
-            deferred_light_target->flush();
-        }
-
-        // SSAO's blur of the light map's occlusion, in the main view (ALLightMapBlur): where the session computes, one
-        // dispatch into the blurred light map, which the soften pass reads in place of the light map; otherwise across
-        // into a scratch of the light map's description, cleared as the sun pass clears the map, and back down into the
-        // map.
+        // The light map's sun pass, SSAO's blur, the sun and atmosphere, and the sky: one stage, its draws in order,
+        // the first vk_limit of them recorded for Vulkan (QuasarVulkanLighting) and the rest drawn by GL. Nothing Vulkan
+        // records runs before the hand-over, so it is handed over just before GL's first draw (or at the end): Vulkan
+        // has a leading run of the stage, GL the rest. The GL binds and uniform sets run either way: they are what
+        // Vulkan's draws read. Returns the first draw Vulkan could not record (U32_MAX: none), recording nothing after.
         LLRenderTarget* light_blurred = nullptr;
-        if (mResourceInputs.mSSAO && !gCubeSnapshot && deferred_light_target)
+        auto lighting_stage = [&](U32 vk_limit) -> U32
         {
-            LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - soften shadow");
-            LL_PROFILE_GPU_ZONE("soften shadow");
-            const ALLightMapBlur::Kernel kernel =
-                ALLightMapBlur::kernel(RenderShadowGaussian, RenderShadowBlurSize, RenderShadowBlurDistFactor);
-
-            if (LLRender::sCompute && gDeferredBlurLightComputeProgram.isComplete() && ALLightMapBlur::apron(kernel) >= 0)
+            light_blurred = nullptr;
+            U32 next = 0;
+            U32 failed = U32_MAX;
+            bool handed = false;
+            // What Vulkan recorded, handed over before anything of GL's reads or writes what it draws: GL's first draw,
+            // GL's dispatch, GL's clear, or the stage's end. Nothing where the recording was let go.
+            auto hand_over = [&]()
             {
-                light_blurred = acquireResource(lighting, ALRenderResourcePlan::Id::MainLightBlurred);
-                if (light_blurred)
+#if QL_VULKAN_SHADOWS
+                if (vk_limit > 0 && !handed && failed == U32_MAX)
                 {
-                    bindDeferredShader(gDeferredBlurLightComputeProgram, deferred_light_target);
-                    ALLightMapBlur::setKernel(gDeferredBlurLightComputeProgram, kernel);
-                    if (!ALLightMapBlur::dispatch(gDeferredBlurLightComputeProgram, kernel, *light_blurred))
+                    handed = true;
+                    if (!QLVulkanPresenter::glPassEnd())
                     {
-                        lighting.release(light_blurred);
-                        light_blurred = nullptr;
+                        ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
                     }
-                    unbindDeferredShader(gDeferredBlurLightComputeProgram);
                 }
-            }
-
-            LLRenderTarget* blur_scratch = light_blurred
-                ? nullptr
-                : acquireResource(lighting, ALRenderResourcePlan::Id::MainLight, "main.light.scratch");
-            if (blur_scratch)
+#endif
+            };
+            // A draw of the screen triangle into `target` (bound), cleared first where `clear`: recorded for Vulkan
+            // while it is among the first vk_limit and none before it failed, else GL's.
+            auto draw = [&](LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
+                            U32 depth_func, bool drawn_only)
             {
-                blur_scratch->bindTarget();
-                gGL.setClearColor(LLColor4::white);
-                blur_scratch->clear(GL_COLOR_BUFFER_BIT);
-                gGL.setClearColor(LLColor4::transparent);
-
-                bindDeferredShader(gDeferredBlurLightProgram);
-                ALLightMapBlur::setKernel(gDeferredBlurLightProgram, kernel);
-                gDeferredBlurLightProgram.uniform2f(LLShaderMgr::DELTA, 1.f, 0.f);
-
-                // Both blurs on the far plane (blurLightV.glsl), over geometry alone: the sky stays the clear's white
-                // in either target.
+                const U32 index = next++;
+                const bool vk = index < vk_limit && failed == U32_MAX;
+#if QL_VULKAN_SHADOWS
+                if (vk)
                 {
-                    LLGLDisable   blend(GL_BLEND);
-                    ALDrawnOnly   drawn;
-                    mScreenTriangleVB->setBuffer();
-                    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                    // The screen triangle's corners (mScreenTriangleVB's).
+                    static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
+                    if (!ql_gl_program_draw(shader, target, true, clear, clear_color, depth_func, drawn_only, triangle, 3))
+                    {
+                        failed = index;
+                    }
+                    return;
                 }
-
-                blur_scratch->flush();
-                unbindDeferredShader(gDeferredBlurLightProgram);
-
-                bindDeferredShader(gDeferredBlurLightProgram, blur_scratch);
-
-                deferred_light_target->bindTarget();
-
-                gDeferredBlurLightProgram.uniform2f(LLShaderMgr::DELTA, 0.f, 1.f);
-
+#else
+                (void)shader; (void)depth_func; (void)drawn_only;
+#endif
+                if (failed != U32_MAX)
                 {
-                    LLGLDisable   blend(GL_BLEND);
-                    ALDrawnOnly   drawn;
-                    mScreenTriangleVB->setBuffer();
-                    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                    return;  // a recording let go: GL runs the stage again
                 }
-                deferred_light_target->flush();
-                unbindDeferredShader(gDeferredBlurLightProgram);
-                lighting.release(blur_scratch);
-            }
-        }
-
-        screen_target->bindTarget();
-        // clear color buffer here - zeroing alpha (glow) is important or it will accumulate against sky
-        gGL.setClearColor(LLColor4::transparent);
-        screen_target->clear(GL_COLOR_BUFFER_BIT);
-
-        if (RenderDeferredAtmospheric)
-        {  // apply sunlight contribution
-            LLGLSLShader &soften_shader = *gDeferredSoftenProgram.selectVariant();
-
-            LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - atmospherics");
-            LL_PROFILE_GPU_ZONE("atmospherics");
-            // The sun's shadow and the occlusion, blurred where the dispatch blurred them.
-            bindDeferredShader(soften_shader, light_blurred);
-
-            static LLCachedControl<F32> ssao_scale(gSavedSettings, "RenderSSAOIrradianceScale", 0.5f);
-            static LLCachedControl<F32> ssao_max(gSavedSettings, "RenderSSAOIrradianceMax", 0.25f);
-            soften_shader.uniform1f(LLShaderMgr::DEFERRED_SSAO_IRRADIANCE_SCALE, ssao_scale);
-            soften_shader.uniform1f(LLShaderMgr::DEFERRED_SSAO_IRRADIANCE_MAX, ssao_max);
-
-            LLEnvironment &environment = LLEnvironment::instance();
-
-            soften_shader.uniform1i(LLShaderMgr::SUN_UP_FACTOR, environment.getIsSunUp() ? 1 : 0);
-            soften_shader.uniform3fv(LLShaderMgr::LIGHTNORM, 1, environment.getClampedLightNorm().mV);
-
-            soften_shader.uniform4fv(LLShaderMgr::WATER_WATERPLANE, 1, LLDrawPoolAlpha::sWaterPlane.mV);
-
-            // The triangle lies on the far plane (softenLightV.glsl), level with the depth the sky leaves cleared:
-            // this draw passes only where the world drew something, and the sky's draw below only where it did
-            // not, so no sky pixel pays for the G-buffer decode and atmospherics it would throw away.
-            LLGLDisable blend(GL_BLEND);
-            {
-                ALDrawnOnly drawn;
-
+                hand_over();
+                if (clear)
+                {
+                    gGL.setClearColor(clear_color);
+                    target->clear(GL_COLOR_BUFFER_BIT);
+                    gGL.setClearColor(LLColor4::transparent);
+                }
                 mScreenTriangleVB->setBuffer();
                 mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            };
+
+            // The light map's sun pass runs wherever the pack has a light map: for shadows, and in the main view for
+            // SSAO. It clears the map, so whatever the pool's target held before is gone.
+            if (deferred_light_target)
+            {
+                LL_PROFILE_GPU_ZONE("sun program");
+                deferred_light_target->bindTarget();
+                {  // paint shadow/SSAO light map (direct lighting lightmap)
+                    LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - sun shadow");
+
+                    LLGLSLShader& sun_shader = gCubeSnapshot ? gDeferredSunProbeProgram : gDeferredSunProgram;
+                    bindDeferredShader(sun_shader, deferred_light_target);
+                    mScreenTriangleVB->setBuffer();
+
+                    sun_shader.uniform2f(LLShaderMgr::DEFERRED_SCREEN_RES,
+                                                  (GLfloat)deferred_light_target->getWidth(),
+                                                  (GLfloat)deferred_light_target->getHeight());
+
+                    // A spot shadow channel only a shadowing spot light reads (setupSpotLight's
+                    // proj_shadow_idx): the program leaves the other's filter out.
+                    sun_shader.uniform2f(LLShaderMgr::DEFERRED_SPOT_SHADOW_LIVE,
+                                         mShadowSpotLight[0].notNull() ? 1.f : 0.f,
+                                         mShadowSpotLight[1].notNull() ? 1.f : 0.f);
+
+                    {
+                        // The triangle lies on the far plane (sunLightV.glsl) and the target shares the scene's
+                        // depth: only geometry is shadowed and occluded, and the sky keeps the clear's white, which
+                        // nothing reads there (the sky's pass lights nothing).
+                        LLGLDisable   blend(GL_BLEND);
+                        ALDrawnOnly   drawn;
+                        draw(sun_shader, deferred_light_target, true, LLColor4::white, 0, true);
+                    }
+
+                    unbindDeferredShader(sun_shader);
+                }
+                deferred_light_target->flush();
             }
 
-            unbindDeferredShader(soften_shader);
-
-            // The sky, every layer composited along the view ray, where the world left the far plane
-            // (deferred/skyCompositeF.glsl). A view that draws no sky leaves the screen's clear there.
-            if (drawsSky())
+            // SSAO's blur of the light map's occlusion, in the main view (ALLightMapBlur): where the session computes,
+            // one dispatch into the blurred light map, which the soften pass reads in place of the light map; otherwise
+            // across into a scratch of the light map's description, cleared as the sun pass clears the map, and back
+            // down into the map. Vulkan takes the fragment passes (it binds no storage images yet).
+            if (mResourceInputs.mSSAO && !gCubeSnapshot && deferred_light_target)
             {
-                LLGLSLShader& sky_shader = gDeferredSkyCompositeProgram;
-                sky_shader.bind();
-                mSky.bindComposite(sky_shader);
-                {
-                    LL_PROFILE_GPU_ZONE("sky composite");
-                    LLGLDepthTest depth(GL_TRUE, GL_FALSE, GL_EQUAL);
+                LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - soften shadow");
+                LL_PROFILE_GPU_ZONE("soften shadow");
+                const ALLightMapBlur::Kernel kernel =
+                    ALLightMapBlur::kernel(RenderShadowGaussian, RenderShadowBlurSize, RenderShadowBlurDistFactor);
 
-                    mScreenTriangleVB->setBuffer();
-                    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                // Vulkan has the fragment passes (it binds no storage images yet): where the stage is Vulkan's from
+                // the blur on, the dispatch is not taken.
+                if (vk_limit <= next && LLRender::sCompute && gDeferredBlurLightComputeProgram.isComplete() &&
+                    ALLightMapBlur::apron(kernel) >= 0 && failed == U32_MAX)
+                {
+                    hand_over();
+                    light_blurred = acquireResource(lighting, ALRenderResourcePlan::Id::MainLightBlurred);
+                    if (light_blurred)
+                    {
+                        bindDeferredShader(gDeferredBlurLightComputeProgram, deferred_light_target);
+                        ALLightMapBlur::setKernel(gDeferredBlurLightComputeProgram, kernel);
+                        if (!ALLightMapBlur::dispatch(gDeferredBlurLightComputeProgram, kernel, *light_blurred))
+                        {
+                            lighting.release(light_blurred);
+                            light_blurred = nullptr;
+                        }
+                        unbindDeferredShader(gDeferredBlurLightComputeProgram);
+                    }
                 }
-                mSky.unbindComposite(sky_shader);
-                sky_shader.unbind();
+
+                LLRenderTarget* blur_scratch = light_blurred
+                    ? nullptr
+                    : acquireResource(lighting, ALRenderResourcePlan::Id::MainLight, "main.light.scratch");
+                if (blur_scratch)
+                {
+                    blur_scratch->bindTarget();
+
+                    bindDeferredShader(gDeferredBlurLightProgram);
+                    ALLightMapBlur::setKernel(gDeferredBlurLightProgram, kernel);
+                    gDeferredBlurLightProgram.uniform2f(LLShaderMgr::DELTA, 1.f, 0.f);
+
+                    // Both blurs on the far plane (blurLightV.glsl), over geometry alone: the sky stays the clear's
+                    // white in either target.
+                    {
+                        LLGLDisable   blend(GL_BLEND);
+                        ALDrawnOnly   drawn;
+                        draw(gDeferredBlurLightProgram, blur_scratch, true, LLColor4::white, 0, true);
+                    }
+
+                    blur_scratch->flush();
+                    unbindDeferredShader(gDeferredBlurLightProgram);
+
+                    bindDeferredShader(gDeferredBlurLightProgram, blur_scratch);
+
+                    deferred_light_target->bindTarget();
+
+                    gDeferredBlurLightProgram.uniform2f(LLShaderMgr::DELTA, 0.f, 1.f);
+
+                    {
+                        LLGLDisable   blend(GL_BLEND);
+                        ALDrawnOnly   drawn;
+                        draw(gDeferredBlurLightProgram, deferred_light_target, false, LLColor4::white, 0, true);
+                    }
+                    deferred_light_target->flush();
+                    unbindDeferredShader(gDeferredBlurLightProgram);
+                    lighting.release(blur_scratch);
+                }
+                else if (next < vk_limit && failed == U32_MAX)
+                {
+                    failed = next;  // no scratch to blur through: GL's from here, which has its own way
+                }
+            }
+
+            screen_target->bindTarget();
+            // clear color buffer here - zeroing alpha (glow) is important or it will accumulate against sky. The soften
+            // pass's draw clears it first (the screen is drawn into by nothing before it); without one, GL clears it
+            // here, after the hand-over.
+            gGL.setClearColor(LLColor4::transparent);
+            if (!RenderDeferredAtmospheric && failed == U32_MAX)
+            {
+                hand_over();
+                screen_target->clear(GL_COLOR_BUFFER_BIT);
+            }
+
+            if (RenderDeferredAtmospheric)
+            {  // apply sunlight contribution
+                LLGLSLShader &soften_shader = *gDeferredSoftenProgram.selectVariant();
+
+                LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - atmospherics");
+                LL_PROFILE_GPU_ZONE("atmospherics");
+                // The sun's shadow and the occlusion, blurred where the dispatch blurred them.
+                bindDeferredShader(soften_shader, light_blurred);
+
+                static LLCachedControl<F32> ssao_scale(gSavedSettings, "RenderSSAOIrradianceScale", 0.5f);
+                static LLCachedControl<F32> ssao_max(gSavedSettings, "RenderSSAOIrradianceMax", 0.25f);
+                soften_shader.uniform1f(LLShaderMgr::DEFERRED_SSAO_IRRADIANCE_SCALE, ssao_scale);
+                soften_shader.uniform1f(LLShaderMgr::DEFERRED_SSAO_IRRADIANCE_MAX, ssao_max);
+
+                LLEnvironment &environment = LLEnvironment::instance();
+
+                soften_shader.uniform1i(LLShaderMgr::SUN_UP_FACTOR, environment.getIsSunUp() ? 1 : 0);
+                soften_shader.uniform3fv(LLShaderMgr::LIGHTNORM, 1, environment.getClampedLightNorm().mV);
+
+                soften_shader.uniform4fv(LLShaderMgr::WATER_WATERPLANE, 1, LLDrawPoolAlpha::sWaterPlane.mV);
+
+                // The triangle lies on the far plane (softenLightV.glsl), level with the depth the sky leaves cleared:
+                // this draw passes only where the world drew something, and the sky's draw below only where it did
+                // not, so no sky pixel pays for the G-buffer decode and atmospherics it would throw away.
+                LLGLDisable blend(GL_BLEND);
+                {
+                    ALDrawnOnly drawn;
+                    draw(soften_shader, screen_target, true, LLColor4::transparent, 0, true);
+                }
+
+                unbindDeferredShader(soften_shader);
+
+                // The sky, every layer composited along the view ray, where the world left the far plane
+                // (deferred/skyCompositeF.glsl). A view that draws no sky leaves the screen's clear there.
+                if (drawsSky())
+                {
+                    LLGLSLShader& sky_shader = gDeferredSkyCompositeProgram;
+                    sky_shader.bind();
+                    mSky.bindComposite(sky_shader);
+                    {
+                        LL_PROFILE_GPU_ZONE("sky composite");
+                        LLGLDepthTest depth(GL_TRUE, GL_FALSE, GL_EQUAL);
+                        draw(sky_shader, screen_target, false, LLColor4::transparent, GL_EQUAL, false);
+                    }
+                    mSky.unbindComposite(sky_shader);
+                    sky_shader.unbind();
+                }
+            }
+            hand_over();  // Vulkan had every draw
+            return failed;
+        };
+
+        // Vulkan's share of the stage: every draw it can record, found by recording all of them now and then (a
+        // texture moved into Vulkan's memory, a program compiled, lets it take more), and the leading run found kept
+        // until then.
+        U32 vk_draws = 0;
+#if QL_VULKAN_SHADOWS
+        static U32 ql_lighting_frame = 0;
+        static U32 ql_lighting_share = U32_MAX;  // the leading run Vulkan last had (U32_MAX: all of it)
+        static U32 ql_lighting_probe = 0;        // frames until the whole stage is tried again
+        if (ql_lighting_frame != LLFrameTimer::getFrameCount())
+        {
+            ql_lighting_frame = LLFrameTimer::getFrameCount();
+            sQLLightingLastVK = sQLLightingNowVK;
+            sQLLightingLastGL = sQLLightingNowGL;
+            sQLLightingNowVK = sQLLightingNowGL = 0;
+            QLVulkanPresenter::glFrame(ql_lighting_frame);
+        }
+        if (ql_lighting_wanted())
+        {
+            LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - vulkan");
+            if (ql_lighting_probe == 0)
+            {
+                ql_lighting_probe = 120;  // two seconds or so
+                ql_lighting_share = U32_MAX;
+            }
+            --ql_lighting_probe;
+            if (ql_lighting_share != U32_MAX)
+            {
+                vk_draws = ql_lighting_share;  // the run Vulkan had: recorded below, with GL's rest
+            }
+            else if (QLVulkanPresenter::glPassBegin())
+            {
+                // The whole stage tried: where every draw records, it is Vulkan's, handed over at the end.
+                const U32 failed = lighting_stage(U32_MAX);
+                if (failed == U32_MAX)
+                {
+                    vk_draws = U32_MAX;
+                }
+                else
+                {
+                    QLVulkanPresenter::glPassAbandon();
+                    // The recording left the screen bound, as the stage does: the run below binds it again.
+                    screen_target->flush();
+                    ql_lighting_share = failed;
+                    vk_draws = failed;
+                }
+            }
+            else
+            {
+                ql_lighting_kept(QLVulkanPresenter::glInfo());
             }
         }
+        if (vk_draws != U32_MAX)
+        {
+            // GL's run, Vulkan taking the leading draws it can.
+            const bool begun = vk_draws > 0 && QLVulkanPresenter::glPassBegin();
+            const U32 limit = begun ? vk_draws : 0;
+            const U32 failed = lighting_stage(limit);
+            if (failed != U32_MAX)
+            {
+                // A draw it had last time it could not now: GL draws the stage alone.
+                QLVulkanPresenter::glPassAbandon();
+                screen_target->flush();
+                ql_lighting_share = failed;
+                lighting_stage(0);
+                vk_draws = 0;
+            }
+            else
+            {
+                vk_draws = limit;
+            }
+        }
+        if (ql_lighting_wanted())
+        {
+            if (vk_draws > 0)
+            {
+                ++sQLLightingPasses;
+                ++sQLLightingNowVK;
+            }
+            if (vk_draws != U32_MAX)
+            {
+                ++sQLLightingKept;
+                ++sQLLightingNowGL;
+            }
+        }
+        sQLLightingShare = vk_draws;
+#else
+        lighting_stage(0);
+#endif
 
         static LLCachedControl<S32> local_light_count(gSavedSettings, "RenderLocalLightCount", 256);
         if (local_light_count > 0 && (!gCubeSnapshot || shaderInputs().mGlobal.mProbeLevel > 0))
@@ -14563,6 +15006,43 @@ std::string ql_vulkan_terrain_maps_info()
     }
     return llformat("%u region(s) drawn | heights in Vulkan's memory %u, composition %u", regions, heights, compositions) +
            " | draws: " + ql_vulkan_terrain_draws_info();
+}
+
+std::string ql_vulkan_lighting_info()
+{
+#if QL_VULKAN_SHADOWS
+    if (!ql_lighting_started())
+    {
+        return "off (QuasarVulkanLighting, read at start)";
+    }
+    static LLCachedControl<bool> wanted(gSavedSettings, "QuasarVulkanLighting", false);
+    if (!wanted())
+    {
+        return "off (QuasarVulkanLighting)";
+    }
+    // The stage's draws, in order: the sun's shadow, SSAO's blur (two), the sun and atmosphere, the sky.
+    const std::string share = sQLLightingShare == U32_MAX ? std::string("all of it")
+                              : sQLLightingShare == 0     ? std::string("none")
+                                                          : llformat("its first %u draws", sQLLightingShare);
+    std::string info = llformat("main view last frame Vulkan drew %s | frames since start %llu with Vulkan, %llu with "
+                                "GL | ",
+                                share.c_str(), (unsigned long long)sQLLightingPasses,
+                                (unsigned long long)sQLLightingKept) +
+                       QLVulkanPresenter::glInfo();
+    if (sQLLightingShare != U32_MAX && !sQLLightingWhy.empty())
+    {
+        info += " | GL's from there because " + sQLLightingWhy;
+    }
+    static LLFrameTimer logged;
+    if (logged.getElapsedTimeF32() > 30.f)
+    {
+        logged.reset();
+        LL_INFOS("Vulkan") << "Lighting: " << info << LL_ENDL;
+    }
+    return info;
+#else
+    return "not on this platform";
+#endif
 }
 
 std::string ql_vulkan_bump_draws_info()

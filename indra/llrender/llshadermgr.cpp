@@ -37,6 +37,7 @@
 #include "llsdserialize.h"
 
 #include <fmt/format.h>
+#include <unordered_map>
 
 #if LL_DARWIN
 #include "OpenGL/OpenGL.h"
@@ -147,6 +148,24 @@ void LLShaderMgr::clearShaderObjects()
 }
 
 U32 LLShaderMgr::sLiveObjects = 0;
+bool LLShaderMgr::sQLKeepSources = false;
+
+namespace
+{
+    // Main thread only, as every compile and delete is.
+    std::unordered_map<GLuint, LLShaderMgr::QLObjectSource>& ql_object_sources()
+    {
+        static std::unordered_map<GLuint, LLShaderMgr::QLObjectSource> sources;
+        return sources;
+    }
+}
+
+// static
+const LLShaderMgr::QLObjectSource* LLShaderMgr::qlObjectSource(GLuint object)
+{
+    const auto found = ql_object_sources().find(object);
+    return found == ql_object_sources().end() ? nullptr : &found->second;
+}
 
 // static
 void LLShaderMgr::deleteShaderObject(GLuint object)
@@ -155,6 +174,7 @@ void LLShaderMgr::deleteShaderObject(GLuint object)
     {
         return;
     }
+    ql_object_sources().erase(object);
     llassert(sLiveObjects > 0);
     sLiveObjects -= sLiveObjects > 0 ? 1 : 0;
     glDeleteShader(object);
@@ -1191,13 +1211,20 @@ GLuint LLShaderMgr::compileShaderFile(const std::string& filename, S32 & shader_
             // extra code spliced in) goes to logs/shader_dump, one file a distinct source, for the Vulkan lighting
             // port to compile into SPIR-V as GL's programs are built.
             static const bool dump = getenv("QUASAR_DUMP_SHADERS") != nullptr;
-            if (dump)
+            std::string text;
+            if (dump || sQLKeepSources)
             {
-                std::string text;
                 for (GLuint i = 0; i < shader_code_count; ++i)
                 {
                     text += shader_code_text[i];
                 }
+            }
+            if (sQLKeepSources)
+            {
+                ql_object_sources()[ret] = { type, filename, text };
+            }
+            if (dump)
+            {
                 std::string flat = filename;
                 for (char& c : flat)
                 {

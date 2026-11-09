@@ -598,6 +598,38 @@ public:
     LLUUID mShaderHash;
     bool mUsingBinaryProgram = false;
 
+    // ---- Quasar: what Vulkan needs to draw this program itself (QuasarVulkanLighting) ----------------------------
+    //
+    // A program the viewer would have Vulkan draw sets mQLWanted (kept across loads: clearConfiguration leaves it).
+    // While LLShaderMgr::sQLKeepSources is on, such a program skips the binary cache and, as it links, copies the
+    // source of every object it attaches (qlSources), and keeps, from then on, what each of its loose uniforms holds
+    // (qlRegions over qlWords: GL's default values, zero, until a setter writes one, a sampler's its texture unit).
+    // Vulkan compiles the sources for itself and fills its block from the regions, by name. qlLinkCount changes with
+    // every link, which makes everything here new.
+    struct QLSource
+    {
+        GLenum      type = 0;
+        std::string name;
+        std::string text;
+    };
+    // One active uniform: an array whole (its elements' locations all reach it), a matrix as GL is handed it (columns
+    // unless mTranspose), a bool as whatever kind of setter last wrote it.
+    struct QLRegion
+    {
+        std::string mName;            // bare: an array's "[0]" taken off
+        U32         mType = 0;        // GL's type
+        U32         mElements = 1;    // an array's size
+        U32         mComponents = 1;  // words an element: 3 a vec3, 9 a mat3
+        U32         mWords = 0;       // its first word in qlWords
+        mutable U8  mKind = 0;        // 0 float, 1 int, 2 uint: the setter's
+        mutable bool mTranspose = false;
+    };
+    bool mQLWanted = false;
+    const std::vector<QLSource>& qlSources() const { return mQLSources; }
+    const std::vector<QLRegion>& qlRegions() const { return mQLRegions; }
+    const U32* qlWords() const { return mQLWords.data(); }
+    U32 qlLinkCount() const { return mLinkCount; }
+
     //statistics for profiling shader performance
     U64 mTimeElapsed = 0;
     static U64 sTotalTimeElapsed;
@@ -727,6 +759,23 @@ private:
     // Detach every object, deleting this program's own: a linked program needs none of them, and an object no program
     // holds is freed when its owner deletes it rather than when the last program holding it goes.
     void releaseObjects();
+
+    // Quasar (see mQLWanted): whether this link keeps what Vulkan needs; the attached objects' sources; the regions,
+    // their words, and per location the region and the element it reaches (-1 none).
+    bool qlCollecting() const;
+    void qlNoteObject(GLuint object);
+    void qlMapRegion(const std::string& name, GLenum type, GLint size, GLint location);
+    void qlMirror(GLint location, U8 kind, U32 components, GLsizei count, const void* v, bool transpose = false) const;
+    std::vector<QLSource>  mQLSources;
+    std::vector<QLRegion>  mQLRegions;
+    mutable std::vector<U32> mQLWords;
+    struct QLLocation
+    {
+        S32 mRegion = -1;
+        U32 mElement = 0;
+    };
+    std::vector<QLLocation> mQLLocations;
+    bool mQLMissing = false;  // an object's source was not kept: qlSources stays empty this link
 
     // Image units per reserved uniform, -1 where this program declares none; filled by mapUniforms, emptied with
     // mTexture. An image array has its elements' units from mFirst on.

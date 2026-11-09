@@ -2982,6 +2982,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanLighting</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (experimental, with QuasarVulkanTargets and QuasarVulkanMainTargets): the main view's lighting stage (the sun's shadow and occlusion pass, SSAO's blur, the sun and atmosphere, the sky) is drawn by Vulkan, from GL's own shaders compiled for Vulkan as they load. Where any of it cannot be Vulkan's, GL draws the whole stage. Restart to turn on (the shaders' sources are kept from the start); then live. Status: "Quasar Vulkan lighting".</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarVulkanBumpDraws</key>
         <map>
             <key>Comment</key>
