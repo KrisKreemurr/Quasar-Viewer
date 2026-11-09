@@ -12808,59 +12808,74 @@ void LLPipeline::renderDeferredLighting()
         // ~13 constants from UB_DEFERRED instead of having them re-pushed on every bind.
         packDeferredUBO();
 
-        // The light map's sun pass, SSAO's blur, the sun and atmosphere, and the sky: one stage, its draws in order,
-        // the first vk_limit of them recorded for Vulkan (QuasarVulkanLighting) and the rest drawn by GL. Nothing Vulkan
-        // records runs before the hand-over, so it is handed over just before GL's first draw (or at the end): Vulkan
-        // has a leading run of the stage, GL the rest. The GL binds and uniform sets run either way: they are what
-        // Vulkan's draws read. Returns the first draw Vulkan could not record (U32_MAX: none), recording nothing after.
-        LLRenderTarget* light_blurred = nullptr;
-        auto lighting_stage = [&](U32 vk_limit) -> U32
+        // Quasar: Vulkan's run of the lighting (QuasarVulkanLighting): its draws recorded in order while each one can
+        // be, and handed over before GL's first touch of anything they draw (GL's first draw, dispatch or clear) or at
+        // the stage's end. The first draw Vulkan cannot take, and every one after it, GL draws: nothing Vulkan records
+        // runs before the hand-over, so whatever GL draws comes after it. The GL binds and uniform sets run either way:
+        // they are what Vulkan's draws read.
+        struct QLRun
         {
-            light_blurred = nullptr;
-            U32 next = 0;
-            U32 failed = U32_MAX;
-            bool handed = false;
-            // What Vulkan recorded, handed over before anything of GL's reads or writes what it draws: GL's first draw,
-            // GL's dispatch, GL's clear, or the stage's end. Nothing where the recording was let go.
-            auto hand_over = [&]()
+            bool open = false;  // a pass begun, and every draw so far recorded
+            U32  recorded = 0;
+            bool whole = false; // the stage was Vulkan's to its end
+            void handOver()
             {
 #if QL_VULKAN_SHADOWS
-                if (vk_limit > 0 && !handed && failed == U32_MAX)
+                if (!open)
                 {
-                    handed = true;
-                    if (!QLVulkanPresenter::glPassEnd())
-                    {
-                        ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
-                    }
+                    return;
+                }
+                open = false;
+                if (!QLVulkanPresenter::glPassEnd())
+                {
+                    ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
                 }
 #endif
-            };
-            // A draw of the screen triangle into `target` (bound), cleared first where `clear`: recorded for Vulkan
-            // while it is among the first vk_limit and none before it failed, else GL's.
+            }
+        } ql_run;
+#if QL_VULKAN_SHADOWS
+        {
+            static U32 ql_lighting_frame = 0;
+            if (ql_lighting_frame != LLFrameTimer::getFrameCount())
+            {
+                ql_lighting_frame = LLFrameTimer::getFrameCount();
+                sQLLightingLastVK = sQLLightingNowVK;
+                sQLLightingLastGL = sQLLightingNowGL;
+                sQLLightingNowVK = sQLLightingNowGL = 0;
+                QLVulkanPresenter::glFrame(ql_lighting_frame);
+            }
+            if (ql_lighting_wanted())
+            {
+                ql_run.open = QLVulkanPresenter::glPassBegin();
+                if (!ql_run.open)
+                {
+                    ql_lighting_kept(QLVulkanPresenter::glInfo());
+                }
+            }
+        }
+#endif
+        LLRenderTarget* light_blurred = nullptr;
+        {
+            // A draw of the screen triangle into `target` (bound), cleared first where `clear`: Vulkan's while its run
+            // is open, else GL's.
             auto draw = [&](LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
                             U32 depth_func, bool drawn_only)
             {
-                const U32 index = next++;
-                const bool vk = index < vk_limit && failed == U32_MAX;
 #if QL_VULKAN_SHADOWS
-                if (vk)
+                if (ql_run.open)
                 {
                     // The screen triangle's corners (mScreenTriangleVB's).
                     static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
-                    if (!ql_gl_program_draw(shader, target, true, clear, clear_color, depth_func, drawn_only, triangle, 3))
+                    if (ql_gl_program_draw(shader, target, true, clear, clear_color, depth_func, drawn_only, triangle, 3))
                     {
-                        failed = index;
+                        ++ql_run.recorded;
+                        return;
                     }
-                    return;
+                    ql_run.handOver();  // GL's from this draw on
                 }
 #else
                 (void)shader; (void)depth_func; (void)drawn_only;
 #endif
-                if (failed != U32_MAX)
-                {
-                    return;  // a recording let go: GL runs the stage again
-                }
-                hand_over();
                 if (clear)
                 {
                     gGL.setClearColor(clear_color);
@@ -12919,12 +12934,11 @@ void LLPipeline::renderDeferredLighting()
                 const ALLightMapBlur::Kernel kernel =
                     ALLightMapBlur::kernel(RenderShadowGaussian, RenderShadowBlurSize, RenderShadowBlurDistFactor);
 
-                // Vulkan has the fragment passes (it binds no storage images yet): where the stage is Vulkan's from
-                // the blur on, the dispatch is not taken.
-                if (vk_limit <= next && LLRender::sCompute && gDeferredBlurLightComputeProgram.isComplete() &&
-                    ALLightMapBlur::apron(kernel) >= 0 && failed == U32_MAX)
+                // Vulkan has the fragment passes (it binds no storage images yet): while its run is open, the
+                // dispatch is not taken.
+                if (!ql_run.open && LLRender::sCompute && gDeferredBlurLightComputeProgram.isComplete() &&
+                    ALLightMapBlur::apron(kernel) >= 0)
                 {
-                    hand_over();
                     light_blurred = acquireResource(lighting, ALRenderResourcePlan::Id::MainLightBlurred);
                     if (light_blurred)
                     {
@@ -12976,9 +12990,9 @@ void LLPipeline::renderDeferredLighting()
                     unbindDeferredShader(gDeferredBlurLightProgram);
                     lighting.release(blur_scratch);
                 }
-                else if (next < vk_limit && failed == U32_MAX)
+                else
                 {
-                    failed = next;  // no scratch to blur through: GL's from here, which has its own way
+                    ql_run.handOver();  // no scratch to blur through: GL's from here
                 }
             }
 
@@ -12987,9 +13001,9 @@ void LLPipeline::renderDeferredLighting()
             // pass's draw clears it first (the screen is drawn into by nothing before it); without one, GL clears it
             // here, after the hand-over.
             gGL.setClearColor(LLColor4::transparent);
-            if (!RenderDeferredAtmospheric && failed == U32_MAX)
+            if (!RenderDeferredAtmospheric)
             {
-                hand_over();
+                ql_run.handOver();
                 screen_target->clear(GL_COLOR_BUFFER_BIT);
             }
 
@@ -13041,97 +13055,29 @@ void LLPipeline::renderDeferredLighting()
                     sky_shader.unbind();
                 }
             }
-            hand_over();  // Vulkan had every draw
-            return failed;
-        };
-
-        // Vulkan's share of the stage: every draw it can record, found by recording all of them now and then (a
-        // texture moved into Vulkan's memory, a program compiled, lets it take more), and the leading run found kept
-        // until then.
-        U32 vk_draws = 0;
+        }
+        ql_run.whole = ql_run.open;
+        // The local lights are GL's: what Vulkan drew goes first.
+        ql_run.handOver();
 #if QL_VULKAN_SHADOWS
-        static U32 ql_lighting_frame = 0;
-        static U32 ql_lighting_share = U32_MAX;  // the leading run Vulkan last had (U32_MAX: all of it)
-        static U32 ql_lighting_probe = 0;        // frames until the whole stage is tried again
-        if (ql_lighting_frame != LLFrameTimer::getFrameCount())
-        {
-            ql_lighting_frame = LLFrameTimer::getFrameCount();
-            sQLLightingLastVK = sQLLightingNowVK;
-            sQLLightingLastGL = sQLLightingNowGL;
-            sQLLightingNowVK = sQLLightingNowGL = 0;
-            QLVulkanPresenter::glFrame(ql_lighting_frame);
-        }
         if (ql_lighting_wanted())
         {
-            LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("renderDeferredLighting - vulkan");
-            if (ql_lighting_probe == 0)
-            {
-                ql_lighting_probe = 120;  // two seconds or so
-                ql_lighting_share = U32_MAX;
-            }
-            --ql_lighting_probe;
-            if (ql_lighting_share != U32_MAX)
-            {
-                vk_draws = ql_lighting_share;  // the run Vulkan had: recorded below, with GL's rest
-            }
-            else if (QLVulkanPresenter::glPassBegin())
-            {
-                // The whole stage tried: where every draw records, it is Vulkan's, handed over at the end.
-                const U32 failed = lighting_stage(U32_MAX);
-                if (failed == U32_MAX)
-                {
-                    vk_draws = U32_MAX;
-                }
-                else
-                {
-                    QLVulkanPresenter::glPassAbandon();
-                    // The recording left the screen bound, as the stage does: the run below binds it again.
-                    screen_target->flush();
-                    ql_lighting_share = failed;
-                    vk_draws = failed;
-                }
-            }
-            else
-            {
-                ql_lighting_kept(QLVulkanPresenter::glInfo());
-            }
-        }
-        if (vk_draws != U32_MAX)
-        {
-            // GL's run, Vulkan taking the leading draws it can.
-            const bool begun = vk_draws > 0 && QLVulkanPresenter::glPassBegin();
-            const U32 limit = begun ? vk_draws : 0;
-            const U32 failed = lighting_stage(limit);
-            if (failed != U32_MAX)
-            {
-                // A draw it had last time it could not now: GL draws the stage alone.
-                QLVulkanPresenter::glPassAbandon();
-                screen_target->flush();
-                ql_lighting_share = failed;
-                lighting_stage(0);
-                vk_draws = 0;
-            }
-            else
-            {
-                vk_draws = limit;
-            }
-        }
-        if (ql_lighting_wanted())
-        {
-            if (vk_draws > 0)
+            sQLLightingShare = ql_run.whole ? U32_MAX : ql_run.recorded;
+            if (ql_run.recorded > 0)
             {
                 ++sQLLightingPasses;
                 ++sQLLightingNowVK;
             }
-            if (vk_draws != U32_MAX)
+            if (!ql_run.whole)
             {
                 ++sQLLightingKept;
                 ++sQLLightingNowGL;
             }
         }
-        sQLLightingShare = vk_draws;
-#else
-        lighting_stage(0);
+        else
+        {
+            sQLLightingShare = 0;
+        }
 #endif
 
         static LLCachedControl<S32> local_light_count(gSavedSettings, "RenderLocalLightCount", 256);
