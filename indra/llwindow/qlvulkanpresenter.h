@@ -421,7 +421,7 @@ public:
         unsigned           vertex_buffer = 0, index_buffer = 0;
         unsigned           vertex_count = 0, total_indices = 0;
         unsigned           position = ~0u, normal = ~0u, texcoord0 = ~0u, texcoord1 = ~0u, texcoord2 = ~0u;
-        unsigned           color = ~0u, tangent = ~0u, weight4 = ~0u;
+        unsigned           color = ~0u, tangent = ~0u, weight4 = ~0u, emissive = ~0u;
         unsigned           first_index = 0, index_count = 0;
     };
     struct GpDraw

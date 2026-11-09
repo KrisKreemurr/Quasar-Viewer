@@ -15211,6 +15211,7 @@ namespace
     {
         bool            open = false;
         bool            active = false;  // begun and wanted: its draws may open a run again
+        bool            counted = false;  // the main view's: its draws are counted (a probe's or a bake's are not)
         U32             reopens = 0;
         U32             recorded = 0;
         U32             runs = 0;
@@ -15412,8 +15413,10 @@ bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens)
     ql_stage_hand_over();
     sQLStage = QLStage();
     sQLStage.name = name;
-    if (!ql_lighting_wanted() || gPipeline.mRT != &gPipeline.mMainRT || LLPipeline::sImpostorRender ||
-        LLPipeline::sCutoutRender || LLPipeline::sRenderingHUDs || LLPipeline::sShadowRender)
+    sQLStage.counted = gPipeline.mRT == &gPipeline.mMainRT && !LLPipeline::sImpostorRender &&
+                       !LLPipeline::sCutoutRender && !LLPipeline::sRenderingHUDs && !LLPipeline::sShadowRender &&
+                       !gCubeSnapshot;
+    if (!ql_lighting_wanted() || !sQLStage.counted)
     {
         return false;
     }
@@ -15486,7 +15489,7 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
     (void)end;
     if (!sQLStage.active)
     {
-        if (sQLStage.name && *sQLStage.name)
+        if (sQLStage.counted && sQLStage.name && *sQLStage.name)
         {
             ++ql_stage_stats().now_gl;
         }
@@ -15516,6 +15519,7 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
         mesh.color       = at(LLVertexBuffer::TYPE_COLOR);
         mesh.tangent     = at(LLVertexBuffer::TYPE_TANGENT);
         mesh.weight4     = at(LLVertexBuffer::TYPE_WEIGHT4);
+        mesh.emissive    = at(LLVertexBuffer::TYPE_EMISSIVE);
         mesh.first_index = offset;
         mesh.index_count = count;
         QLGLState state = ql_gl_state_now();
@@ -15545,7 +15549,15 @@ void ql_vulkan_screen_triangle()
         LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
         LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
         bool drawn = false;
-        if (shader && target && !LLGLState::qlEnabled(GL_STENCIL_TEST) && ql_stage_run())
+        if (!shader || !target)
+        {
+            ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
+        }
+        else if (LLGLState::qlEnabled(GL_STENCIL_TEST))
+        {
+            ql_lighting_kept(shader->mName + ": tests the stencil (not yet in Vulkan)");
+        }
+        else if (ql_stage_run())
         {
             static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
             QLGLState state = ql_gl_state_now();

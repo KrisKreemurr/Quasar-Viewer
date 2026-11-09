@@ -4329,6 +4329,7 @@ struct QLVulkanPresenter::Impl
         VkDeviceSize   vertexBytes = 0, weightBytes = 0, normalBytes = 0, tangentBytes = 0, uvBytes = 0, colorBytes = 0,
                        indexBytes = 0;
         VkDeviceSize   extraUvBytes = 0;  // each of the second and third texture coordinates (legacy materials' maps)
+        VkDeviceSize   emissiveBytes = 0;  // the emissive colours (4 bytes), beside the extra coordinates
         VkDeviceSize   vertexTop = 0, indexTop = 0;
         U32            resets = 0;
         std::unordered_map<U64, ShArenaEntry> entries;
@@ -4339,12 +4340,14 @@ struct QLVulkanPresenter::Impl
         VkDeviceSize uv1Start() const { return uvStart() + uvBytes; }
         VkDeviceSize uv2Start() const { return uv1Start() + extraUvBytes; }
         VkDeviceSize colorStart() const { return uv2Start() + extraUvBytes; }
-        VkDeviceSize indexStart() const { return colorStart() + colorBytes; }
+        VkDeviceSize emissiveStart() const { return colorStart() + colorBytes; }
+        VkDeviceSize indexStart() const { return emissiveStart() + emissiveBytes; }
         VkDeviceSize totalBytes() const { return indexStart() + indexBytes; }
         VkDeviceSize used() const
         {
             return vertexTop * (1 + (weightBytes ? 1 : 0) + (normalBytes ? 1 : 0) + (tangentBytes ? 1 : 0)) +
-                   (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + (extraUvBytes ? vertexTop : 0) + indexTop;
+                   (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + (extraUvBytes ? vertexTop : 0) +
+                   (emissiveBytes ? vertexTop / 4 : 0) + indexTop;
         }
     };
     // A texture's place in the alpha atlas: which texture, as it held what (its content stamp), and the last map that
@@ -5446,7 +5449,8 @@ struct QLVulkanPresenter::Impl
     bool arenaPlace(ShArena& arena, U64 stamp, GLuint vertex_buffer, U32 vertex_offset, U32 weight_offset,
                     U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index,
                     U32 uv_offset = 0, U32 color_offset = U32_MAX, U32 normal_offset = 0, bool any_pass = false,
-                    U32 tangent_offset = U32_MAX, U32 uv1_offset = U32_MAX, U32 uv2_offset = U32_MAX)
+                    U32 tangent_offset = U32_MAX, U32 uv1_offset = U32_MAX, U32 uv2_offset = U32_MAX,
+                    U32 emissive_offset = U32_MAX)
     {
         if (!mShInPass && !any_pass)
         {
@@ -5505,6 +5509,12 @@ struct QLVulkanPresenter::Impl
         {
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv2_offset,
                                       (GLintptr)(arena.uv2Start() + arena.vertexTop / 2), (GLsizeiptr)vertex_count * 8);
+        }
+        if (arena.emissiveBytes && emissive_offset != U32_MAX)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)emissive_offset,
+                                      (GLintptr)(arena.emissiveStart() + arena.vertexTop / 4),
+                                      (GLsizeiptr)vertex_count * 4);
         }
         gl.CopyNamedBufferSubData(index_buffer, arena.gl, 0, (GLintptr)(arena.indexStart() + arena.indexTop),
                                   (GLsizeiptr)index_count * 2);
@@ -5727,6 +5737,7 @@ struct QLVulkanPresenter::Impl
         arena.normalBytes = normals ? vertex_bytes : 0;
         arena.tangentBytes = tangents ? vertex_bytes : 0;
         arena.extraUvBytes = extra_uvs ? vertex_bytes / 2 : 0;
+        arena.emissiveBytes = extra_uvs ? vertex_bytes / 4 : 0;
         arena.uvBytes     = masked ? vertex_bytes / 2 : 0;
         arena.colorBytes  = masked ? vertex_bytes / 4 : 0;
         arena.indexBytes  = index_bytes;
@@ -8375,6 +8386,7 @@ struct QLVulkanPresenter::Impl
         VkPipelineLayout      layout = VK_NULL_HANDLE;
         std::unordered_map<std::string, U32> members;  // the default block's, by name
         S32                   position = -1;            // the "position" attribute's location
+        bool                  reads_emissive = false;   // diffuse_color then reads the emissive stream, as GL feeds it
         U32                   outputs = 0;              // colour outputs (the highest location + 1)
         // Its attributes, each a stream of a mesh in the arena (GpStream): where a draw gives positions alone, only
         // "position" may be read.
@@ -8763,13 +8775,14 @@ struct QLVulkanPresenter::Impl
     {
         GP_POSITION = 0, GP_NORMAL, GP_TEXCOORD0, GP_TEXCOORD1, GP_TEXCOORD2, GP_COLOR, GP_TANGENT, GP_WEIGHT4,
         GP_TEXTURE_INDEX,  // GL keeps it as position.w, read as an int: the positions' stream, 12 bytes in
+        GP_EMISSIVE,       // LLColor4U; GL feeds it to diffuse_color as well where a program reads both
         GP_STREAMS
     };
     static S32 gpStreamOf(const std::string& name)
     {
         static const char* const names[GP_STREAMS] = { "position", "normal", "texcoord0", "texcoord1",
                                                        "texcoord2", "diffuse_color", "tangent", "weight4",
-                                                       "texture_index" };
+                                                       "texture_index", "emissive" };
         for (U32 i = 0; i < GP_STREAMS; ++i)
         {
             if (name == names[i])
@@ -8784,7 +8797,7 @@ struct QLVulkanPresenter::Impl
         switch (stream)
         {
             case GP_TEXCOORD0: case GP_TEXCOORD1: case GP_TEXCOORD2: return 8;
-            case GP_COLOR: return 4;
+            case GP_COLOR: case GP_EMISSIVE: return 4;
             default: return 16;
         }
     }
@@ -8799,6 +8812,7 @@ struct QLVulkanPresenter::Impl
             case GP_TEXCOORD1: return mGbArena.uv1Start();
             case GP_TEXCOORD2: return mGbArena.uv2Start();
             case GP_COLOR: return mGbArena.colorStart();
+            case GP_EMISSIVE: return mGbArena.emissiveStart();
             case GP_TANGENT: return mGbArena.tangentStart();
             case GP_WEIGHT4: return mGbArena.vertexBytes;
             default: return 0;
@@ -8954,6 +8968,10 @@ struct QLVulkanPresenter::Impl
             {
                 p.position = (S32)a.location;
             }
+            if (stream == GP_EMISSIVE)
+            {
+                p.reads_emissive = true;
+            }
             GpProgram::Input in;
             in.stream   = (U32)stream;
             in.location = a.location;
@@ -8969,7 +8987,7 @@ struct QLVulkanPresenter::Impl
                 case GL_FLOAT_VEC3: in.format = VK_FORMAT_R32G32B32_SFLOAT; break;
                 default: in.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
             }
-            if (stream == GP_COLOR)
+            if (stream == GP_COLOR || stream == GP_EMISSIVE)
             {
                 in.format = VK_FORMAT_R8G8B8A8_UNORM;  // LLColor4U, normalized as GL's attribute
             }
@@ -9782,10 +9800,11 @@ struct QLVulkanPresenter::Impl
             // Every attribute the program reads, from the mesh.
             const unsigned offsets[GP_STREAMS] = { d.mesh.position, d.mesh.normal, d.mesh.texcoord0, d.mesh.texcoord1,
                                                    d.mesh.texcoord2, d.mesh.color, d.mesh.tangent, d.mesh.weight4,
-                                                   d.mesh.position };
+                                                   d.mesh.position, d.mesh.emissive };
             for (const GpProgram::Input& in : p.inputs)
             {
-                if (offsets[in.stream] == ~0u)
+                const U32 stream = in.stream == GP_COLOR && p.reads_emissive ? (U32)GP_EMISSIVE : in.stream;
+                if (offsets[stream] == ~0u)
                 {
                     gpWhy(llformat("%s reads an attribute its mesh has not (stream %u)", p.name.c_str(), in.stream));
                     return false;
@@ -10039,7 +10058,7 @@ struct QLVulkanPresenter::Impl
                             d.mesh.vertex_count, d.mesh.index_buffer, d.mesh.total_indices, base_vertex, base_index,
                             d.mesh.texcoord0 != ~0u ? d.mesh.texcoord0 : 0, d.mesh.color,
                             d.mesh.normal != ~0u ? d.mesh.normal : 0, true, d.mesh.tangent, d.mesh.texcoord1,
-                            d.mesh.texcoord2))
+                            d.mesh.texcoord2, d.mesh.emissive))
             {
                 give_back();
                 gpWhy("the arena is full");
@@ -10198,7 +10217,10 @@ struct QLVulkanPresenter::Impl
             for (size_t i = 0; i < p.inputs.size(); ++i)
             {
                 buffers[i] = mGbArena.buffer;
-                starts[i]  = gpStreamStart(p.inputs[i].stream);
+                // A program reading the emissive colour reads it as diffuse_color too (LLVertexBuffer::setupVertexBuffer).
+                const U32 stream = p.inputs[i].stream == GP_COLOR && p.reads_emissive ? (U32)GP_EMISSIVE
+                                                                                       : p.inputs[i].stream;
+                starts[i] = gpStreamStart(stream);
             }
             if (!p.inputs.empty())
             {
