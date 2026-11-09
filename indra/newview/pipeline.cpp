@@ -12675,6 +12675,16 @@ namespace
                         return false;
                     }
                     t.texture = slot->getCurrTexture();
+                    // A 2D texture GL keeps in its own memory (a small one, or one made before Vulkan presented):
+                    // Vulkan reads a copy of it in its memory, kept while the texture stays as it is.
+                    if (slot->getCurrType() == ALTextureSlot::TT_TEXTURE && t.texture && gQLExternalStorage &&
+                        !gQLExternalStorage->owns(t.texture) && t.texture != ALTextureSlot::sWhiteTexture.load())
+                    {
+                        if (const U32 copy = LLImageGL::qlVulkanCopyOf(t.texture))
+                        {
+                            t.texture = copy;
+                        }
+                    }
                     ALSamplerDesc desc;
                     if (!gGL.describeSampler(slot->getCurrSampler(), desc))
                     {

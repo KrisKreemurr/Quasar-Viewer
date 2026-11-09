@@ -46,6 +46,7 @@
 #include "llwindow.h"
 #include "llframetimer.h"
 #include <atomic>
+#include <unordered_map>
 #include <chrono>
 #include <bit>
 #include <boost/unordered_map.hpp>
@@ -4226,3 +4227,119 @@ void LLImageGLThread::run()
     mWindow->destroySharedContext(mContext);
 }
 
+
+// ---- Quasar: copies in Vulkan's memory of the textures Vulkan's lighting reads (QuasarVulkanLighting) --------------
+namespace
+{
+    struct QLCopy
+    {
+        LLImageGL* mImage = nullptr;  // checked against sImageList before use: it may have gone
+        U64        mStamp = 0;
+        U32        mCopy = 0;
+        S32        mWidth = 0, mHeight = 0, mLevels = 0, mFormat = 0;
+        U32        mMissFrame = 0;    // a name found to have no image of this class: not searched for again this frame
+    };
+    std::unordered_map<U32, QLCopy> sQLCopies;  // by the source's GL name
+
+    void ql_drop_copy(QLCopy& c)
+    {
+        if (c.mCopy)
+        {
+            LLImageGL::deleteTextures(1, &c.mCopy);
+            c.mCopy = 0;
+        }
+    }
+}
+
+// static
+U32 LLImageGL::qlVulkanCopyOf(U32 name)
+{
+    if (!name || !gQLExternalStorage)
+    {
+        return 0;
+    }
+    if (gQLExternalStorage->owns(name))
+    {
+        return name;
+    }
+    QLCopy& c = sQLCopies[name];
+    const bool image_live = c.mImage && sImageList.count(c.mImage) && c.mImage->getTexName() == name;
+    if (!image_live)
+    {
+        if (c.mMissFrame == LLImageGL::sFrameCount + 1)
+        {
+            return 0;
+        }
+        ql_drop_copy(c);
+        c = QLCopy();
+        for (LLImageGL* image : sImageList)
+        {
+            if (image && image->getTexName() == name && image->mStorageAllocated && image->mTarget == GL_TEXTURE_2D)
+            {
+                c.mImage = image;
+                break;
+            }
+        }
+        if (!c.mImage)
+        {
+            c.mMissFrame = LLImageGL::sFrameCount + 1;
+            return 0;
+        }
+    }
+    const StorageDesc& storage = c.mImage->mStorage;
+    const U64 stamp = c.mImage->getContentStamp();
+    const bool same_shape = c.mCopy && c.mWidth == storage.mWidth && c.mHeight == storage.mHeight &&
+                            c.mLevels == storage.mLevels && c.mFormat == storage.mFormat;
+    if (same_shape && c.mStamp == stamp)
+    {
+        return c.mCopy;
+    }
+    ALTextureSlot* slot0 = gGL.getTextureSlot(0);
+    const U32 active = gGL.getCurrentTexUnitIndex();
+    const ALTextureSlot::eTextureType prev_type = slot0->getCurrType();
+    const U32 prev_texture = slot0->getCurrTexture();
+    const U32 prev_sampler = slot0->getCurrSampler();
+    auto restore = [&]()
+    {
+        if (prev_texture)
+        {
+            slot0->bindManual(prev_type, prev_texture, prev_sampler);
+        }
+        else
+        {
+            slot0->unbind();
+        }
+        gGL.getTextureSlot(active)->makeActive();
+    };
+    if (!same_shape)
+    {
+        ql_drop_copy(c);
+        if (storage.mWidth <= 0 || storage.mHeight <= 0 || storage.mLevels <= 0)
+        {
+            return 0;
+        }
+        LLImageGL::generateTextures(1, &c.mCopy);
+        slot0->bindManual(ALTextureSlot::TT_TEXTURE, c.mCopy);
+        if (!gQLExternalStorage->allocateTexture(c.mCopy, storage.mFormat, storage.mWidth, storage.mHeight,
+                                                 storage.mLevels, 0))
+        {
+            ql_drop_copy(c);
+            restore();
+            c.mMissFrame = LLImageGL::sFrameCount + 1;
+            return 0;
+        }
+        c.mWidth  = storage.mWidth;
+        c.mHeight = storage.mHeight;
+        c.mLevels = storage.mLevels;
+        c.mFormat = storage.mFormat;
+    }
+    for (S32 level = 0; level < c.mLevels; ++level)
+    {
+        const S32 w = llmax(1, c.mWidth >> level);
+        const S32 h = llmax(1, c.mHeight >> level);
+        glCopyImageSubData(name, GL_TEXTURE_2D, level, 0, 0, 0, c.mCopy, GL_TEXTURE_2D, level, 0, 0, 0, w, h, 1);
+    }
+    c.mStamp = stamp;
+    restore();
+    return c.mCopy;
+}

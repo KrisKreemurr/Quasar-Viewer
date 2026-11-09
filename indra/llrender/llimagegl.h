@@ -644,6 +644,12 @@ protected:
     // STATICS
 public:
     static boost::unordered_set<LLImageGL*> sImageList;
+
+    // Quasar: a texture GL's lighting programs read while Vulkan draws them (QuasarVulkanLighting), as a name in
+    // Vulkan's memory: the name itself where it is there, else a copy of it made there (glCopyImageSubData, every level)
+    // and kept until the texture changes or goes. 0 where there can be none: not a 2D texture this class made, or no
+    // shared storage for its format. Main thread; leaves unit 0's binding and the active unit as they were.
+    static U32 qlVulkanCopyOf(U32 name);
     static S32 sCount;
     static U32 sFrameCount;
     static F64 sLastFrameTime;
