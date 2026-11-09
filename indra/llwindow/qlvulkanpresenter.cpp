@@ -8390,8 +8390,8 @@ struct QLVulkanPresenter::Impl
     std::vector<GpProgram> mGpPrograms;
     std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
 
-    static constexpr U32          GP_SLOTS = 4;
-    static constexpr VkDeviceSize GP_SLOT_BYTES = 32ull << 20;  // a pass's blocks and vertices (8 MB filled in the club)
+    static constexpr U32 GP_SLOTS = 16;  // runs in flight: a frame's lighting, alpha and post chain take several each
+    static constexpr VkDeviceSize GP_SLOT_BYTES = 8ull << 20;  // a run's blocks and vertices (0.1 MB with blocks reused)
     static constexpr U32          GP_SETS = 1024;               // a pass's draws
     static constexpr VkDeviceSize GP_NONE = ~(VkDeviceSize)0;  // no room
     struct GpSlot

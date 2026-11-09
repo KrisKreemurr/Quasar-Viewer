@@ -796,6 +796,8 @@ void LLPipeline::markRenderInputsDirty(ALRenderInputRequests::Change change)
     mRenderInputRequests.mark(change);
 }
 
+static bool ql_vulkan_transient_wanted(ALRenderResourcePlan::Id id);
+
 void LLPipeline::applyRenderInputs()
 {
     // A frame starts here, with every transient target the last one acquired back in the pool. Debug GL poisons each
@@ -861,6 +863,35 @@ void LLPipeline::applyRenderInputs()
             mNoiseMap = 0;
             createResourceTexture(ALRenderResourcePlan::Id::Noise);
         }
+    }
+
+    // Quasar: the post chain Vulkan draws (QuasarVulkanLighting) reads and writes the transient pool's targets, and the
+    // pipeline's own textures it samples. Once the self-test has passed, every target the pool builds is in Vulkan's
+    // memory (the pool let go of, at a frame's start with every target back in it, so each is built again there as it
+    // is next asked for), and the post chain's textures made before then are made again.
+    extern bool gQLTransientsInVulkan;  // altransienttargetpool.cpp
+    static bool ql_pool_moved = false;
+    if (!ql_pool_moved && ql_vulkan_transient_wanted(ALRenderResourcePlan::Id::MainLight) &&
+        !mRenderInputRequests.overriding())
+    {
+        ql_pool_moved = true;
+        gQLTransientsInVulkan = true;
+        mTransientTargets.clear();
+        using Id = ALRenderResourcePlan::Id;
+        const std::pair<Id, U32*> textures[] = { { Id::ToneCurve, &mToneCurveLut },
+                                                 { Id::SMAAArea, &mSMAAAreaMap },
+                                                 { Id::SMAASearch, &mSMAASearchMap } };
+        for (const auto& [id, name] : textures)
+        {
+            if (*name && !gQLExternalStorage->owns(*name))
+            {
+                LLImageGL::deleteTextures(1, name);
+                *name = 0;
+                createResourceTexture(id);
+            }
+        }
+        LL_INFOS("Vulkan") << "The transient pool and the post chain's textures are made again in Vulkan's memory"
+                           << LL_ENDL;
     }
 #endif
 }
@@ -1045,6 +1076,11 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
 #endif
 }
 
+// Quasar: a stage of GL's draws recorded for Vulkan (defined with the lighting's adapter, below).
+bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens);
+void ql_vulkan_clear(LLRenderTarget* target, U32 mask);
+void ql_vulkan_screen_triangle();
+
 // Quasar: whether what Vulkan's lighting reads is made in Vulkan's memory (QuasarVulkanLighting, read at start), once
 // the render target self-test has passed. Also the reflection probes' (LLReflectionMapManager).
 bool ql_vulkan_lighting_memory()
@@ -1064,7 +1100,32 @@ static bool ql_vulkan_shadow_maps_wanted(ALRenderResourcePlan::Id id)
     using Id = ALRenderResourcePlan::Id;
     return ql_vulkan_lighting_memory() &&
            (ALRenderResourcePlan::isShadowMap(id) || id == Id::BrdfLut || id == Id::Exposure || id == Id::ExposureLast ||
-            id == Id::SSRScene);
+            id == Id::SSRScene ||
+            // The post chain's own (QuasarVulkanLighting draws it too): the meter, the flare's state, the legacy glow.
+            id == Id::ExposureMeter || id == Id::ExposureHistogram || id == Id::LensFlareA || id == Id::LensFlareB ||
+            id == Id::Glow0 || id == Id::Glow1 || id == Id::Glow2 || id == Id::SMAAEdges || id == Id::SMAABlend);
+}
+
+// Quasar: a texture of the pipeline's own the post chain reads, made in Vulkan's memory where Vulkan draws it: empty under
+// the scope, then filled, since Vulkan's memory is given only to storage made without pixels.
+static void ql_manual_texture_2d(U32 internal_format, U32 width, U32 height, U32 format, U32 type, const void* pixels)
+{
+    const U32 target = ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE);
+#if QL_VULKAN_SHADOWS
+    if (ql_vulkan_lighting_memory())
+    {
+        {
+            QLExternalStorageScope vulkan_storage(true);
+            LLImageGL::allocateTexture2D(target, internal_format, width, height, format, type, nullptr);
+        }
+        if (pixels)
+        {
+            LLImageGL::setManualSubImage(target, 0, width, height, format, type, pixels);
+        }
+        return;
+    }
+#endif
+    LLImageGL::allocateTexture2D(target, internal_format, width, height, format, type, pixels);
 }
 
 void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRenderResourcePlan::IdSet& ids,
@@ -2104,8 +2165,7 @@ void LLPipeline::createResourceTexture(ALRenderResourcePlan::Id id)
 
             LLImageGL::generateTextures(1, &mSMAAAreaMap);
             gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_TEXTURE, mSMAAAreaMap);
-            LLImageGL::allocateTexture2D(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), GL_RG8, AREATEX_WIDTH,
-                                         AREATEX_HEIGHT, GL_RG, GL_UNSIGNED_BYTE, tempBuffer.data());
+            ql_manual_texture_2d(GL_RG8, AREATEX_WIDTH, AREATEX_HEIGHT, GL_RG, GL_UNSIGNED_BYTE, tempBuffer.data());
             break;
         }
 
@@ -2121,8 +2181,7 @@ void LLPipeline::createResourceTexture(ALRenderResourcePlan::Id id)
 
             LLImageGL::generateTextures(1, &mSMAASearchMap);
             gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_TEXTURE, mSMAASearchMap);
-            LLImageGL::allocateTexture2D(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), GL_R8, SEARCHTEX_WIDTH,
-                                         SEARCHTEX_HEIGHT, GL_RED, GL_UNSIGNED_BYTE, tempBuffer.data());
+            ql_manual_texture_2d(GL_R8, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, GL_RED, GL_UNSIGNED_BYTE, tempBuffer.data());
             break;
         }
 
@@ -2170,8 +2229,7 @@ void LLPipeline::createResourceTexture(ALRenderResourcePlan::Id id)
             // nothing else. One-shot: re-bakes go through setManualSubImage.
             LLImageGL::generateTextures(1, &mToneCurveLut);
             gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_TEXTURE, mToneCurveLut);
-            LLImageGL::allocateTexture2D(ALTextureSlot::getInternalType(ALTextureSlot::TT_TEXTURE), GL_RGBA16,
-                                         ALToneCurveSet::LUT_SIZE, 1, GL_RGBA, GL_UNSIGNED_SHORT, nullptr);
+            ql_manual_texture_2d(GL_RGBA16, ALToneCurveSet::LUT_SIZE, 1, GL_RGBA, GL_UNSIGNED_SHORT, nullptr);
             stop_glerror();
             mToneCurveLutDirty = true;   // fresh storage holds nothing
             break;
@@ -2354,6 +2412,9 @@ void LLPipeline::generateLensDirt()
     if (mLensDirtMap.getWidth() != gen_w || mLensDirtMap.getHeight() != gen_h)
     {
         mLensDirtMap.release();
+#if QL_VULKAN_SHADOWS
+        QLExternalStorageScope vulkan_storage(ql_vulkan_lighting_memory());  // Quasar: colorCorrect reads it in Vulkan
+#endif
         if (!mLensDirtMap.allocate(gen_w, gen_h, GL_R8))
         {
             LL_WARNS() << "Could not allocate the lens dirt plate; effect disabled until the parameters change" << LL_ENDL;
@@ -9281,7 +9342,7 @@ void LLPipeline::generateLuminance(LLRenderTarget* src, LLRenderTarget* dst)
         water->bindTarget();
         const LLColor4 clear_color = gGL.getClearColor();
         gGL.setClearColor(LLColor4::transparent);
-        water->clear(GL_COLOR_BUFFER_BIT);
+        ql_vulkan_clear(water, GL_COLOR_BUFFER_BIT);
         gGL.setClearColor(clear_color);
         if (mRT == &mMainRT && drawsWater() && gCopyProgram.isComplete())
         {
@@ -9290,8 +9351,7 @@ void LLPipeline::generateLuminance(LLRenderTarget* src, LLRenderTarget* dst)
             ALWaterStencil::OnWater on_water;
             gCopyProgram.bind();
             gCopyProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &gbuffer, ALSamplers::PointClamp, 2);
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
             gCopyProgram.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
             gCopyProgram.unbind();
         }
@@ -9332,8 +9392,7 @@ void LLPipeline::generateLuminance(LLRenderTarget* src, LLRenderTarget* dst)
     gLuminanceProgram.uniform4f(LLShaderMgr::METER_PARAMS, patch_w, patch_h,
                                 (F32)llmax(1, llceil(patch_w * 0.5f)), (F32)llmax(1, llceil(patch_h * 0.5f)));
 
-    mScreenTriangleVB->setBuffer();
-    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+    ql_vulkan_screen_triangle();
 
     if (depth_channel > -1)
     {
@@ -9371,7 +9430,7 @@ void LLPipeline::generateExposure(LLRenderTarget* src, LLRenderTarget* dst, bool
         LL_PROFILE_GPU_ZONE("exposure histogram");
 
         mExposureHistogram.bindTarget();
-        mExposureHistogram.clear();
+        ql_vulkan_clear(&mExposureHistogram, 0xFFFFFFFF);
 
         LLGLDepthTest depth(GL_FALSE, GL_FALSE);
         LLGLEnable blend(GL_BLEND);
@@ -9389,6 +9448,7 @@ void LLPipeline::generateExposure(LLRenderTarget* src, LLRenderTarget* dst, bool
                                             EXPOSURE_HISTOGRAM_MIN_EV, bins_per_ev);
 
         mExposureHistogramVB->setBuffer();
+        ql_vulkan_stage_gl();  // Quasar: points from a buffer of their own, GL's for now
         mExposureHistogramVB->drawArrays(LLRender::POINTS, 0, mExposureHistogramVB->getNumVerts());
 
         gExposureHistogramProgram.unbind();
@@ -9434,8 +9494,7 @@ void LLPipeline::generateExposure(LLRenderTarget* src, LLRenderTarget* dst, bool
                       llmax(min_ev(), max_ev()), meter ? 1.f : 0.f);
     shader->uniform4f(LLShaderMgr::DYNAMIC_EXPOSURE_PARAMS2, low, high, llmax(speed_up(), 0.f), llmax(speed_down(), 0.f));
 
-    mScreenTriangleVB->setBuffer();
-    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+    ql_vulkan_screen_triangle();
 
     if (history_channel > -1)
     {
@@ -9451,7 +9510,7 @@ void LLPipeline::clearLensFlareState()
     // makes it last frame's target before anything samples it, and [1] is
     // fully overwritten by the draw before it is read.
     mLensFlareState[0].bindTarget();
-    mLensFlareState[0].clear();
+    ql_vulkan_clear(&mLensFlareState[0], 0xFFFFFFFF);
     mLensFlareState[0].flush();
     mLensFlareStateValid = false;
 }
@@ -9562,8 +9621,7 @@ void LLPipeline::generateLensFlareState(LLRenderTarget* src)
     shader.uniform1f(LLShaderMgr::LENS_FLARE_OCCLUSION_RADIUS, radius_uv);
     shader.uniform1f(LLShaderMgr::LENS_FLARE_FADE_TIME, fade);
 
-    mScreenTriangleVB->setBuffer();
-    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+    ql_vulkan_screen_triangle();
 
     if (state_channel > -1)
     {
@@ -10135,8 +10193,7 @@ void LLPipeline::colorCorrect(LLRenderTarget* src, LLRenderTarget* dst, bool app
             }
         }
 
-        mScreenTriangleVB->setBuffer();
-        mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+        ql_vulkan_screen_triangle();
 
         if (cglut_channel > -1 && mCGLut.notNull())
         {
@@ -10292,8 +10349,7 @@ void LLPipeline::copySceneDepth(LLRenderTarget& dst)
         {
             gCopyDepthProgram.bind();
             gCopyDepthProgram.bindDepthTexture(LLShaderMgr::DEFERRED_DEPTH, &src, ALSamplers::PointClamp);
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
             gCopyDepthProgram.unbindTexture(LLShaderMgr::DEFERRED_DEPTH);
             gCopyDepthProgram.unbind();
         }
@@ -10359,7 +10415,7 @@ LLRenderTarget* LLPipeline::generateGlow(LLRenderTarget* src, ALTransientTargets
 
     {
         extract->bindTarget();
-        extract->clear();
+        ql_vulkan_clear(extract, 0xFFFFFFFF);
 
         gGlowExtractProgram.bind();
         F32 maxAlpha = RenderGlowMaxExtractAlpha;
@@ -10403,8 +10459,7 @@ LLRenderTarget* LLPipeline::generateGlow(LLRenderTarget* src, ALTransientTargets
             gGL.color4f(1, 1, 1, 1);
             gPipeline.enableLightsFullbright();
 
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
 
             extract->flush();
         }
@@ -10431,7 +10486,7 @@ LLRenderTarget* LLPipeline::generateGlow(LLRenderTarget* src, ALTransientTargets
         for (S32 i = 0; i < kernel; i++)
         {
             buffers[i % 2]->bindTarget();
-            buffers[i % 2]->clear();
+            ql_vulkan_clear(buffers[i % 2], 0xFFFFFFFF);
 
             if (i == 0)
             {
@@ -10451,8 +10506,7 @@ LLRenderTarget* LLPipeline::generateGlow(LLRenderTarget* src, ALTransientTargets
                 gGlowProgram.uniform2f(LLShaderMgr::GLOW_DELTA, 0, delta);
             }
 
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
 
             buffers[i % 2]->flush();
         }
@@ -10531,7 +10585,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
     {
         LLGLDisable blend(GL_BLEND);
         bloom.mMips[0]->bindTarget();
-        bloom.mMips[0]->clear();
+        ql_vulkan_clear(bloom.mMips[0], 0xFFFFFFFF);
 
         gBloomExtractProgram.bind();
         gBloomExtractProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, src);
@@ -10547,8 +10601,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
         LLVector3 warmth = RenderGlowWarmthWeights;
         gBloomExtractProgram.uniform3f(LLShaderMgr::HALATION_LUM_WEIGHTS, warmth.mV[0], warmth.mV[1], warmth.mV[2]);
 
-        mScreenTriangleVB->setBuffer();
-        mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+        ql_vulkan_screen_triangle();
 
         bloom.mMips[0]->flush();
         gBloomExtractProgram.unbind();
@@ -10568,7 +10621,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
             LLRenderTarget* srcMip = bloom.mMips[i - 1];
 
             bloom.mMips[i]->bindTarget();
-            bloom.mMips[i]->clear();
+            ql_vulkan_clear(bloom.mMips[i], 0xFFFFFFFF);
 
             shader->bind();
             shader->bindTexture(LLShaderMgr::DIFFUSE_MAP, srcMip, ALSamplers::BilinearMirror);
@@ -10576,8 +10629,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
                               1.0f / (F32)srcMip->getWidth(),
                               1.0f / (F32)srcMip->getHeight());
 
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
 
             bloom.mMips[i]->flush();
             shader->unbind();
@@ -10717,8 +10769,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
                                                   1.f / (F32)streak_h);
                     gCrossFilterProgram.uniform1f(LLShaderMgr::CROSS_PASS_SCALE, scales[pass]);
 
-                    mScreenTriangleVB->setBuffer();
-                    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                    ql_vulkan_screen_triangle();
                 };
 
                 // Two scratch passes overwrite; blending stays off. No clear:
@@ -10779,8 +10830,7 @@ LLPipeline::Bloom LLPipeline::generateBloomHDR(LLRenderTarget* src, ALTransientT
                                             1.0f / (F32)srcMip->getWidth(),
                                             1.0f / (F32)srcMip->getHeight());
 
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
 
             dstMip->flush();
         }
@@ -10828,8 +10878,7 @@ void LLPipeline::compositeBloomHDR(LLRenderTarget* scene, const Bloom& bloom)
     const LLColor3& tint = halation_tint();
     gBloomCompositeProgram.uniform3f(LLShaderMgr::HALATION_TINT, tint.mV[0], tint.mV[1], tint.mV[2]);
 
-    mScreenTriangleVB->setBuffer();
-    mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+    ql_vulkan_screen_triangle();
 
     gBloomCompositeProgram.unbind();
 
@@ -10882,8 +10931,7 @@ bool LLPipeline::applyCAS(LLRenderTarget* src, LLRenderTarget* dst)
     gCASProgram.bindTexture(LLShaderMgr::DEFERRED_DIFFUSE, src, ALSamplers::PointMirror);
 
     // Draw
-    gPipeline.mScreenTriangleVB->setBuffer();
-    gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+    ql_vulkan_screen_triangle();
 
     gCASProgram.unbind();
 
@@ -10942,8 +10990,7 @@ bool LLPipeline::applyFXAA(LLRenderTarget* src, LLRenderTarget* dst)
                 S32 depth_channel = shader->getTextureChannel(LLShaderMgr::DEFERRED_DEPTH);
                 gGL.getTextureSlot(depth_channel)->bind(&mRT->deferredScreen, true);
 
-                mScreenTriangleVB->setBuffer();
-                mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                ql_vulkan_screen_triangle();
             }
 
             shader->unbind();
@@ -10997,7 +11044,7 @@ LLPipeline::SMAATargets LLPipeline::generateSMAABuffers(LLRenderTarget* src, ALT
                 // The stencil clear writes only the bits the stencil write mask allows.
                 gGL.setStencilMask(0xFF);
             }
-            dest.clear(use_stencil ? (GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT) : GL_COLOR_BUFFER_BIT);
+            ql_vulkan_clear(&dest, use_stencil ? (GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT) : GL_COLOR_BUFFER_BIT);
 
             edge_shader.bind();
             edge_shader.uniform4fv(LLShaderMgr::SMAA_RT_METRICS, 1, rt_metrics);
@@ -11040,8 +11087,7 @@ LLPipeline::SMAATargets LLPipeline::generateSMAABuffers(LLRenderTarget* src, ALT
                 {
                     mark_edges.emplace(GL_ALWAYS, 1, 0xFFu, GL_KEEP, GL_KEEP, GL_REPLACE, 0xFFu);
                 }
-                mScreenTriangleVB->setBuffer();
-                mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                ql_vulkan_screen_triangle();
             }
 
             edge_shader.unbind();
@@ -11061,7 +11107,7 @@ LLPipeline::SMAATargets LLPipeline::generateSMAABuffers(LLRenderTarget* src, ALT
 
             dest.bindTarget();
             // Preserve the stencil mask written by the edge-detect pass.
-            dest.clear(GL_COLOR_BUFFER_BIT);
+            ql_vulkan_clear(&dest, GL_COLOR_BUFFER_BIT);
 
             blend_weights_shader.bind();
             blend_weights_shader.uniform4fv(LLShaderMgr::SMAA_RT_METRICS, 1, rt_metrics);
@@ -11091,8 +11137,7 @@ LLPipeline::SMAATargets LLPipeline::generateSMAABuffers(LLRenderTarget* src, ALT
                 {
                     on_edges.emplace(GL_EQUAL, 1, 0xFFu, GL_KEEP, GL_KEEP, GL_KEEP, 0u);
                 }
-                mScreenTriangleVB->setBuffer();
-                mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                ql_vulkan_screen_triangle();
             }
             blend_weights_shader.unbind();
             dest.flush();
@@ -11132,7 +11177,7 @@ bool LLPipeline::applySMAA(LLRenderTarget* src, LLRenderTarget* dst, const SMAAT
             LLGLSLShader& blend_shader = gSMAANeighborhoodBlendProgram[fsaa_quality];
 
             bound_target->bindTarget();
-            bound_target->clear(GL_COLOR_BUFFER_BIT);
+            ql_vulkan_clear(bound_target, GL_COLOR_BUFFER_BIT);
 
             blend_shader.bind();
             blend_shader.uniform4fv(LLShaderMgr::SMAA_RT_METRICS, 1, rt_metrics);
@@ -11149,8 +11194,7 @@ bool LLPipeline::applySMAA(LLRenderTarget* src, LLRenderTarget* dst, const SMAAT
                 smaa.mBlend->bindTexture(0, blend_channel, ALSamplers::BilinearMirror);
             }
 
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
 
             bound_target->flush();
             blend_shader.unbind();
@@ -11175,8 +11219,7 @@ void LLPipeline::combineGlow(LLRenderTarget* src, LLRenderTarget* dst, LLRenderT
         gGlowCombineProgram.bindTexture(LLShaderMgr::DEFERRED_DIFFUSE, src);
         gGlowCombineProgram.bindTexture(LLShaderMgr::DEFERRED_EMISSIVE, glow);
 
-        mScreenTriangleVB->setBuffer();
-        mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+        ql_vulkan_screen_triangle();
     }
 
     dst->flush();
@@ -11493,8 +11536,7 @@ LLRenderTarget* LLPipeline::renderDoF(ALTransientTargets& scope)
                     post_program.uniform1f(LLShaderMgr::BOKEH_COMA_ASYMMETRY, coma);
                 }
 
-                mScreenTriangleVB->setBuffer();
-                mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                ql_vulkan_screen_triangle();
 
                 post_program.unbind();
 
@@ -11517,8 +11559,7 @@ LLRenderTarget* LLPipeline::renderDoF(ALTransientTargets& scope)
                 set_cof_uniforms(combine_program);
                 combine_program.uniform1f(LLShaderMgr::DOF_RES_SCALE, res_scale);
 
-                mScreenTriangleVB->setBuffer();
-                mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+                ql_vulkan_screen_triangle();
 
                 combine_program.unbind();
 
@@ -11568,7 +11609,28 @@ void LLPipeline::renderFinalize()
     if (hdr && !cutout)
     {
         copyScreenSpaceReflections(&mRT->screen, &mSceneMap);
+    }
 
+    // Quasar: the post chain's passes drawn by Vulkan (QuasarVulkanLighting), from here to the final blit, which draws
+    // into the window and stays GL's. Each pass Vulkan cannot draw is GL's, a hand-over before it; the passes after it
+    // open a run again, as many times as given.
+    struct QLPostStage
+    {
+        bool on = true;
+        void end()
+        {
+            if (on)
+            {
+                on = false;
+                ql_vulkan_stage_end();
+            }
+        }
+        ~QLPostStage() { end(); }
+    } ql_post_stage;
+    ql_vulkan_stage_begin_reopening("post", 8);
+
+    if (hdr && !cutout)
+    {
         generateLuminance(&mRT->screen, &mLuminanceMap);
 
         generateExposure(&mLuminanceMap, &mExposureMap);
@@ -11744,6 +11806,9 @@ void LLPipeline::renderFinalize()
         combineGlow(sourceBuffer, targetBuffer, glow);
         std::swap(sourceBuffer, targetBuffer);
     }
+
+    // Quasar: what Vulkan drew of the post chain is GL's from here (RLVa's effects, the scopes, the blit).
+    ql_post_stage.end();
 
     gGLViewport[0] = gViewerWindow->getWorldViewRectRaw().mLeft;
     gGLViewport[1] = gViewerWindow->getWorldViewRectRaw().mBottom;
@@ -12114,8 +12179,7 @@ void LLPipeline::renderFinalize()
 
         {
             LLGLDepthTest depth_test(GL_TRUE, GL_TRUE, GL_ALWAYS);
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            ql_vulkan_screen_triangle();
         }
 
         blit.unbind();
@@ -15130,28 +15194,134 @@ std::string ql_vulkan_terrain_maps_info()
            " | draws: " + ql_vulkan_terrain_draws_info();
 }
 
-// ---- Quasar: a stage of GL's draws recorded for Vulkan (QuasarVulkanLighting: the alpha pools, ...) -------------
+// ---- Quasar: a stage of GL's draws recorded for Vulkan (QuasarVulkanLighting: the alpha pools, the post chain) -----
 //
-// A stage opens a Vulkan run; each draw site asks ql_vulkan_draw_now to take its draw as GL holds it (its program bound,
-// its uniforms and textures set, its target bound, GL's state), and draws it with GL only where that fails. The first
-// draw Vulkan cannot take hands the run over, and GL draws it and the rest; the stage's end hands over what is left.
-// Nothing Vulkan records runs before the hand-over, so GL's draws always come after it.
+// A stage opens a Vulkan run; each draw site asks ql_vulkan_draw_now (a mesh) or ql_vulkan_screen_triangle (a full-screen
+// pass) to take its draw as GL holds it (its program bound, its uniforms and textures set, its target bound, GL's state),
+// and draws it with GL only where that fails. The first draw Vulkan cannot take hands the run over, and GL draws it; a
+// stage begun with reopens opens a new run at its next draw Vulkan can take, as many times as it was given (each another
+// hand-over), and one without leaves GL the rest. The stage's end hands over what is left. Nothing Vulkan records runs
+// before the hand-over, so GL's draws always come after it.
+//
+// A colour clear while a run is open (ql_vulkan_clear) is Vulkan's too: carried by the next draw into that target, or
+// made by a draw of nothing that clears, so that it lands where it stands among the draws.
 namespace
 {
     struct QLStage
     {
-        bool        open = false;
-        U32         recorded = 0;
-        bool        whole = false;
-        const char* name = "";
+        bool            open = false;
+        bool            active = false;  // begun and wanted: its draws may open a run again
+        U32             reopens = 0;
+        U32             recorded = 0;
+        U32             runs = 0;
+        const char*     name = "";
+        LLRenderTarget* pending_clear = nullptr;
+        LLColor4        pending_color;
     };
     QLStage sQLStage;
     struct QLStageStats
     {
         U32 now_vk = 0, now_gl = 0, last_vk = 0, last_gl = 0, frame = 0;
+        U32 now_runs = 0, last_runs = 0;
         std::string why;
     };
     std::unordered_map<std::string, QLStageStats> sQLStageStats;
+
+    QLStageStats& ql_stage_stats()
+    {
+        QLStageStats& stats = sQLStageStats[sQLStage.name ? sQLStage.name : ""];
+        if (stats.frame != LLFrameTimer::getFrameCount())
+        {
+            stats.last_vk   = stats.now_vk;
+            stats.last_gl   = stats.now_gl;
+            stats.last_runs = stats.now_runs;
+            stats.now_vk = stats.now_gl = stats.now_runs = 0;
+            stats.frame = LLFrameTimer::getFrameCount();
+        }
+        return stats;
+    }
+
+    // A clear Vulkan makes into `target`: a draw of nothing into a pass that clears its colours first.
+    bool ql_clear_draw(LLRenderTarget* target, const LLColor4& color)
+    {
+#if QL_VULKAN_SHADOWS
+        if (!target || !target->getNumTextures())
+        {
+            return false;
+        }
+        static const char vertex[]   = "#version 450\nvoid main() { gl_Position = vec4(0.0); }\n";
+        static const char fragment[] = "#version 450\nvoid main() { }\n";
+        static const QLVulkanPresenter::GpSource sources[2] = {
+            { GL_VERTEX_SHADER, "quasar clear (vertex)", vertex, sizeof(vertex) - 1 },
+            { GL_FRAGMENT_SHADER, "quasar clear (fragment)", fragment, sizeof(fragment) - 1 }
+        };
+        static const U64 key = 0x51C1EA2ull;  // no GL program has this address
+        const int program = QLVulkanPresenter::glProgram(key, 1, "Quasar clear", sources, 2);
+        if (program < 0)
+        {
+            ql_lighting_kept("the clear's program: " + QLVulkanPresenter::glProgramNote(key));
+            return false;
+        }
+        QLVulkanPresenter::GpDraw d;
+        d.program       = program;
+        d.white_texture = ALTextureSlot::sWhiteTexture.load();
+        d.color_count   = llmin(target->getNumTextures(), 4u);
+        for (U32 i = 0; i < d.color_count; ++i)
+        {
+            d.colors[i] = target->getTexture(i);
+        }
+        d.depth  = target->getAttachedDepth();
+        d.width  = target->getWidth();
+        d.height = target->getHeight();
+        d.clear  = true;
+        for (U32 i = 0; i < 4; ++i)
+        {
+            d.clear_color[i] = color.mV[i];
+        }
+        d.vertex_count = 0;
+        if (!QLVulkanPresenter::glDraw(d))
+        {
+            ql_lighting_kept(QLVulkanPresenter::glInfo());
+            return false;
+        }
+        return true;
+#else
+        (void)target;
+        (void)color;
+        return false;
+#endif
+    }
+
+    void ql_stage_hand_over();
+
+    // A clear still to be made (no draw into its target has carried it): Vulkan's where the run is open, GL's otherwise.
+    void ql_stage_settle_clear()
+    {
+        LLRenderTarget* target = sQLStage.pending_clear;
+        if (!target)
+        {
+            return;
+        }
+        sQLStage.pending_clear = nullptr;
+        if (sQLStage.open && ql_clear_draw(target, sQLStage.pending_color))
+        {
+            return;
+        }
+        ql_stage_hand_over();
+        const LLColor4 previous = gGL.getClearColor();
+        gGL.setClearColor(sQLStage.pending_color);
+        const bool bound = LLRenderTarget::getCurrentBoundTarget() == target;
+        if (!bound)
+        {
+            target->bindTarget();
+        }
+        target->clear(GL_COLOR_BUFFER_BIT);
+        if (!bound)
+        {
+            target->flush();
+        }
+        gGL.setClearColor(previous);
+    }
 
     void ql_stage_hand_over()
     {
@@ -15160,6 +15330,14 @@ namespace
         {
             return;
         }
+        if (sQLStage.pending_clear)
+        {
+            ql_stage_settle_clear();  // in the run, before it goes
+            if (!sQLStage.open)
+            {
+                return;  // the clear could not be Vulkan's: handed over for GL's
+            }
+        }
         sQLStage.open = false;
         if (!QLVulkanPresenter::glPassEnd())
         {
@@ -15167,10 +15345,68 @@ namespace
         }
 #endif
     }
+
+    // The run open for a draw: as it stands, or again where the stage has reopens left.
+    bool ql_stage_run()
+    {
+#if QL_VULKAN_SHADOWS
+        if (sQLStage.open)
+        {
+            return true;
+        }
+        if (!sQLStage.active || sQLStage.reopens == 0 || !ql_lighting_wanted())
+        {
+            return false;
+        }
+        --sQLStage.reopens;
+        sQLStage.open = QLVulkanPresenter::glPassBegin();
+        if (sQLStage.open)
+        {
+            ++sQLStage.runs;
+        }
+        return sQLStage.open;
+#else
+        return false;
+#endif
+    }
+
+    // After a draw: counted, and where GL drew it, the run handed over first (the caller draws once this returns).
+    bool ql_stage_drawn(bool drawn)
+    {
+        QLStageStats& stats = ql_stage_stats();
+        if (drawn)
+        {
+            ++sQLStage.recorded;
+            ++stats.now_vk;
+            return true;
+        }
+        ql_stage_hand_over();
+        ql_stage_settle_clear();  // GL's draw comes after the clear GL now makes
+        ++stats.now_gl;
+        stats.why = sQLLightingWhy;
+        return false;
+    }
+
+    // Where a draw into `target` takes the pending clear with it: its colour, and the clear consumed. A pending clear of
+    // another target is made first, where it stands.
+    bool ql_stage_take_clear(LLRenderTarget* target, LLColor4& color)
+    {
+        if (!sQLStage.pending_clear)
+        {
+            return false;
+        }
+        if (sQLStage.pending_clear != target)
+        {
+            ql_stage_settle_clear();
+            return false;
+        }
+        color = sQLStage.pending_color;
+        sQLStage.pending_clear = nullptr;
+        return true;
+    }
 }
 
-// Opens a stage's Vulkan run where the lighting's is wanted and this is the main view.
-bool ql_vulkan_stage_begin(const char* name)
+bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens)
 {
 #if QL_VULKAN_SHADOWS
     ql_stage_hand_over();
@@ -15181,40 +15417,64 @@ bool ql_vulkan_stage_begin(const char* name)
     {
         return false;
     }
-    sQLStage.open = QLVulkanPresenter::glPassBegin();
-    return sQLStage.open;
+    sQLStage.active  = true;
+    sQLStage.reopens = reopens + 1;  // the first run counts as one
+    return ql_stage_run();
 #else
     (void)name;
+    (void)reopens;
     return false;
 #endif
+}
+
+// Opens a stage's Vulkan run where the lighting's is wanted and this is the main view.
+bool ql_vulkan_stage_begin(const char* name)
+{
+    return ql_vulkan_stage_begin_reopening(name, 0);
 }
 
 // GL is about to do something of its own (a copy, a clear, a draw it keeps): what Vulkan recorded goes first.
 void ql_vulkan_stage_gl()
 {
     ql_stage_hand_over();
+    ql_stage_settle_clear();
 }
 
 void ql_vulkan_stage_end()
 {
 #if QL_VULKAN_SHADOWS
-    const bool whole = sQLStage.open;
-    ql_stage_hand_over();
-    if (sQLStage.name && *sQLStage.name)
+    if (sQLStage.active)
     {
-        QLStageStats& stats = sQLStageStats[sQLStage.name];
-        if (stats.frame != LLFrameTimer::getFrameCount())
-        {
-            stats.last_vk = stats.now_vk;
-            stats.last_gl = stats.now_gl;
-            stats.now_vk = stats.now_gl = 0;
-            stats.frame = LLFrameTimer::getFrameCount();
-        }
-        stats.now_vk += sQLStage.recorded;
-        (void)whole;
+        ql_stage_hand_over();
+        ql_stage_settle_clear();
+        ql_stage_stats().now_runs += sQLStage.runs;
     }
 #endif
     sQLStage = QLStage();
+}
+
+// A clear of the bound target's colours (GL_COLOR_BUFFER_BIT, at GL's clear colour) where the stage's run is open: made
+// where it stands among Vulkan's draws. Anything else, or no run, is GL's clear (after a hand-over).
+void ql_vulkan_clear(LLRenderTarget* target, U32 mask)
+{
+    // The default mask is the colours alone where the target has no depth of its own or shared.
+    const bool colours_only = mask == GL_COLOR_BUFFER_BIT ||
+                              (mask == 0xFFFFFFFF && target && !target->getDepth() && !target->getAttachedDepth());
+    if (sQLStage.open && target && colours_only && target->getNumTextures())
+    {
+        if (sQLStage.pending_clear && sQLStage.pending_clear != target)
+        {
+            ql_stage_settle_clear();
+        }
+        if (sQLStage.open)
+        {
+            sQLStage.pending_clear = target;
+            sQLStage.pending_color = gGL.getClearColor();
+            return;
+        }
+    }
+    ql_vulkan_stage_gl();
+    target->clear(mask);
 }
 
 // A draw of `vb` as GL would make it now (drawRange's arguments), recorded for Vulkan while the stage's run is open.
@@ -15224,11 +15484,11 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
 #if QL_VULKAN_SHADOWS
     (void)start;
     (void)end;
-    if (!sQLStage.open)
+    if (!sQLStage.active)
     {
         if (sQLStage.name && *sQLStage.name)
         {
-            ++sQLStageStats[sQLStage.name].now_gl;
+            ++ql_stage_stats().now_gl;
         }
         return false;
     }
@@ -15236,7 +15496,7 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
     LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
     bool drawn = false;
     if (shader && target && vb && count && LLNavShapeVBOManager::shortIndices(vb) &&
-        vb->hasDataType(LLVertexBuffer::TYPE_VERTEX))
+        vb->hasDataType(LLVertexBuffer::TYPE_VERTEX) && !LLGLState::qlEnabled(GL_STENCIL_TEST) && ql_stage_run())
     {
         QLVulkanPresenter::GpMesh mesh;
         mesh.stamp         = vb->getContentStamp();
@@ -15259,25 +15519,53 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
         mesh.first_index = offset;
         mesh.index_count = count;
         QLGLState state = ql_gl_state_now();
-        drawn = ql_gl_program_draw(*shader, target, false, LLColor4::transparent, state, nullptr, 0, &mesh);
+        LLColor4 clear_color;
+        const bool clear = ql_stage_take_clear(target, clear_color);
+        drawn = ql_gl_program_draw(*shader, target, clear, clear_color, state, nullptr, 0, &mesh);
+        if (!drawn && clear)
+        {
+            sQLStage.pending_clear = target;  // still to be made: GL's, before its draw
+            sQLStage.pending_color = clear_color;
+        }
     }
-    if (drawn)
-    {
-        ++sQLStage.recorded;
-        return true;
-    }
-    ql_stage_hand_over();
-    if (sQLStage.name && *sQLStage.name)
-    {
-        QLStageStats& stats = sQLStageStats[sQLStage.name];
-        ++stats.now_gl;
-        stats.why = sQLLightingWhy;
-    }
-    return false;
+    return ql_stage_drawn(drawn);
 #else
     (void)vb; (void)start; (void)end; (void)count; (void)offset;
     return false;
 #endif
+}
+
+// The pipeline's full-screen triangle (mScreenTriangleVB) drawn with what GL has bound now: Vulkan's where a stage is
+// active and it can, GL's otherwise. Every post pass draws through it.
+void ql_vulkan_screen_triangle()
+{
+#if QL_VULKAN_SHADOWS
+    if (sQLStage.active)
+    {
+        LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
+        LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
+        bool drawn = false;
+        if (shader && target && !LLGLState::qlEnabled(GL_STENCIL_TEST) && ql_stage_run())
+        {
+            static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
+            QLGLState state = ql_gl_state_now();
+            LLColor4 clear_color;
+            const bool clear = ql_stage_take_clear(target, clear_color);
+            drawn = ql_gl_program_draw(*shader, target, clear, clear_color, state, triangle, 3);
+            if (!drawn && clear)
+            {
+                sQLStage.pending_clear = target;
+                sQLStage.pending_color = clear_color;
+            }
+        }
+        if (ql_stage_drawn(drawn))
+        {
+            return;
+        }
+    }
+#endif
+    gPipeline.mScreenTriangleVB->setBuffer();
+    gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
 }
 
 std::string ql_vulkan_stages_info()
@@ -15286,6 +15574,10 @@ std::string ql_vulkan_stages_info()
     for (const auto& [name, stats] : sQLStageStats)
     {
         info += llformat("%s%s: %u Vulkan, %u GL", info.empty() ? "" : " | ", name.c_str(), stats.last_vk, stats.last_gl);
+        if (stats.last_runs > 1)
+        {
+            info += llformat(" in %u runs", stats.last_runs);
+        }
         if (stats.last_gl && !stats.why.empty())
         {
             info += " (GL's from " + stats.why + ")";

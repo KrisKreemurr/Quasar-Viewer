@@ -566,6 +566,28 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         {
             program.mQLWanted = ql_lighting;
         }
+        // The post chain's (renderFinalize), up to the final blit, which draws into the window and stays GL's.
+        for (LLGLSLShader* program :
+             { &gLuminanceProgram, &gExposureProgram, &gExposureProgramNoFade, &gExposureHistogramProgram,
+               &gLensFlareStateProgram, &gLensDirtGenProgram, &gGlowProgram, &gGlowExtractProgram, &gGlowCombineProgram,
+               &gBloomExtractProgram, &gBloomDownsampleProgram, &gBloomDownsampleFirstProgram, &gBloomUpsampleProgram,
+               &gBloomCompositeProgram, &gCrossFilterProgram, &gDeferredPostProgram, &gDeferredPostProgramNoNear,
+               &gDeferredPostProgramShaped, &gDeferredPostProgramNoNearShaped, &gDeferredDoFCombineProgram,
+               &gDeferredDoFCombineProgramNoNear, &gDeferredPostNoDoFProgram, &gCASProgram, &gCopyProgram,
+               &gCGGammaProgram, &gCGLegacyGammaProgram, &gCGTonemapProgram, &gCGTonemapLegacyGammaProgram,
+               &gCGColorgradeGammaProgram, &gCGColorgradeLegacyGammaProgram, &gCGTonemapColorgradeProgram,
+               &gCGTonemapColorgradeLegacyGammaProgram })
+        {
+            program->mQLWanted = ql_lighting;
+        }
+        for (LLGLSLShader* programs : { gFXAAProgram, gSMAAEdgeDetectProgram, gSMAABlendWeightsProgram,
+                                        gSMAANeighborhoodBlendProgram })
+        {
+            for (U32 i = 0; i < 4; ++i)
+            {
+                programs[i].mQLWanted = ql_lighting;
+            }
+        }
     }
 
     ALUniformBuffer::sUpdateMode = ALUniformBuffer::clampUpdateMode(gSavedSettings.getS32("AlchemyRenderUBOUpdateMode"));

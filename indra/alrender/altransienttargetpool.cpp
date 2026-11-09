@@ -30,11 +30,16 @@
 #include "llglstates.h"
 #include "llimagegl.h"
 #include "llrender.h"
+#include "qlexternalstorage.h"
 
 #include <fmt/format.h>
 
 #include <algorithm>
 #include <iterator>
+
+// Quasar: set by the viewer while Vulkan draws GL's passes (newview's pipeline.cpp, QuasarVulkanLighting): every target
+// the pool builds is in Vulkan's memory, so a pass Vulkan draws finds its targets there whatever it acquired them as.
+bool gQLTransientsInVulkan = false;
 
 namespace
 {
@@ -48,6 +53,7 @@ namespace
         bool build(LLRenderTarget& target, const ALTransientTargetPool::Key& key, std::string_view name) override
         {
             target.setLabel(name);
+            QLExternalStorageScope vulkan_storage(gQLTransientsInVulkan || QLExternalStorageScope::active());
             const LLRenderTarget::EnsureResult result =
                 key.mDepthFrom ? target.ensure(key.mDesc, *key.mDepthFrom) : target.ensure(key.mDesc);
             // Building binds each new texture to unit 0 to allocate it.
