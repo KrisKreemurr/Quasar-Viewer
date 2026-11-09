@@ -5826,7 +5826,11 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         {
             static LLCachedControl<bool> ql_main_draws(gSavedSettings, "QuasarVulkanMainDraws", false);
             const bool probe_face = gCubeSnapshot && mRT == &mAuxillaryRT && !mHeroProbeManager.isMirrorPass();
-            const bool main_view  = !gCubeSnapshot && mRT == &mMainRT && ql_main_draws();
+            // Not an impostor's bake or a cutout's: they draw through the main pack's mRT into a target of their own
+            // (generateImpostor binds the avatar's), and Vulkan would draw their geometry into the main G-buffer, the
+            // bake keeping only GL's leftovers -- an impostor of hair without its body.
+            const bool main_view  = !gCubeSnapshot && !sImpostorRender && !sCutoutRender && mRT == &mMainRT &&
+                                    ql_main_draws();
             if ((probe_face || main_view) && hasRenderType(LLPipeline::RENDER_TYPE_SIMPLE))
             {
                 ql_vulkan_probe_draws_begin(mRT->deferredScreen, main_view);
