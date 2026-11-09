@@ -726,6 +726,19 @@ void LLDrawPoolAlpha::renderAlpha(U32 mask, bool depth_only, bool rigged)
                     continue;
                 }
 
+                // Quasar: a rigged item's group is its attachment's, whose box does not follow the skin, so the pass
+                // below the water drew every worn alpha item in view again, all of it clipped away far above the
+                // water. The avatar's box does follow it (rigged meshes included): an avatar wholly above the water
+                // has nothing below it to draw. Only this way round, so that a box not yet worked out draws as before.
+                if (rigged && !above_water && !LLPipeline::sRenderingHUDs)
+                {
+                    const LLVector3* avatar_ext = params.mAvatar->getLastAnimExtents();
+                    if (avatar_ext[0].mV[VZ] > water_height)
+                    {
+                        continue;
+                    }
+                }
+
                 LL_PROFILE_ZONE_NAMED_CATEGORY_DRAWPOOL("ra - push batch");
 
                 LLRenderPass::applyModelMatrix(params);
