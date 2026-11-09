@@ -54,6 +54,11 @@
 #pragma warning (disable : 4702) // compiler complains unreachable code
 #endif
 #define TINYEXR_USE_MINIZ 0
+#include "qlexternalstorage.h"  // Quasar: the probes in Vulkan's memory (QuasarVulkanLighting)
+
+// pipeline.cpp: whether what Vulkan's lighting reads is made in Vulkan's memory (QuasarVulkanLighting).
+bool ql_vulkan_lighting_memory();
+
 #include <zlib.h>
 #include <tinyexr.h>
 #if LL_WINDOWS
@@ -1794,6 +1799,22 @@ void LLReflectionMapManager::initReflectionMaps()
         mRenderTarget.release();
         mMipChain.clear();
     }
+
+    // Quasar: the probes in Vulkan's memory where Vulkan draws the lighting that samples them (QuasarVulkanLighting): an
+    // array or SH target made in GL's memory (before Vulkan presented) is made again, a few times at most.
+    const bool ql_memory = ql_vulkan_lighting_memory();
+    static U32 ql_remade = 0;
+    if (ql_memory && ql_remade < 3 && gQLExternalStorage &&
+        ((mTexture.notNull() && !gQLExternalStorage->owns(mTexture->getGLName())) ||
+         (mSHCoeffs.isComplete() && !gQLExternalStorage->owns(mSHCoeffs.getTexture()))))
+    {
+        ++ql_remade;
+        LL_INFOS("Vulkan") << "The reflection probes were made in GL's memory: made again in Vulkan's" << LL_ENDL;
+        mTexture = nullptr;
+        mSHCoeffs.release();
+        mReset = true;
+    }
+    QLExternalStorageScope ql_storage(ql_memory);
 
     // No irradiance resolution to size any more: irradiance is nine SH coefficients whatever
     // the environment looks like, so the setting that used to pick a cubemap edge length is gone.

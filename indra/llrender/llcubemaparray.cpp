@@ -28,6 +28,7 @@
 #include "llworkerthread.h"
 
 #include "llcubemaparray.h"
+#include "qlexternalstorage.h"
 
 #include "v4coloru.h"
 #include "v3math.h"
@@ -176,7 +177,16 @@ void LLCubeMapArray::allocate(U32 resolution, U32 components, U32 count, EClass 
     const S32 full_chain = LLImageGL::calcMipLevelCount(resolution, resolution);
     const S32 levels = use_mips ? (mip_levels > 0 ? llmin((S32)mip_levels, full_chain) : full_chain) : 1;
     mLevels = (U32)levels;
-    glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, levels, format, resolution, resolution, count * 6);
+    // Quasar: storage from Vulkan's memory, where a scope asks for it (QuasarVulkanLighting: Vulkan samples the probes)
+    // and the provider can give it; the name is bound on unit 0 (bind(0) above).
+    const bool external = QLExternalStorageScope::active() && gQLExternalStorage &&
+                          gGL.getCurrentTexUnitIndex() == 0 &&
+                          gQLExternalStorage->allocateArray(texname, GL_TEXTURE_CUBE_MAP_ARRAY, (int)format,
+                                                            (int)resolution, (int)resolution, (int)(count * 6), levels);
+    if (!external)
+    {
+        glTexStorage3D(GL_TEXTURE_CUBE_MAP_ARRAY, levels, format, resolution, resolution, count * 6);
+    }
     mImage->markStorageAllocated();
     stop_glerror();
 

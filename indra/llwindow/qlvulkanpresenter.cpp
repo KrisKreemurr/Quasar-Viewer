@@ -127,6 +127,8 @@ namespace
     typedef void (APIENTRY* QL_PFN_MemoryObjectParameteriv)(GLuint, GLenum, const GLint*);
     typedef void (APIENTRY* QL_PFN_ImportMemoryWin32Handle)(GLuint, GLuint64, GLenum, void*);
     typedef void (APIENTRY* QL_PFN_TextureStorageMem2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei, GLuint, GLuint64);
+    typedef void (APIENTRY* QL_PFN_TextureStorageMem3D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei, GLsizei, GLuint,
+                                                        GLuint64);
     typedef void (APIENTRY* QL_PFN_ImportSemaphoreWin32Handle)(GLuint, GLenum, void*);
     typedef void (APIENTRY* QL_PFN_SemaphoreOp)(GLuint, GLuint, const GLuint*, GLuint, const GLuint*, const GLenum*);
     typedef void (APIENTRY* QL_PFN_GetUnsignedBytei_v)(GLenum, GLuint, GLubyte*);
@@ -168,6 +170,7 @@ namespace
         QL_PFN_MemoryObjectParameteriv      MemoryObjectParameterivEXT = nullptr;
         QL_PFN_ImportMemoryWin32Handle      ImportMemoryWin32HandleEXT = nullptr;
         QL_PFN_TextureStorageMem2D          TextureStorageMem2DEXT = nullptr;
+        QL_PFN_TextureStorageMem3D          TextureStorageMem3DEXT = nullptr;  // optional: the probes' cube arrays
         QL_PFN_CreateObjects                GenSemaphoresEXT = nullptr;
         QL_PFN_DeleteObjects                DeleteSemaphoresEXT = nullptr;
         QL_PFN_ImportSemaphoreWin32Handle   ImportSemaphoreWin32HandleEXT = nullptr;
@@ -215,6 +218,8 @@ namespace
             QL_GL_LOAD(MemoryObjectParameterivEXT, "glMemoryObjectParameterivEXT");
             QL_GL_LOAD(ImportMemoryWin32HandleEXT, "glImportMemoryWin32HandleEXT");
             QL_GL_LOAD(TextureStorageMem2DEXT, "glTextureStorageMem2DEXT");
+            TextureStorageMem3DEXT = reinterpret_cast<decltype(TextureStorageMem3DEXT)>(
+                LLWindowWin32::getProcAddress("glTextureStorageMem3DEXT"));
             QL_GL_LOAD(GenSemaphoresEXT, "glGenSemaphoresEXT");
             QL_GL_LOAD(DeleteSemaphoresEXT, "glDeleteSemaphoresEXT");
             QL_GL_LOAD(ImportSemaphoreWin32HandleEXT, "glImportSemaphoreWin32HandleEXT");
@@ -2792,22 +2797,24 @@ struct QLVulkanPresenter::Impl
         bool     stencil;
         bool     srgb;
         const char* name;
+        bool     integer;  // read and cleared as unsigned integers (the probes' SH coefficients)
     };
     static constexpr ExtFormat EXT_FORMATS[] = {
-        { GL_SRGB8_ALPHA8, VK_FORMAT_R8G8B8A8_SRGB, 4, false, false, true, "SRGB8_ALPHA8" },
-        { GL_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, 4, false, false, false, "RGBA8" },
-        { GL_RGB10_A2, VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4, false, false, false, "RGB10_A2" },
-        { GL_RGBA16, VK_FORMAT_R16G16B16A16_UNORM, 4, false, false, false, "RGBA16" },
-        { GL_R11F_G11F_B10F, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 3, false, false, false, "R11F_G11F_B10F" },
-        { GL_RGBA16F, VK_FORMAT_R16G16B16A16_SFLOAT, 4, false, false, false, "RGBA16F" },
-        { GL_RGBA32F, VK_FORMAT_R32G32B32A32_SFLOAT, 4, false, false, false, "RGBA32F" },
-        { GL_RG16F, VK_FORMAT_R16G16_SFLOAT, 2, false, false, false, "RG16F" },
-        { GL_RG8, VK_FORMAT_R8G8_UNORM, 2, false, false, false, "RG8" },
-        { GL_R8, VK_FORMAT_R8_UNORM, 1, false, false, false, "R8" },
-        { GL_DEPTH_COMPONENT32F, VK_FORMAT_D32_SFLOAT, 0, true, false, false, "DEPTH32F" },
-        { GL_DEPTH_COMPONENT24, VK_FORMAT_X8_D24_UNORM_PACK32, 0, true, false, false, "DEPTH24" },
-        { GL_DEPTH24_STENCIL8, VK_FORMAT_D24_UNORM_S8_UINT, 0, true, true, false, "DEPTH24_STENCIL8" },
-        { GL_DEPTH32F_STENCIL8, VK_FORMAT_D32_SFLOAT_S8_UINT, 0, true, true, false, "DEPTH32F_STENCIL8" },
+        { GL_SRGB8_ALPHA8, VK_FORMAT_R8G8B8A8_SRGB, 4, false, false, true, "SRGB8_ALPHA8", false },
+        { GL_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, 4, false, false, false, "RGBA8", false },
+        { GL_RGB10_A2, VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4, false, false, false, "RGB10_A2", false },
+        { GL_RGBA16, VK_FORMAT_R16G16B16A16_UNORM, 4, false, false, false, "RGBA16", false },
+        { GL_R11F_G11F_B10F, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 3, false, false, false, "R11F_G11F_B10F", false },
+        { GL_RGBA16F, VK_FORMAT_R16G16B16A16_SFLOAT, 4, false, false, false, "RGBA16F", false },
+        { GL_RGBA32F, VK_FORMAT_R32G32B32A32_SFLOAT, 4, false, false, false, "RGBA32F", false },
+        { GL_RG16F, VK_FORMAT_R16G16_SFLOAT, 2, false, false, false, "RG16F", false },
+        { GL_RG8, VK_FORMAT_R8G8_UNORM, 2, false, false, false, "RG8", false },
+        { GL_R8, VK_FORMAT_R8_UNORM, 1, false, false, false, "R8", false },
+        { GL_DEPTH_COMPONENT32F, VK_FORMAT_D32_SFLOAT, 0, true, false, false, "DEPTH32F", false },
+        { GL_DEPTH_COMPONENT24, VK_FORMAT_X8_D24_UNORM_PACK32, 0, true, false, false, "DEPTH24", false },
+        { GL_DEPTH24_STENCIL8, VK_FORMAT_D24_UNORM_S8_UINT, 0, true, true, false, "DEPTH24_STENCIL8", false },
+        { GL_DEPTH32F_STENCIL8, VK_FORMAT_D32_SFLOAT_S8_UINT, 0, true, true, false, "DEPTH32F_STENCIL8", false },
+        { GL_RGBA32UI, VK_FORMAT_R32G32B32A32_UINT, 4, false, false, false, "RGBA32UI", true },
     };
     static constexpr U32 EXT_FORMAT_COUNT = (U32)(sizeof(EXT_FORMATS) / sizeof(EXT_FORMATS[0]));
 
@@ -2819,6 +2826,8 @@ struct QLVulkanPresenter::Impl
         GLuint         glMemory = 0;
         U32            format = 0;  // index into EXT_FORMATS; U32_MAX for a fetched texture in a shared block
         U32            width = 0, height = 0, levels = 0;
+        U32            layers = 1;     // a cube map array's faces (six a cube); 1 otherwise
+        bool           cube = false;   // a cube map array (the probes')
         S32            block = -1;  // a fetched texture's block (mTexBlocks), its place and size there
         VkDeviceSize   offset = 0, size = 0;
         U64            counted = 0;  // what the texture budget counts it as
@@ -2870,6 +2879,17 @@ struct QLVulkanPresenter::Impl
                     mOwner.mExtTextures.erase(found);
                 }
             }
+        }
+        bool allocateArray(unsigned texture, unsigned target, int internal_format, int width, int height, int layers,
+                           int levels) override
+        {
+            std::lock_guard<std::mutex> lock(sExtOwnerMutex);
+            const bool given = mOwnerPtr && mOwnerPtr->extAllocate(texture, target, internal_format, width, height,
+                                                                   levels, true, (U32)layers);
+            LL_INFOS("Vulkan") << "Cube map array in Vulkan's memory: GL name " << texture << ", " << width << "x"
+                               << height << " x" << layers << " format 0x" << std::hex << internal_format << std::dec
+                               << ", " << levels << " levels: " << (given ? "given" : "declined, GL's own") << LL_ENDL;
+            return given;
         }
         bool allocateTexture(unsigned texture, int internal_format, int width, int height, int levels,
                              unsigned long long counted_bytes) override
@@ -2938,9 +2958,12 @@ struct QLVulkanPresenter::Impl
     // Storage for texture from Vulkan's memory: an image of the format, exported, imported by GL as the texture's
     // storage. False, with nothing left made, where it cannot be; GL then allocates as before.
     bool extAllocate(GLuint texture, GLenum target, GLint internal_format, GLsizei width, GLsizei height,
-                     GLsizei levels, bool tested_only = true)
+                     GLsizei levels, bool tested_only = true, U32 layers = 1)
     {
-        if (!mActive || !mDevice || target != GL_TEXTURE_2D || width <= 0 || height <= 0 || levels <= 0)
+        // A 2D texture, or a cube map array of `layers` faces (QuasarVulkanLighting: the probes').
+        const bool cube = target == GL_TEXTURE_CUBE_MAP_ARRAY;
+        if (!mActive || !mDevice || (target != GL_TEXTURE_2D && !cube) || width <= 0 || height <= 0 || levels <= 0 ||
+            (cube && (layers == 0 || layers % 6 != 0 || !gl.TextureStorageMem3DEXT)) || (!cube && layers != 1))
         {
             return false;
         }
@@ -2966,6 +2989,8 @@ struct QLVulkanPresenter::Impl
         ext.width  = (U32)width;
         ext.height = (U32)height;
         ext.levels = (U32)levels;
+        ext.layers = layers;
+        ext.cube   = cube;
         auto undo = [&]()
         {
             if (ext.image) vkDestroyImage(mDevice, ext.image, nullptr);
@@ -2981,7 +3006,8 @@ struct QLVulkanPresenter::Impl
         info.format        = format.vk;
         info.extent        = { (U32)width, (U32)height, 1 };
         info.mipLevels     = (U32)levels;
-        info.arrayLayers   = 1;
+        info.arrayLayers   = layers;
+        info.flags         = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
         info.samples       = VK_SAMPLE_COUNT_1_BIT;
         info.tiling        = VK_IMAGE_TILING_OPTIMAL;
         info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -3034,7 +3060,15 @@ struct QLVulkanPresenter::Impl
         gl.ImportMemoryWin32HandleEXT(ext.glMemory, req.size,
                                       mKMT ? GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
         gl.TextureParameteri(texture, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
-        gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, ext.glMemory, 0);
+        if (cube)
+        {
+            gl.TextureStorageMem3DEXT(texture, levels, (GLenum)internal_format, width, height, (GLsizei)layers,
+                                      ext.glMemory, 0);
+        }
+        else
+        {
+            gl.TextureStorageMem2DEXT(texture, levels, (GLenum)internal_format, width, height, ext.glMemory, 0);
+        }
         // Asked once an allocation, off the frame's path (render targets are made as the render inputs change): every
         // flag these calls raised is taken, so none is left for llrender's own check of the allocation, and whether
         // the texture has storage now decides, not the flags.
@@ -3153,6 +3187,7 @@ struct QLVulkanPresenter::Impl
         LL_PROFILE_ZONE_NAMED("vulkan render target self-test");
         constexpr U32 SIZE = 16;
         constexpr F32 CLEAR[4] = { 0.25f, 0.5f, 0.75f, 1.f };
+        constexpr U32 CLEAR_UINT[4] = { 7u, 42u, 1000u, 0x80000001u };
         constexpr F32 CLEAR_DEPTH = 0.5f;
 
         GLuint textures[EXT_FORMAT_COUNT] = {};
@@ -3281,7 +3316,14 @@ struct QLVulkanPresenter::Impl
             else
             {
                 VkClearColorValue value = {};
-                memcpy(value.float32, CLEAR, sizeof(CLEAR));
+                if (format.integer)
+                {
+                    memcpy(value.uint32, CLEAR_UINT, sizeof(CLEAR_UINT));
+                }
+                else
+                {
+                    memcpy(value.float32, CLEAR, sizeof(CLEAR));
+                }
                 vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
             }
             VkImageMemoryBarrier release = acquire;
@@ -3346,7 +3388,15 @@ struct QLVulkanPresenter::Impl
             }
             else if (made[i])
             {
-                if (format.depth)
+                if (format.integer)
+                {
+                    U32 rgba[4] = {};
+                    gl.GetTextureSubImage(textures[i], 0, (GLint)SIZE / 2, (GLint)SIZE / 2, 0, 1, 1, 1,
+                                          GL_RGBA_INTEGER, GL_UNSIGNED_INT, sizeof(rgba), rgba);
+                    ok = memcmp(rgba, CLEAR_UINT, sizeof(rgba)) == 0;
+                    got = llformat("%u %u %u %u", rgba[0], rgba[1], rgba[2], rgba[3]);
+                }
+                else if (format.depth)
                 {
                     F32 depth = -1.f;
                     gl.GetTextureSubImage(textures[i], 0, (GLint)SIZE / 2, (GLint)SIZE / 2, 0, 1, 1, 1,
@@ -9146,9 +9196,10 @@ struct QLVulkanPresenter::Impl
     }
 
     // A sampled view of a GL texture in Vulkan's memory (a depth texture's depth alone); null where it is not there.
-    VkImageView gpView(GLuint name, VkImage& image, VkFormat& format, bool& is_depth)
+    VkImageView gpView(GLuint name, VkImage& image, VkFormat& format, bool& is_depth, bool* is_cube = nullptr)
     {
-        U32 levels = 1;
+        U32 levels = 1, layers = 1;
+        bool cube = false;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             const auto found = mExtTextures.find(name);
@@ -9159,7 +9210,14 @@ struct QLVulkanPresenter::Impl
             image  = found->second.image;
             format = found->second.vk;
             levels = llmax(1u, found->second.levels);
+            layers = llmax(1u, found->second.layers);
+            cube   = found->second.cube;
         }
+        if (is_cube)
+        {
+            *is_cube = cube;
+        }
+        const VkImageViewType view_type = cube ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         is_depth = format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
                    format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
         const VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -9178,9 +9236,9 @@ struct QLVulkanPresenter::Impl
                 v.image = image;
                 VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
                 view_info.image            = image;
-                view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+                view_info.viewType         = view_type;
                 view_info.format           = format;
-                view_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+                view_info.subresourceRange = { aspect, 0, levels, 0, layers };
                 if (vkCreateImageView(mDevice, &view_info, nullptr, &v.view) != VK_SUCCESS)
                 {
                     v.view = VK_NULL_HANDLE;
@@ -9194,9 +9252,9 @@ struct QLVulkanPresenter::Impl
         v.aspect = aspect;
         VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         view_info.image            = image;
-        view_info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.viewType         = view_type;
         view_info.format           = format;
-        view_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+        view_info.subresourceRange = { aspect, 0, levels, 0, layers };
         if (vkCreateImageView(mDevice, &view_info, nullptr, &v.view) != VK_SUCCESS)
         {
             return VK_NULL_HANDLE;
@@ -9395,7 +9453,7 @@ struct QLVulkanPresenter::Impl
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
         b.dstQueueFamilyIndex = mQueueFamily;
         b.image               = image;
-        b.subresourceRange    = { aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
+        b.subresourceRange    = { aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
         vkCmdPipelineBarrier(mGpSlots[mGpSlot].cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
@@ -9519,6 +9577,15 @@ struct QLVulkanPresenter::Impl
                     VkImageView view = VK_NULL_HANDLE;
                     VkImage image = VK_NULL_HANDLE;
                     bool is_depth = false;
+                    // GL_SAMPLER_CUBE_MAP_ARRAY (and its shadow, int and uint kinds) read a cube array; every other
+                    // sampler here a 2D texture.
+                    const bool wants_cube = r.gl_type >= 0x900C && r.gl_type <= 0x900F;
+                    if (wants_cube && (tex->texture == 0 || tex->texture == d.white_texture))
+                    {
+                        give_back();
+                        gpWhy(p.name + ": " + element + " has no cube array bound");
+                        return false;
+                    }
                     if (tex->texture == 0)
                     {
                         view  = mGbBlack.view;
@@ -9532,7 +9599,15 @@ struct QLVulkanPresenter::Impl
                     else
                     {
                         VkFormat format = VK_FORMAT_UNDEFINED;
-                        view = gpView(tex->texture, image, format, is_depth);
+                        bool cube = false;
+                        view = gpView(tex->texture, image, format, is_depth, &cube);
+                        if (view && cube != wants_cube)
+                        {
+                            give_back();
+                            gpWhy(llformat("%s: %s (GL name %u) is not the kind of texture it reads", p.name.c_str(),
+                                           element.c_str(), tex->texture));
+                            return false;
+                        }
                         if (!view)
                         {
                             give_back();
@@ -9762,7 +9837,7 @@ struct QLVulkanPresenter::Impl
             b.srcQueueFamilyIndex = mQueueFamily;
             b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
             b.image               = a.image;
-            b.subresourceRange    = { a.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
+            b.subresourceRange    = { a.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
             releases.push_back(b);
         }
         vkCmdPipelineBarrier(slot.cmd,

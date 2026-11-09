@@ -841,8 +841,9 @@ void LLPipeline::applyRenderInputs()
         // The sun's first cascade stands for the shadow maps, where Vulkan draws the lighting (QuasarVulkanLighting).
         LLRenderTarget* cascade = getSunShadowTarget(0);
         static const bool ql_lighting_maps = gSavedSettings.getBOOL("QuasarVulkanLighting");
-        const bool shadows_in_gl = ql_lighting_maps && cascade && cascade->getDepth() && gQLExternalStorage &&
-                                   !gQLExternalStorage->owns(cascade->getDepth());
+        const bool shadows_in_gl = ql_lighting_maps && gQLExternalStorage &&
+                                   ((cascade && cascade->getDepth() && !gQLExternalStorage->owns(cascade->getDepth())) ||
+                                    in_gl(mPbrBrdfLut) || in_gl(mExposureMap));
         if (in_gl(mAuxillaryRT.deferredScreen) || (main_wanted && in_gl(mMainRT.deferredScreen)) || shadows_in_gl)
         {
             LL_INFOS("Vulkan") << "The probe" << (main_wanted ? " and main" : "")
@@ -1044,17 +1045,26 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
 #endif
 }
 
-// Quasar: the shadow maps in Vulkan's memory too where Vulkan draws the lighting that reads them (QuasarVulkanLighting,
-// read at start), once the render target self-test has passed.
-static bool ql_vulkan_shadow_maps_wanted(ALRenderResourcePlan::Id id)
+// Quasar: whether what Vulkan's lighting reads is made in Vulkan's memory (QuasarVulkanLighting, read at start), once
+// the render target self-test has passed. Also the reflection probes' (LLReflectionMapManager).
+bool ql_vulkan_lighting_memory()
 {
 #if QL_VULKAN_SHADOWS
     static const bool lighting = gSavedSettings.getBOOL("QuasarVulkanLighting");
-    return lighting && ALRenderResourcePlan::isShadowMap(id) && gQLExternalStorage && QLVulkanPresenter::targetTest();
+    return lighting && gQLExternalStorage && QLVulkanPresenter::targetTest();
 #else
-    (void)id;
     return false;
 #endif
+}
+
+// The pipeline's resources the lighting reads beside the packs: the shadow maps, the BRDF LUT, the exposure and SSR's
+// scene.
+static bool ql_vulkan_shadow_maps_wanted(ALRenderResourcePlan::Id id)
+{
+    using Id = ALRenderResourcePlan::Id;
+    return ql_vulkan_lighting_memory() &&
+           (ALRenderResourcePlan::isShadowMap(id) || id == Id::BrdfLut || id == Id::Exposure || id == Id::ExposureLast ||
+            id == Id::SSRScene);
 }
 
 void LLPipeline::ensureResources(const ALRenderResourcePlan& plan, const ALRenderResourcePlan::IdSet& ids,
@@ -12638,9 +12648,10 @@ namespace
                 ALTextureSlot* slot = unit >= 0 ? gGL.getTextureSlot((U32)unit) : nullptr;
                 if (slot && slot->getCurrType() != ALTextureSlot::TT_NONE)
                 {
-                    if (slot->getCurrType() != ALTextureSlot::TT_TEXTURE)
+                    if (slot->getCurrType() != ALTextureSlot::TT_TEXTURE &&
+                        slot->getCurrType() != ALTextureSlot::TT_CUBE_MAP_ARRAY)
                     {
-                        ql_lighting_kept(llformat("%s: %s is a cube map or array (not yet in Vulkan)",
+                        ql_lighting_kept(llformat("%s: %s is a cube map or a 3D texture (not yet in Vulkan)",
                                                   shader.mName.c_str(), t.name));
                         return false;
                     }

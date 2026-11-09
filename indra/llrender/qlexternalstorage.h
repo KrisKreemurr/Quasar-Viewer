@@ -26,6 +26,15 @@ public:
     /// caller allocates as before. On the thread whose GL context is current, which is the main one.
     virtual bool allocate(unsigned texture, unsigned target, int internal_format, int width, int height, int levels) = 0;
 
+    /// A cube map array's storage (@a target GL_TEXTURE_CUBE_MAP_ARRAY, @a layers faces, six a cube), as allocate()
+    /// gives a 2D texture's: the probes' (QuasarVulkanLighting). False: the caller allocates as before.
+    virtual bool allocateArray(unsigned texture, unsigned target, int internal_format, int width, int height,
+                               int layers, int levels)
+    {
+        (void)texture; (void)target; (void)internal_format; (void)width; (void)height; (void)layers; (void)levels;
+        return false;
+    }
+
     /// A fetched texture's storage (@a levels levels, uploaded into later), placed among others in memory the provider
     /// shares out (QuasarVulkanTextures). @a counted_bytes is what the texture budget counts it as (GL's size); the
     /// provider declines a texture whose storage would cost it much more than that. False: GL allocates as before. On
