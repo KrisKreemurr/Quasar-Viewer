@@ -753,6 +753,7 @@ void LLRenderTarget::attachSharedDepth(const LLRenderTarget& owner)
     mStencil           = owner.mStencil;
     mDepthFormat       = owner.mDepthFormat;
     mSharedDepthSerial = owner.mDepthSerial;
+    mSharedDepthName   = owner.mDepth;
 }
 
 void LLRenderTarget::release()
@@ -783,6 +784,7 @@ void LLRenderTarget::release()
     mStencil = false;
     mDepthFormat = DEPTH_FMT_24;
     mSharedDepthSerial = 0;
+    mSharedDepthName   = 0;
 
     // Detach any extra color buffers (e.g. SRGB spec buffers)
     //

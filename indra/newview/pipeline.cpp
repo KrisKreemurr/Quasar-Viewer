@@ -12717,7 +12717,7 @@ namespace
         {
             d.colors[i] = target->getTexture(i);
         }
-        d.depth  = target->getDepth();
+        d.depth  = target->getAttachedDepth();
         d.width  = target->getWidth();
         d.height = target->getHeight();
         d.clear  = clear;

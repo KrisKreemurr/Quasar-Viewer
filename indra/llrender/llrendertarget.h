@@ -260,6 +260,8 @@ public:
     U32 getInternalFormat(U32 attachment = 0) const;
 
     U32 getDepth(void) const { return mDepth; }
+    // Quasar: the depth texture the framebuffer has attached, its own or the one it shares (shareDepthBuffer).
+    U32 getAttachedDepth() const { return mDepth ? mDepth : (mUseDepth ? mSharedDepthName : 0); }
     bool hasStencil() const { return mStencil; }
     eDepthFormat getDepthFormat() const { return mDepthFormat; }
 
@@ -357,6 +359,7 @@ protected:
     U64 mDepthSerial = 0;
     // The serial of the depth attached from another target; 0 for none.
     U64 mSharedDepthSerial = 0;
+    U32 mSharedDepthName = 0;  // the shared depth's GL name (getAttachedDepth)
     bool mUseDepth;
     bool mStencil;
     eDepthFormat mDepthFormat;
