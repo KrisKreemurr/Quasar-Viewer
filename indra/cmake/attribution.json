@@ -40,6 +40,7 @@
     "discord-social-sdk": { "holder": "Copyright (c) Discord Inc.", "license": "LicenseRef-Discord" },
     "fmodstudio": { "holder": "Made with FMOD Studio by Firelight Technologies Pty Ltd.", "license": "LicenseRef-FMOD" },
     "freetype": { "holder": "Copyright 1996-2002, 2006 David Turner, Robert Wilhelm, and Werner Lemberg" },
+    "glslang": { "holder": "Copyright (C) 2015-2018 Google, Inc.; Copyright (C) 2002-2005 3Dlabs Inc. Ltd.; and others", "license": "BSD-3-Clause AND BSD-2-Clause AND MIT AND Apache-2.0" },
     "libiconv": { "holder": "Copyright (C) Free Software Foundation, Inc.; written by Bruno Haible", "license": "LGPL-2.1-or-later" },
     "libjpeg-turbo": { "holder": "Copyright (C) 2009-2026 D. R. Commander; Copyright (C) 1991-2020 Thomas G. Lane, Guido Vollbeding" },
     "liblzma": { "holder": "Copyright the XZ Utils authors", "license": "0BSD" },
