@@ -8372,6 +8372,15 @@ struct QLVulkanPresenter::Impl
         std::unordered_map<std::string, U32> members;  // the default block's, by name
         S32                   position = -1;            // the "position" attribute's location
         U32                   outputs = 0;              // colour outputs (the highest location + 1)
+        // Its attributes, each a stream of a mesh in the arena (GpStream): where a draw gives positions alone, only
+        // "position" may be read.
+        struct Input
+        {
+            U32      stream = 0;
+            U32      location = 0;
+            VkFormat format = VK_FORMAT_UNDEFINED;
+        };
+        std::vector<Input>    inputs;
         std::vector<GpPipe>   pipes;
     };
     std::vector<GpProgram> mGpPrograms;
@@ -8440,6 +8449,8 @@ struct QLVulkanPresenter::Impl
     // The pass being recorded.
     bool                 mGpInPass = false;
     bool                 mGpRecorded = false;   // a draw is in the command buffer
+    bool                 mGpUsedArena = false;  // a draw read a mesh from the G-buffer's arena
+    bool                 mGpArenaAcquired = false;
     S32                  mGpOpenTarget = -1;    // the target whose render pass is open
     std::vector<GLuint>  mGpNames;              // every GL texture the pass touches, once each
     struct GpAcquired
@@ -8725,6 +8736,50 @@ struct QLVulkanPresenter::Impl
         return out;
     }
 
+    // A mesh's attribute streams in the arena (arenaPlace's layout), by GL's attribute name: the stride each keeps.
+    enum GpStream : U32
+    {
+        GP_POSITION = 0, GP_NORMAL, GP_TEXCOORD0, GP_TEXCOORD1, GP_TEXCOORD2, GP_COLOR, GP_TANGENT, GP_WEIGHT4,
+        GP_STREAMS
+    };
+    static S32 gpStreamOf(const std::string& name)
+    {
+        static const char* const names[GP_STREAMS] = { "position", "normal", "texcoord0", "texcoord1",
+                                                       "texcoord2", "diffuse_color", "tangent", "weight4" };
+        for (U32 i = 0; i < GP_STREAMS; ++i)
+        {
+            if (name == names[i])
+            {
+                return (S32)i;
+            }
+        }
+        return -1;
+    }
+    static U32 gpStreamStride(U32 stream)
+    {
+        switch (stream)
+        {
+            case GP_TEXCOORD0: case GP_TEXCOORD1: case GP_TEXCOORD2: return 8;
+            case GP_COLOR: return 4;
+            default: return 16;
+        }
+    }
+    VkDeviceSize gpStreamStart(U32 stream) const
+    {
+        switch (stream)
+        {
+            case GP_POSITION: return 0;
+            case GP_NORMAL: return mGbArena.normalStart();
+            case GP_TEXCOORD0: return mGbArena.uvStart();
+            case GP_TEXCOORD1: return mGbArena.uv1Start();
+            case GP_TEXCOORD2: return mGbArena.uv2Start();
+            case GP_COLOR: return mGbArena.colorStart();
+            case GP_TANGENT: return mGbArena.tangentStart();
+            case GP_WEIGHT4: return mGbArena.vertexBytes;
+            default: return 0;
+        }
+    }
+
     int gpProgram(U64 key, U32 link, const char* name, const QLVulkanPresenter::GpSource* sources, U32 count)
     {
         if (!createGpObjects())
@@ -8863,16 +8918,32 @@ struct QLVulkanPresenter::Impl
         }
         for (const ql_glsl::Attribute& a : p.refl.inputs)
         {
-            if (a.name == "position")
+            const S32 stream = gpStreamOf(a.name);
+            if (stream < 0)
             {
-                p.position = (S32)a.location;
-            }
-            else
-            {
-                p.note = "reads the attribute " + a.name + " (Vulkan gives positions alone)";
+                p.note = "reads the attribute " + a.name + ", which the arena does not keep";
                 destroyGpProgram(p);
                 return -1;
             }
+            if (stream == GP_POSITION)
+            {
+                p.position = (S32)a.location;
+            }
+            GpProgram::Input in;
+            in.stream   = (U32)stream;
+            in.location = a.location;
+            switch (a.gl_type)
+            {
+                case GL_FLOAT: in.format = VK_FORMAT_R32_SFLOAT; break;
+                case GL_FLOAT_VEC2: in.format = VK_FORMAT_R32G32_SFLOAT; break;
+                case GL_FLOAT_VEC3: in.format = VK_FORMAT_R32G32B32_SFLOAT; break;
+                default: in.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+            }
+            if (stream == GP_COLOR)
+            {
+                in.format = VK_FORMAT_R8G8B8A8_UNORM;  // LLColor4U, normalized as GL's attribute
+            }
+            p.inputs.push_back(in);
         }
         for (const ql_glsl::Attribute& a : p.refl.outputs)
         {
@@ -9080,9 +9151,20 @@ struct QLVulkanPresenter::Impl
     VkPipeline gpPipeline(GpProgram& p, const GpTarget& t, const QLVulkanPresenter::GpDraw& d)
     {
         const bool bounds = d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth;
-        const U64 key = t.formatKey * 1000003ull + ((U64)d.blend) + ((U64)d.depth_func << 4) +
-                        ((U64)(d.depth_write ? 1 : 0) << 20) + ((U64)(bounds ? 1 : 0) << 21) +
-                        ((U64)(d.cull_back ? 1 : 0) << 22) + ((U64)d.topology << 24) + ((U64)t.colors << 40);
+        const bool mesh = d.mesh.stamp != 0;
+        U64 key = t.formatKey * 1000003ull + ((U64)d.blend) + ((U64)d.depth_func << 4) +
+                  ((U64)(d.depth_write ? 1 : 0) << 20) + ((U64)(bounds ? 1 : 0) << 21) +
+                  ((U64)(d.cull_back ? 1 : 0) << 22) + ((U64)d.topology << 24) + ((U64)t.colors << 40) +
+                  ((U64)(mesh ? 1 : 0) << 44) + ((U64)(d.cull_front ? 1 : 0) << 45) + ((U64)(d.color_mask & 0xF) << 46);
+        if (d.blend == 3)
+        {
+            key = key * 31 + d.blend_src;
+            key = key * 31 + d.blend_dst;
+            key = key * 31 + d.blend_src_alpha;
+            key = key * 31 + d.blend_dst_alpha;
+            key = key * 31 + d.blend_eq;
+            key = key * 31 + d.blend_eq_alpha;
+        }
         for (const GpPipe& pipe : p.pipes)
         {
             if (pipe.key == key)
@@ -9107,7 +9189,22 @@ struct QLVulkanPresenter::Impl
         VkVertexInputBindingDescription binding = { 0, 12, VK_VERTEX_INPUT_RATE_VERTEX };
         VkVertexInputAttributeDescription attribute = { (U32)llmax(p.position, 0), 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        if (p.position >= 0)
+        // A mesh's: a binding a stream the program reads, its stride the arena's.
+        std::vector<VkVertexInputBindingDescription>   mesh_bindings;
+        std::vector<VkVertexInputAttributeDescription> mesh_attributes;
+        if (mesh)
+        {
+            for (size_t i = 0; i < p.inputs.size(); ++i)
+            {
+                mesh_bindings.push_back({ (U32)i, gpStreamStride(p.inputs[i].stream), VK_VERTEX_INPUT_RATE_VERTEX });
+                mesh_attributes.push_back({ p.inputs[i].location, (U32)i, p.inputs[i].format, 0 });
+            }
+            vertex_input.vertexBindingDescriptionCount   = (U32)mesh_bindings.size();
+            vertex_input.pVertexBindingDescriptions      = mesh_bindings.data();
+            vertex_input.vertexAttributeDescriptionCount = (U32)mesh_attributes.size();
+            vertex_input.pVertexAttributeDescriptions    = mesh_attributes.data();
+        }
+        else if (p.position >= 0)
         {
             vertex_input.vertexBindingDescriptionCount   = 1;
             vertex_input.pVertexBindingDescriptions      = &binding;
@@ -9124,7 +9221,7 @@ struct QLVulkanPresenter::Impl
         // GL's counter-clockwise front, turned over by Vulkan's framebuffer rows (as the G-buffer's pipelines).
         VkPipelineRasterizationStateCreateInfo raster = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
         raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode    = d.cull_back ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+        raster.cullMode    = (d.cull_back ? VK_CULL_MODE_BACK_BIT : 0) | (d.cull_front ? VK_CULL_MODE_FRONT_BIT : 0);
         raster.frontFace   = VK_FRONT_FACE_CLOCKWISE;
         raster.lineWidth   = 1.f;
         VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -9141,10 +9238,29 @@ struct QLVulkanPresenter::Impl
         {
             VkPipelineColorBlendAttachmentState& b = blends[i];
             // An attachment the program writes nothing to keeps what it holds (Vulkan would leave it undefined).
-            b.colorWriteMask = i < p.outputs ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
-                                             : 0;
-            if (d.blend != 0)
+            b.colorWriteMask = i < p.outputs ? (VkColorComponentFlags)(d.color_mask & 0xF) : 0;
+            if (d.blend == 3)
+            {
+                b.blendEnable         = VK_TRUE;
+                auto op = [](unsigned eq)
+                {
+                    switch (eq)
+                    {
+                        case GL_MIN: return VK_BLEND_OP_MIN;
+                        case GL_MAX: return VK_BLEND_OP_MAX;
+                        case GL_FUNC_SUBTRACT: return VK_BLEND_OP_SUBTRACT;
+                        case GL_FUNC_REVERSE_SUBTRACT: return VK_BLEND_OP_REVERSE_SUBTRACT;
+                        default: return VK_BLEND_OP_ADD;
+                    }
+                };
+                b.srcColorBlendFactor = gpBlendFactor(d.blend_src);
+                b.dstColorBlendFactor = gpBlendFactor(d.blend_dst);
+                b.colorBlendOp        = op(d.blend_eq);
+                b.srcAlphaBlendFactor = gpBlendFactor(d.blend_src_alpha);
+                b.dstAlphaBlendFactor = gpBlendFactor(d.blend_dst_alpha);
+                b.alphaBlendOp        = op(d.blend_eq_alpha);
+            }
+            else if (d.blend != 0)
             {
                 b.blendEnable         = VK_TRUE;
                 b.srcColorBlendFactor = d.blend == 1 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
@@ -9184,6 +9300,25 @@ struct QLVulkanPresenter::Impl
         }
         p.pipes.push_back({ key, pipeline });
         return pipeline;
+    }
+
+    static VkBlendFactor gpBlendFactor(unsigned gl_factor)
+    {
+        switch (gl_factor)
+        {
+            case GL_ZERO: return VK_BLEND_FACTOR_ZERO;
+            case GL_ONE: return VK_BLEND_FACTOR_ONE;
+            case GL_SRC_COLOR: return VK_BLEND_FACTOR_SRC_COLOR;
+            case GL_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            case GL_DST_COLOR: return VK_BLEND_FACTOR_DST_COLOR;
+            case GL_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+            case GL_SRC_ALPHA: return VK_BLEND_FACTOR_SRC_ALPHA;
+            case GL_ONE_MINUS_SRC_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case GL_DST_ALPHA: return VK_BLEND_FACTOR_DST_ALPHA;
+            case GL_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case GL_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+            default: return VK_BLEND_FACTOR_ONE;
+        }
     }
 
     VkSampler gpSampler(const QLVulkanPresenter::GpTexture& tex)
@@ -9523,6 +9658,8 @@ struct QLVulkanPresenter::Impl
         mGpInPass     = true;
         mGpRecorded   = false;
         mGpOpenTarget = -1;
+        mGpUsedArena  = false;
+        mGpArenaAcquired = false;
         mGpNames.clear();
         mGpAcquired.clear();
         mGpWritten.clear();
@@ -9607,7 +9744,32 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         GpProgram& p = mGpPrograms[d.program];
-        if (p.position >= 0 && (!d.positions || d.vertex_count == 0))
+        const bool mesh = d.mesh.stamp != 0;
+        if (mesh)
+        {
+            // Every attribute the program reads, from the mesh.
+            const unsigned offsets[GP_STREAMS] = { d.mesh.position, d.mesh.normal, d.mesh.texcoord0, d.mesh.texcoord1,
+                                                   d.mesh.texcoord2, d.mesh.color, d.mesh.tangent, d.mesh.weight4 };
+            for (const GpProgram::Input& in : p.inputs)
+            {
+                if (offsets[in.stream] == ~0u)
+                {
+                    gpWhy(llformat("%s reads an attribute its mesh has not (stream %u)", p.name.c_str(), in.stream));
+                    return false;
+                }
+            }
+            if (!mGbReady || !mGbArena.buffer || d.mesh.position == ~0u || !d.mesh.index_count)
+            {
+                gpWhy(p.name + ": a mesh, and no arena to put it in (QuasarVulkanMainDraws)");
+                return false;
+            }
+        }
+        else if (p.inputs.size() > (p.position >= 0 ? 1u : 0u))
+        {
+            gpWhy(p.name + ": reads more than positions, and was given no mesh");
+            return false;
+        }
+        else if (p.position >= 0 && (!d.positions || d.vertex_count == 0))
         {
             gpWhy(p.name + ": no vertices");
             return false;
@@ -9793,7 +9955,22 @@ struct QLVulkanPresenter::Impl
             }
             bound.push_back(b);
         }
-        if (p.position >= 0)
+        U32 base_vertex = 0, base_index = 0;
+        if (mesh)
+        {
+            // Into the arena once a content stamp (GL copies it in, before the hand-over's signal).
+            if (!arenaPlace(mGbArena, d.mesh.stamp, d.mesh.vertex_buffer, d.mesh.position, d.mesh.weight4,
+                            d.mesh.vertex_count, d.mesh.index_buffer, d.mesh.total_indices, base_vertex, base_index,
+                            d.mesh.texcoord0 != ~0u ? d.mesh.texcoord0 : 0, d.mesh.color,
+                            d.mesh.normal != ~0u ? d.mesh.normal : 0, true, d.mesh.tangent, d.mesh.texcoord1,
+                            d.mesh.texcoord2))
+            {
+                give_back();
+                gpWhy("the arena is full");
+                return false;
+            }
+        }
+        else if (p.position >= 0)
         {
             vertices_at = gpAllocate((VkDeviceSize)d.vertex_count * 12);
             if (vertices_at == GP_NONE)
@@ -9849,6 +10026,14 @@ struct QLVulkanPresenter::Impl
                       is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
                                : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT,
                       true);
+        }
+        if (mesh && !mGpArenaAcquired)
+        {
+            gpEndRenderPass();
+            bufferBarrier(mGpSlots[mGpSlot].cmd, mGbArena.buffer, 0,
+                          VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT, VK_QUEUE_FAMILY_EXTERNAL,
+                          mQueueFamily, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
+            mGpArenaAcquired = true;
         }
         bool hazard = false;
         for (const Bound& b : bound)
@@ -9910,10 +10095,19 @@ struct QLVulkanPresenter::Impl
             pass_begin.pClearValues    = clears;
             vkCmdBeginRenderPass(cmd, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
             mGpOpenTarget = target_index;
-            const VkViewport viewport = { 0.f, 0.f, (float)t.width, (float)t.height, 0.f, 1.f };
             const VkRect2D scissor = { { 0, 0 }, { t.width, t.height } };
-            vkCmdSetViewport(cmd, 0, 1, &viewport);
             vkCmdSetScissor(cmd, 0, 1, &scissor);
+        }
+        {
+            // GL's viewport, its y from the bottom row: Vulkan's rows run the same way in memory (no flip), so the
+            // same numbers.
+            VkViewport viewport = { 0.f, 0.f, (float)t.width, (float)t.height, 0.f, 1.f };
+            if (d.viewport[2] > 0 && d.viewport[3] > 0)
+            {
+                viewport = { (float)d.viewport[0], (float)d.viewport[1], (float)d.viewport[2], (float)d.viewport[3],
+                             0.f, 1.f };
+            }
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         if (d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth)
@@ -9921,11 +10115,32 @@ struct QLVulkanPresenter::Impl
             vkCmdSetDepthBounds(cmd, d.bounds_min, d.bounds_max);
         }
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set, 0, nullptr);
-        if (vertices_at != GP_NONE)
+        if (mesh)
         {
-            vkCmdBindVertexBuffers(cmd, 0, 1, &mGpHost, &vertices_at);
+            VkBuffer buffers[GP_STREAMS];
+            VkDeviceSize starts[GP_STREAMS];
+            for (size_t i = 0; i < p.inputs.size(); ++i)
+            {
+                buffers[i] = mGbArena.buffer;
+                starts[i]  = gpStreamStart(p.inputs[i].stream);
+            }
+            if (!p.inputs.empty())
+            {
+                vkCmdBindVertexBuffers(cmd, 0, (U32)p.inputs.size(), buffers, starts);
+            }
+            vkCmdBindIndexBuffer(cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(cmd, d.mesh.index_count, llmax(d.instances, 1u), base_index + d.mesh.first_index,
+                             (S32)base_vertex, 0);
         }
-        vkCmdDraw(cmd, llmax(d.vertex_count, 3u), 1, 0, 0);
+        else
+        {
+            if (vertices_at != GP_NONE)
+            {
+                vkCmdBindVertexBuffers(cmd, 0, 1, &mGpHost, &vertices_at);
+            }
+            vkCmdDraw(cmd, p.position >= 0 ? llmax(d.vertex_count, 3u) : d.vertex_count, llmax(d.instances, 1u), 0, 0);
+        }
+        mGpUsedArena = mGpUsedArena || mesh;
         mGpRecorded = true;
         for (U32 i = 0; i < t.colors; ++i)
         {
@@ -9995,13 +10210,24 @@ struct QLVulkanPresenter::Impl
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, (U32)releases.size(),
                              releases.data());
+        if (mGpArenaAcquired)
+        {
+            bufferBarrier(slot.cmd, mGbArena.buffer, 0, 0, mQueueFamily, VK_QUEUE_FAMILY_EXTERNAL,
+                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
         vkEndCommandBuffer(slot.cmd);
         mGpInPass = false;
 
         const std::vector<GLenum> layouts(mGpNames.size(), GL_LAYOUT_GENERAL_EXT);
+        std::vector<GLuint> gl_buffers;
+        if (mGpUsedArena)
+        {
+            gl_buffers.push_back(mGbArena.gl);  // its copies in, GL's, before the signal
+        }
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl signal");
-            gl.SignalSemaphoreEXT(mGpGLDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+            gl.SignalSemaphoreEXT(mGpGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
+                                  mGpNames.data(), layouts.data());
             gl.Flush();
         }
         vkResetFences(mDevice, 1, &slot.fence);
@@ -10032,7 +10258,8 @@ struct QLVulkanPresenter::Impl
             hand_back.pSignalSemaphores    = &mGpVKDoneVK;
             if (vkQueueSubmit(mQueue, 1, &hand_back, VK_NULL_HANDLE) == VK_SUCCESS)
             {
-                gl.WaitSemaphoreEXT(mGpVKDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+                gl.WaitSemaphoreEXT(mGpVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
+                                    mGpNames.data(), layouts.data());
             }
             mGpReady = false;
             mGpNote  = llformat("stopped: a pass could not be submitted (VkResult %d)", (S32)result);
@@ -10042,7 +10269,8 @@ struct QLVulkanPresenter::Impl
         slot.submitted = true;
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl wait");
-            gl.WaitSemaphoreEXT(mGpVKDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+            gl.WaitSemaphoreEXT(mGpVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
+                                mGpNames.data(), layouts.data());
         }
         ++mGpPassesNow;
         return true;

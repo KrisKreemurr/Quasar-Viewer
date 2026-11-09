@@ -12579,11 +12579,40 @@ namespace
     struct QLGLState
     {
         U32  depth_func = 0;
-        U32  blend = 0;
+        bool depth_write = false;
+        U32  blend = 0;  // 0 none, 1 add, 3 the factors and equations below
+        U32  blend_src = 0, blend_dst = 0, blend_src_alpha = 0, blend_dst_alpha = 0;
+        U32  blend_eq = GL_FUNC_ADD, blend_eq_alpha = GL_FUNC_ADD;
+        U32  color_mask = 0xF;
         F32  bounds_min = 0.f, bounds_max = 0.f;
         bool cull_back = true;
+        bool cull_front = false;
         U32  topology = GL_TRIANGLES;
+        S32  viewport[4] = {};  // width 0: the whole target
+        U32  instances = 1;
     };
+
+    // GL's state now, as LLRender and LLGLState track it: what a draw made here would draw with.
+    QLGLState ql_gl_state_now()
+    {
+        QLGLState st;
+        st.depth_func  = LLGLDepthTest::qlEnabled() ? LLGLDepthTest::qlFunc() : 0;
+        st.depth_write = LLGLDepthTest::qlEnabled() && LLGLDepthTest::qlWrites();
+        if (LLGLState::qlEnabled(GL_BLEND))
+        {
+            st.blend = 3;
+            gGL.qlBlendState(st.blend_src, st.blend_dst, st.blend_src_alpha, st.blend_dst_alpha, st.blend_eq,
+                             st.blend_eq_alpha);
+        }
+        bool mask[4];
+        gGL.getColorMask(mask);
+        st.color_mask = (mask[0] ? 1u : 0u) | (mask[1] ? 2u : 0u) | (mask[2] ? 4u : 0u) | (mask[3] ? 8u : 0u);
+        const bool cull = LLGLState::qlEnabled(GL_CULL_FACE);
+        st.cull_back  = cull && gGL.getCullFace() != GL_FRONT;
+        st.cull_front = cull && gGL.getCullFace() != GL_BACK;
+        gGL.qlViewport(st.viewport);
+        return st;
+    }
 
     // The depth bounds ALDrawnOnly holds GL's full-screen passes to: what the world drew.
     QLGLState ql_drawn_only()
@@ -12600,7 +12629,8 @@ namespace
     // units, the engine's blocks bound. Its target is the render target's colours and depth, cleared first (colours)
     // where `clear`. Positions three floats a vertex. False: nothing was recorded, and why is kept for the status line.
     bool ql_gl_program_draw(LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
-                            const QLGLState& state, const F32* positions, U32 vertex_count)
+                            const QLGLState& state, const F32* positions, U32 vertex_count,
+                            const QLVulkanPresenter::GpMesh* mesh = nullptr)
     {
         if (!target || !target->getNumTextures())
         {
@@ -12739,15 +12769,32 @@ namespace
         {
             d.clear_color[i] = clear_color.mV[i];
         }
-        d.blend        = state.blend;
-        d.depth_func   = state.depth_func;
-        d.depth_write  = false;
-        d.bounds_min   = state.bounds_min;
-        d.bounds_max   = state.bounds_max;
-        d.cull_back    = state.cull_back;
-        d.positions    = positions;
-        d.vertex_count = vertex_count;
-        d.topology     = state.topology;
+        d.blend           = state.blend;
+        d.blend_src       = state.blend_src;
+        d.blend_dst       = state.blend_dst;
+        d.blend_src_alpha = state.blend_src_alpha;
+        d.blend_dst_alpha = state.blend_dst_alpha;
+        d.blend_eq        = state.blend_eq;
+        d.blend_eq_alpha  = state.blend_eq_alpha;
+        d.color_mask      = state.color_mask;
+        d.depth_func      = state.depth_func;
+        d.depth_write     = state.depth_write;
+        d.bounds_min      = state.bounds_min;
+        d.bounds_max      = state.bounds_max;
+        d.cull_back       = state.cull_back;
+        d.cull_front      = state.cull_front;
+        d.positions       = positions;
+        d.vertex_count    = vertex_count;
+        d.topology        = state.topology;
+        d.instances       = llmax(state.instances, 1u);
+        for (int i = 0; i < 4; ++i)
+        {
+            d.viewport[i] = state.viewport[i];
+        }
+        if (mesh)
+        {
+            d.mesh = *mesh;
+        }
         if (!QLVulkanPresenter::glDraw(d))
         {
             ql_lighting_kept(QLVulkanPresenter::glInfo());
@@ -15081,6 +15128,170 @@ std::string ql_vulkan_terrain_maps_info()
     }
     return llformat("%u region(s) drawn | heights in Vulkan's memory %u, composition %u", regions, heights, compositions) +
            " | draws: " + ql_vulkan_terrain_draws_info();
+}
+
+// ---- Quasar: a stage of GL's draws recorded for Vulkan (QuasarVulkanLighting: the alpha pools, ...) -------------
+//
+// A stage opens a Vulkan run; each draw site asks ql_vulkan_draw_now to take its draw as GL holds it (its program bound,
+// its uniforms and textures set, its target bound, GL's state), and draws it with GL only where that fails. The first
+// draw Vulkan cannot take hands the run over, and GL draws it and the rest; the stage's end hands over what is left.
+// Nothing Vulkan records runs before the hand-over, so GL's draws always come after it.
+namespace
+{
+    struct QLStage
+    {
+        bool        open = false;
+        U32         recorded = 0;
+        bool        whole = false;
+        const char* name = "";
+    };
+    QLStage sQLStage;
+    struct QLStageStats
+    {
+        U32 now_vk = 0, now_gl = 0, last_vk = 0, last_gl = 0, frame = 0;
+        std::string why;
+    };
+    std::unordered_map<std::string, QLStageStats> sQLStageStats;
+
+    void ql_stage_hand_over()
+    {
+#if QL_VULKAN_SHADOWS
+        if (!sQLStage.open)
+        {
+            return;
+        }
+        sQLStage.open = false;
+        if (!QLVulkanPresenter::glPassEnd())
+        {
+            ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
+        }
+#endif
+    }
+}
+
+// Opens a stage's Vulkan run where the lighting's is wanted and this is the main view.
+bool ql_vulkan_stage_begin(const char* name)
+{
+#if QL_VULKAN_SHADOWS
+    ql_stage_hand_over();
+    sQLStage = QLStage();
+    sQLStage.name = name;
+    if (!ql_lighting_wanted() || gPipeline.mRT != &gPipeline.mMainRT || LLPipeline::sImpostorRender ||
+        LLPipeline::sCutoutRender || LLPipeline::sRenderingHUDs || LLPipeline::sShadowRender)
+    {
+        return false;
+    }
+    sQLStage.open = QLVulkanPresenter::glPassBegin();
+    return sQLStage.open;
+#else
+    (void)name;
+    return false;
+#endif
+}
+
+// GL is about to do something of its own (a copy, a clear, a draw it keeps): what Vulkan recorded goes first.
+void ql_vulkan_stage_gl()
+{
+    ql_stage_hand_over();
+}
+
+void ql_vulkan_stage_end()
+{
+#if QL_VULKAN_SHADOWS
+    const bool whole = sQLStage.open;
+    ql_stage_hand_over();
+    if (sQLStage.name && *sQLStage.name)
+    {
+        QLStageStats& stats = sQLStageStats[sQLStage.name];
+        if (stats.frame != LLFrameTimer::getFrameCount())
+        {
+            stats.last_vk = stats.now_vk;
+            stats.last_gl = stats.now_gl;
+            stats.now_vk = stats.now_gl = 0;
+            stats.frame = LLFrameTimer::getFrameCount();
+        }
+        stats.now_vk += sQLStage.recorded;
+        (void)whole;
+    }
+#endif
+    sQLStage = QLStage();
+}
+
+// A draw of `vb` as GL would make it now (drawRange's arguments), recorded for Vulkan while the stage's run is open.
+// False: GL draws it (and the run is handed over first, where it was open).
+bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset)
+{
+#if QL_VULKAN_SHADOWS
+    (void)start;
+    (void)end;
+    if (!sQLStage.open)
+    {
+        if (sQLStage.name && *sQLStage.name)
+        {
+            ++sQLStageStats[sQLStage.name].now_gl;
+        }
+        return false;
+    }
+    LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
+    LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
+    bool drawn = false;
+    if (shader && target && vb && count && LLNavShapeVBOManager::shortIndices(vb) &&
+        vb->hasDataType(LLVertexBuffer::TYPE_VERTEX))
+    {
+        QLVulkanPresenter::GpMesh mesh;
+        mesh.stamp         = vb->getContentStamp();
+        mesh.vertex_buffer = LLNavShapeVBOManager::glBuffer(vb);
+        mesh.index_buffer  = LLNavShapeVBOManager::glIndices(vb);
+        mesh.vertex_count  = vb->getNumVerts();
+        mesh.total_indices = vb->getNumIndices();
+        auto at = [vb](LLVertexBuffer::AttributeType type)
+        {
+            return vb->hasDataType(type) ? (unsigned)vb->getOffset(type) : ~0u;
+        };
+        mesh.position    = at(LLVertexBuffer::TYPE_VERTEX);
+        mesh.normal      = at(LLVertexBuffer::TYPE_NORMAL);
+        mesh.texcoord0   = at(LLVertexBuffer::TYPE_TEXCOORD0);
+        mesh.texcoord1   = at(LLVertexBuffer::TYPE_TEXCOORD1);
+        mesh.texcoord2   = at(LLVertexBuffer::TYPE_TEXCOORD2);
+        mesh.color       = at(LLVertexBuffer::TYPE_COLOR);
+        mesh.tangent     = at(LLVertexBuffer::TYPE_TANGENT);
+        mesh.weight4     = at(LLVertexBuffer::TYPE_WEIGHT4);
+        mesh.first_index = offset;
+        mesh.index_count = count;
+        QLGLState state = ql_gl_state_now();
+        drawn = ql_gl_program_draw(*shader, target, false, LLColor4::transparent, state, nullptr, 0, &mesh);
+    }
+    if (drawn)
+    {
+        ++sQLStage.recorded;
+        return true;
+    }
+    ql_stage_hand_over();
+    if (sQLStage.name && *sQLStage.name)
+    {
+        QLStageStats& stats = sQLStageStats[sQLStage.name];
+        ++stats.now_gl;
+        stats.why = sQLLightingWhy;
+    }
+    return false;
+#else
+    (void)vb; (void)start; (void)end; (void)count; (void)offset;
+    return false;
+#endif
+}
+
+std::string ql_vulkan_stages_info()
+{
+    std::string info;
+    for (const auto& [name, stats] : sQLStageStats)
+    {
+        info += llformat("%s%s: %u Vulkan, %u GL", info.empty() ? "" : " | ", name.c_str(), stats.last_vk, stats.last_gl);
+        if (stats.last_gl && !stats.why.empty())
+        {
+            info += " (GL's from " + stats.why + ")";
+        }
+    }
+    return info.empty() ? std::string("none yet") : info;
 }
 
 std::string ql_vulkan_lighting_info()

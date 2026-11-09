@@ -1713,4 +1713,12 @@ extern LLPipeline gPipeline;
 extern bool gDebugPipeline;
 extern const LLMatrix4a* gGLLastMatrix;
 
+// Quasar (QuasarVulkanLighting): a stage of GL's draws recorded for Vulkan (pipeline.cpp). A draw site asks
+// ql_vulkan_draw_now to take its draw as GL holds it, and draws with GL where it returns false; GL work of its own
+// in a stage (copies, clears) calls ql_vulkan_stage_gl first.
+bool ql_vulkan_stage_begin(const char* name);
+void ql_vulkan_stage_gl();
+void ql_vulkan_stage_end();
+bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset);
+
 #endif

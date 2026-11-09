@@ -217,6 +217,13 @@ void LLDrawPoolAlpha::renderPostDeferred(S32 pass)
     // already being setup for rendering
     LLGLSLShader::unbind();
 
+    // Quasar: the pool's draws recorded for Vulkan where they can be (QuasarVulkanLighting), handed over at the end.
+    ql_vulkan_stage_begin(getType() == LLDrawPool::POOL_ALPHA_PRE_WATER ? "alpha under water" : "alpha");
+    struct QLStageEnd
+    {
+        ~QLStageEnd() { ql_vulkan_stage_end(); }
+    } ql_stage_end;
+
     if (!LLPipeline::sRenderingHUDs)
     {
         // first pass, render rigged objects only and render to depth buffer
@@ -387,6 +394,7 @@ void LLDrawPoolAlpha::renderAlphaHighlight()
                     gGL.diffuseColor4f(1, 0, 0, 1);
                     LLRenderPass::applyModelMatrix(params);
                     params.mVertexBuffer->setBuffer();
+                    ql_vulkan_stage_gl();  // Quasar: a debug view's draws stay GL's, after Vulkan's
                     params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
                 }
             }
@@ -416,6 +424,7 @@ inline void Draw(LLDrawInfo* draw, U32 mask)
 {
     draw->mVertexBuffer->setBuffer();
     LLRenderPass::applyModelMatrix(*draw);
+    ql_vulkan_stage_gl();  // Quasar: a debug view's draws stay GL's, after Vulkan's
     draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
 }
 
@@ -528,7 +537,10 @@ void LLDrawPoolAlpha::drawEmissive(LLDrawInfo* draw)
 {
     LLGLSLShader::sCurBoundShaderPtr->uniform1f(LLShaderMgr::EMISSIVE_BRIGHTNESS, 1.f);
     draw->mVertexBuffer->setBuffer();
-    draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+    if (!ql_vulkan_draw_now(draw->mVertexBuffer, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset))
+    {
+        draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+    }
 }
 
 
@@ -556,7 +568,10 @@ void LLDrawPoolAlpha::renderPbrEmissives(std::vector<LLDrawInfo*>& emissives)
         draw->mGLTFMaterial->bind(draw->mTexture);
         setup_texture_matrix(*draw);
         draw->mVertexBuffer->setBuffer();
-        draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+        if (!ql_vulkan_draw_now(draw->mVertexBuffer, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset))
+        {
+            draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+        }
         teardown_texture_matrix(*draw);
     }
 }
@@ -605,7 +620,10 @@ void LLDrawPoolAlpha::renderRiggedPbrEmissives(std::vector<LLDrawInfo*>& emissiv
         draw->mGLTFMaterial->bind(draw->mTexture);
         setup_texture_matrix(*draw);
         draw->mVertexBuffer->setBuffer();
-        draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+        if (!ql_vulkan_draw_now(draw->mVertexBuffer, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset))
+        {
+            draw->mVertexBuffer->drawRange(LLRender::TRIANGLES, draw->mStart, draw->mEnd, draw->mCount, draw->mOffset);
+        }
         teardown_texture_matrix(*draw);
     }
 }
@@ -863,7 +881,13 @@ void LLDrawPoolAlpha::renderAlpha(U32 mask, bool depth_only, bool rigged)
                     }
 
                     params.mVertexBuffer->setBuffer();
-                    params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount, params.mOffset);
+                    // Quasar: Vulkan's where the stage's run takes it (QuasarVulkanLighting).
+                    if (!ql_vulkan_draw_now(params.mVertexBuffer, params.mStart, params.mEnd, params.mCount,
+                                            params.mOffset))
+                    {
+                        params.mVertexBuffer->drawRange(LLRender::TRIANGLES, params.mStart, params.mEnd, params.mCount,
+                                                        params.mOffset);
+                    }
                     stop_glerror();
 
                     if (reset_minimum_alpha)

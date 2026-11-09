@@ -623,6 +623,17 @@ public:
     // Lets a hot path cache a resolved name and revalidate it with one compare.
     U32 getSamplerGeneration() const { return mSamplerCache.getGeneration(); }
 
+    // Quasar: the blend GL draws with now, as GL's enums (QuasarVulkanLighting: Vulkan's copies of GL's draws).
+    void qlBlendState(U32& src, U32& dst, U32& src_alpha, U32& dst_alpha, U32& eq_rgb, U32& eq_alpha) const;
+    U32  qlViewport(S32 (&viewport)[4]) const
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            viewport[i] = mViewport[i];
+        }
+        return 4;
+    }
+
     // Quasar: the description of a sampler object this context's cache made (ALSamplerCache::describe).
     bool describeSampler(U32 name, ALSamplerDesc& out) const { return mSamplerCache.describe(name, out); }
 

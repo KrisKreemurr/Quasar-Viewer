@@ -415,6 +415,15 @@ public:
         unsigned    compare_func = 0;  // 0 none, else GL's (GL_GEQUAL...)
         bool        srgb_decode = false;
     };
+    struct GpMesh
+    {
+        unsigned long long stamp = 0;          // 0: no mesh (positions above, or none)
+        unsigned           vertex_buffer = 0, index_buffer = 0;
+        unsigned           vertex_count = 0, total_indices = 0;
+        unsigned           position = ~0u, normal = ~0u, texcoord0 = ~0u, texcoord1 = ~0u, texcoord2 = ~0u;
+        unsigned           color = ~0u, tangent = ~0u, weight4 = ~0u;
+        unsigned           first_index = 0, index_count = 0;
+    };
     struct GpDraw
     {
         int               program = -1;
@@ -437,16 +446,27 @@ public:
         // GL's state for it: blending off, additive (ONE, ONE) or alpha (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, as BT_ALPHA),
         // the depth test (GL's function; 0 off) and writes, the depth bounds test (where bounds_max > bounds_min) and
         // back-face culling.
-        unsigned          blend = 0;  // 0 none, 1 add, 2 alpha
+        unsigned          blend = 0;  // 0 none, 1 add, 2 alpha, 3 GL's factors below
+        unsigned          blend_src = 0, blend_dst = 0, blend_src_alpha = 0, blend_dst_alpha = 0;  // blend 3's
+        unsigned          blend_eq = 0x8006, blend_eq_alpha = 0x8006;  // GL_FUNC_ADD; GL_MIN, GL_MAX too
+        int               viewport[4] = {};  // GL's (x, y from the bottom, width, height); width 0: the whole target
+        unsigned          color_mask = 0xF;  // RGBA bits, every colour attachment
         unsigned          depth_func = 0;
         bool              depth_write = false;
         float             bounds_min = 0.f, bounds_max = 0.f;
         bool              cull_back = false;
+        bool              cull_front = false;
         // Its vertices: positions alone, three floats each (the "position" attribute), GL's topology (GL_TRIANGLES,
-        // GL_TRIANGLE_STRIP or GL_TRIANGLE_FAN).
+        // GL_TRIANGLE_STRIP or GL_TRIANGLE_FAN), drawn `instances` times. Or none (the program places its vertices
+        // from gl_VertexID, as the water's field does): vertex_count of them with no positions.
         const float*      positions = nullptr;
         unsigned          vertex_count = 0;
         unsigned          topology = 0x0004;  // GL_TRIANGLES
+        unsigned          instances = 1;
+        // Or a GL vertex buffer's (LLVertexBuffer: GL's buffer names, each attribute's offset in it, ~0u where it has
+        // none), copied once into the G-buffer's arena under its content stamp and drawn indexed (16-bit indices):
+        // index_count indices from first_index, as GL's drawRange.
+        GpMesh            mesh;
     };
 
     /// A run of such draws, handed over as G-buffer draws are: glPassBegin, glDraw each (false: that draw is GL's, and

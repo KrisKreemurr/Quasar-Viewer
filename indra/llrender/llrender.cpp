@@ -2106,6 +2106,16 @@ void LLRender::setStencilMask(U32 mask)
     }
 }
 
+void LLRender::qlBlendState(U32& src, U32& dst, U32& src_alpha, U32& dst_alpha, U32& eq_rgb, U32& eq_alpha) const
+{
+    src       = sGLBlendFactor[mCurrBlendColorSFactor];
+    dst       = sGLBlendFactor[mCurrBlendColorDFactor];
+    src_alpha = sGLBlendFactor[mCurrBlendAlphaSFactor];
+    dst_alpha = sGLBlendFactor[mCurrBlendAlphaDFactor];
+    eq_rgb    = mBlendEquationRGB;
+    eq_alpha  = mBlendEquationAlpha;
+}
+
 void LLRender::setBlendEquation(U32 rgb, U32 alpha)
 {
     if (mBlendEquationRGB != rgb || mBlendEquationAlpha != alpha)

@@ -766,7 +766,10 @@ namespace
         size_t mOffset = 0;
         size_t mBytes = 0;
         bool   mShadow = false;
+        const U8* mScratch = nullptr;  // a scratch ring slice's bytes (scratchBindRange), in place of mBuffer's
     };
+    // The scratch ring's bytes where it is not mapped (its orphaning fallback), kept as written (sQLMirror).
+    std::vector<U8> sQLScratchShadow;
     constexpr U32 QL_BINDINGS = 32;
     QLBinding sQLBindings[QL_BINDINGS];
 }
@@ -796,11 +799,21 @@ void ALUniformBuffer::qlForget() const
 // static
 bool ALUniformBuffer::qlBound(U32 binding, const U8*& data, size_t& bytes)
 {
-    if (binding >= QL_BINDINGS || !sQLBindings[binding].mBuffer)
+    if (binding >= QL_BINDINGS)
     {
         return false;
     }
     const QLBinding& b = sQLBindings[binding];
+    if (b.mScratch)
+    {
+        data  = b.mScratch;
+        bytes = b.mBytes;
+        return bytes != 0;
+    }
+    if (!b.mBuffer)
+    {
+        return false;
+    }
     const std::vector<U8>& store = b.mShadow ? b.mBuffer->mShadow : b.mBuffer->mQLCopy;
     if (b.mOffset >= store.size())
     {
@@ -1493,6 +1506,14 @@ S64 ALUniformBuffer::scratchWrite(const void* data, size_t bytes, size_t reserve
 
     // Fresh, never-in-flight region: unsynchronized map skips the GPU sync.
     buffer_write_unsync(sScratchOrphan, (GLintptr)sScratchHead, (GLsizeiptr)bytes, data);
+    if (sQLMirror)
+    {
+        if (sQLScratchShadow.size() < SCRATCH_BYTES)
+        {
+            sQLScratchShadow.resize(SCRATCH_BYTES);
+        }
+        memcpy(sQLScratchShadow.data() + sScratchHead, data, bytes);
+    }
 
     const S64 offset = (S64)sScratchHead;
     sScratchHead += aligned;
@@ -1529,6 +1550,18 @@ void ALUniformBuffer::scratchBindRange(U32 binding, S64 offset, size_t bytes)
         return;
     }
     glBindBufferRange(GL_UNIFORM_BUFFER, binding, name, (GLintptr)offset, (GLsizeiptr)bytes);
+    if (sQLMirror && binding < QL_BINDINGS)
+    {
+        // The slice's bytes as written: the mapped ring's own, or the fallback's shadow.
+        const U8* ring = sScratchRing.getMapped();
+        const U8* base = ring ? ring : (sQLScratchShadow.empty() ? nullptr : sQLScratchShadow.data());
+        if (base)
+        {
+            sQLBindings[binding] = QLBinding();
+            sQLBindings[binding].mScratch = base + offset;
+            sQLBindings[binding].mBytes   = bytes;
+        }
+    }
     sScratchBoundBinding = binding;
     sScratchBoundOffset  = offset;
     sScratchBoundBytes   = bytes;

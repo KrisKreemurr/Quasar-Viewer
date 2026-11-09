@@ -62,6 +62,12 @@ public:
     // static -- the ambient func was issued under the old translation.
     static void rebase();
 
+    // Quasar: the tracked depth state (QuasarVulkanLighting's copies of GL's draws): the test, its function as GL
+    // tests with it (remapped), the writes.
+    static bool   qlEnabled() { return sDepthEnabled == GL_TRUE; }
+    static GLenum qlFunc() { return remap(sDepthFunc); }
+    static bool   qlWrites() { return sWriteEnabled == GL_TRUE; }
+
     GLboolean mPrevDepthEnabled;
     GLenum mPrevDepthFunc;
     GLboolean mPrevWriteEnabled;

@@ -380,6 +380,12 @@ public:
     // Record a cap set with a raw glEnable/glDisable, so a scoped state does not take it for
     // GL's default. The map describes the main context; call on the main thread only.
     static void seedState(LLGLenum state, LLGLboolean enabled) { sStateMap[state] = enabled; }
+    // Quasar: whether a cap is on as the map has it (QuasarVulkanLighting's copies of GL's draws).
+    static bool qlEnabled(LLGLenum state)
+    {
+        const auto found = sStateMap.find(state);
+        return found != sStateMap.end() && found->second == GL_TRUE;
+    }
 
     static void resetTextureStates();
     static void dumpStates();

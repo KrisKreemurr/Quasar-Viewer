@@ -555,6 +555,17 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         {
             program.mQLWanted = ql_lighting;
         }
+        // The alpha pools' (their rigged and water corners follow their bases).
+        for (LLGLSLShader* program : { &gDeferredAlphaProgram, &gDeferredFullbrightAlphaMaskAlphaProgram,
+                                       &gDeferredFullbrightAlphaMaskProgram, &gDeferredEmissiveProgram, &gPBRGlowProgram,
+                                       &gDeferredPBRAlphaProgram })
+        {
+            program->mQLWanted = ql_lighting;
+        }
+        for (LLGLSLShader& program : gDeferredMaterialProgram)
+        {
+            program.mQLWanted = ql_lighting;
+        }
     }
 
     ALUniformBuffer::sUpdateMode = ALUniformBuffer::clampUpdateMode(gSavedSettings.getS32("AlchemyRenderUBOUpdateMode"));
