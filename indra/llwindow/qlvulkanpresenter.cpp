@@ -2828,6 +2828,7 @@ struct QLVulkanPresenter::Impl
         U32            width = 0, height = 0, levels = 0;
         U32            layers = 1;     // a cube map array's faces (six a cube); 1 otherwise
         bool           cube = false;   // a cube map array (the probes')
+        bool           mutable_format = false;  // made viewable as its linear twin (gpLinearTwin)
         S32            block = -1;  // a fetched texture's block (mTexBlocks), its place and size there
         VkDeviceSize   offset = 0, size = 0;
         U64            counted = 0;  // what the texture budget counts it as
@@ -3759,6 +3760,19 @@ struct QLVulkanPresenter::Impl
         std::map<VkDeviceSize, VkDeviceSize> free;  // offset to size
         VkDeviceSize   used = 0;
     };
+    // An sRGB format's linear twin (the same bits read without decoding); UNDEFINED for a format with none.
+    static VkFormat gpLinearTwin(VkFormat format)
+    {
+        switch (format)
+        {
+            case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+            case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+            case VK_FORMAT_BC2_SRGB_BLOCK: return VK_FORMAT_BC2_UNORM_BLOCK;
+            case VK_FORMAT_BC3_SRGB_BLOCK: return VK_FORMAT_BC3_UNORM_BLOCK;
+            default: return VK_FORMAT_UNDEFINED;
+        }
+    }
+
     struct TexFormat
     {
         GLenum   gl;
@@ -4022,12 +4036,17 @@ struct QLVulkanPresenter::Impl
         ext.width  = (U32)width;
         ext.height = (U32)height;
         ext.levels = (U32)levels;
+        ext.mutable_format = gpLinearTwin(TEX_FORMATS[index].vk) != VK_FORMAT_UNDEFINED;
         VkExternalMemoryImageCreateInfo external = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
         external.handleTypes = handle_type;
         VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         info.pNext         = &external;
         info.imageType     = VK_IMAGE_TYPE_2D;
         info.format        = TEX_FORMATS[index].vk;
+        // An sRGB texture may be viewed as its linear twin: GL's programs read some without decoding (the sky's
+        // moon, QuasarVulkanLighting), which Vulkan does through a view of the UNORM format.
+        info.flags         = gpLinearTwin(TEX_FORMATS[index].vk) != VK_FORMAT_UNDEFINED ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT
+                                                                                    : 0;
         info.extent        = { (U32)width, (U32)height, 1 };
         info.mipLevels     = (U32)levels;
         info.arrayLayers   = 1;
@@ -8405,6 +8424,7 @@ struct QLVulkanPresenter::Impl
         GLuint             name = 0;
         VkImage            image = VK_NULL_HANDLE;
         VkImageAspectFlags aspect = 0;
+        VkFormat           format = VK_FORMAT_UNDEFINED;  // the view's (a linear twin where read undecoded)
         VkImageView        view = VK_NULL_HANDLE;
     };
     std::vector<GpView> mGpViews;
@@ -9222,10 +9242,13 @@ struct QLVulkanPresenter::Impl
     }
 
     // A sampled view of a GL texture in Vulkan's memory (a depth texture's depth alone); null where it is not there.
-    VkImageView gpView(GLuint name, VkImage& image, VkFormat& format, bool& is_depth, bool* is_cube = nullptr)
+    // linear: an sRGB texture read without decoding, through its linear twin's view (null where it was not made so).
+    VkImageView gpView(GLuint name, VkImage& image, VkFormat& format, bool& is_depth, bool* is_cube = nullptr,
+                       bool linear = false)
     {
         U32 levels = 1, layers = 1;
         bool cube = false;
+        bool mutable_format = false;
         {
             std::lock_guard<std::mutex> lock(mExtMutex);
             const auto found = mExtTextures.find(name);
@@ -9238,6 +9261,16 @@ struct QLVulkanPresenter::Impl
             levels = llmax(1u, found->second.levels);
             layers = llmax(1u, found->second.layers);
             cube   = found->second.cube;
+            mutable_format = found->second.mutable_format;
+        }
+        if (linear)
+        {
+            const VkFormat twin = gpLinearTwin(format);
+            if (twin == VK_FORMAT_UNDEFINED || !mutable_format)
+            {
+                return VK_NULL_HANDLE;
+            }
+            format = twin;
         }
         if (is_cube)
         {
@@ -9249,7 +9282,7 @@ struct QLVulkanPresenter::Impl
         const VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
         for (GpView& v : mGpViews)
         {
-            if (v.name == name && v.aspect == aspect)
+            if (v.name == name && v.aspect == aspect && v.format == format)
             {
                 if (v.image == image)
                 {
@@ -9276,6 +9309,7 @@ struct QLVulkanPresenter::Impl
         v.name   = name;
         v.image  = image;
         v.aspect = aspect;
+        v.format = format;
         VkImageViewCreateInfo view_info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         view_info.image            = image;
         view_info.viewType         = view_type;
@@ -9710,6 +9744,18 @@ struct QLVulkanPresenter::Impl
                         VkFormat format = VK_FORMAT_UNDEFINED;
                         bool cube = false;
                         view = gpView(tex->texture, image, format, is_depth, &cube);
+                        if (view && gpLinearTwin(format) != VK_FORMAT_UNDEFINED && !tex->srgb_decode)
+                        {
+                            // Read without decoding, as GL's sampler says (GL_SKIP_DECODE_EXT): its linear twin.
+                            view = gpView(tex->texture, image, format, is_depth, &cube, true);
+                            if (!view)
+                            {
+                                give_back();
+                                gpWhy(p.name + ": " + element + " is sRGB, read without decoding, and was made before it "
+                                               "could be viewed so");
+                                return false;
+                            }
+                        }
                         if (view && (cube != wants_cube || (wants_depth && !is_depth)))
                         {
                             give_back();
@@ -9724,13 +9770,7 @@ struct QLVulkanPresenter::Impl
                                            element.c_str(), tex->texture));
                             return false;
                         }
-                        const bool srgb = format == VK_FORMAT_R8G8B8A8_SRGB;
-                        if (srgb && !tex->srgb_decode)
-                        {
-                            give_back();
-                            gpWhy(p.name + ": " + element + " is sRGB, read without decoding (not yet in Vulkan)");
-                            return false;
-                        }
+
                     }
                     const VkSampler sampler = gpSampler(*tex);
                     if (!sampler)
