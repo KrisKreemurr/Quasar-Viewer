@@ -27,10 +27,13 @@
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace ql_glsl
 {
@@ -83,6 +86,185 @@ namespace
     bool isImageType(uint32_t t) { return t >= 0x904C && t <= 0x906C; }
     bool isTexelBufferType(uint32_t t) { return t == 0x8DC2 || t == 0x8DD0 || t == 0x8DD8; }
     bool isMatrixType(uint32_t t) { return (t >= 0x8B5A && t <= 0x8B5C) || (t >= 0x8B65 && t <= 0x8B6A); }
+
+    // ---- Varyings lined up by name, as GL links them -------------------------------------------------------------
+    // glslang's default IO mapping gives each stage's ins and outs locations in the order each stage declares them,
+    // not by name ("does not do proper cross-stage lining up"): a fragment stage that declares its inputs in another
+    // order than its vertex stage wrote them reads the wrong ones. Each stage's inputs are moved, in its SPIR-V, to the
+    // locations the stage before it gave the outputs of the same name.
+    struct InterfaceVar
+    {
+        uint32_t    id = 0;
+        bool        output = false;
+        std::string name;         // the variable's
+        std::string block;        // its block type's, for a block whose instance names differ between stages
+        size_t      location_word = 0;  // the Location decoration's literal in the words (0: none)
+        uint32_t    location = 0;
+        uint32_t    width = 1;    // the locations it takes (an array's elements, a matrix's columns): an estimate
+    };
+
+    std::string spvString(const std::vector<uint32_t>& spv, size_t at, size_t end)
+    {
+        std::string out;
+        for (size_t w = at; w < end; ++w)
+        {
+            for (int b = 0; b < 4; ++b)
+            {
+                const char c = (char)((spv[w] >> (8 * b)) & 0xFF);
+                if (!c)
+                {
+                    return out;
+                }
+                out += c;
+            }
+        }
+        return out;
+    }
+
+    std::vector<InterfaceVar> interfaceVars(const std::vector<uint32_t>& spv)
+    {
+        std::unordered_map<uint32_t, std::string> names;
+        std::unordered_map<uint32_t, uint32_t>    pointee, array_length_of, constants, columns;
+        std::unordered_map<uint32_t, uint32_t>    array_element;
+        std::unordered_map<uint32_t, std::pair<size_t, uint32_t>> locations;  // id -> (word, value)
+        std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> variables;  // id, (pointer type, storage)
+        for (size_t w = 5; w < spv.size();)
+        {
+            const uint32_t op = spv[w] & 0xFFFF;
+            const uint32_t n  = spv[w] >> 16;
+            if (n == 0 || w + n > spv.size())
+            {
+                break;
+            }
+            switch (op)
+            {
+                case 5:  // OpName
+                    names[spv[w + 1]] = spvString(spv, w + 2, w + n);
+                    break;
+                case 71:  // OpDecorate: target, decoration, literal
+                    if (n >= 4 && spv[w + 2] == 30)  // Location
+                    {
+                        locations[spv[w + 1]] = { w + 3, spv[w + 3] };
+                    }
+                    break;
+                case 43:  // OpConstant: type, id, value
+                    if (n >= 4)
+                    {
+                        constants[spv[w + 2]] = spv[w + 3];
+                    }
+                    break;
+                case 28:  // OpTypeArray: id, element, length (a constant)
+                    if (n >= 4)
+                    {
+                        array_element[spv[w + 1]]   = spv[w + 2];
+                        array_length_of[spv[w + 1]] = spv[w + 3];
+                    }
+                    break;
+                case 24:  // OpTypeMatrix: id, column type, count
+                    if (n >= 4)
+                    {
+                        columns[spv[w + 1]] = spv[w + 3];
+                    }
+                    break;
+                case 32:  // OpTypePointer: id, storage, type
+                    if (n >= 4)
+                    {
+                        pointee[spv[w + 1]] = spv[w + 3];
+                    }
+                    break;
+                case 59:  // OpVariable: type, id, storage
+                    if (n >= 4 && (spv[w + 3] == 1 || spv[w + 3] == 3))  // Input, Output
+                    {
+                        variables.push_back({ spv[w + 2], { spv[w + 1], spv[w + 3] } });
+                    }
+                    break;
+                default:
+                    break;
+            }
+            w += n;
+        }
+        std::vector<InterfaceVar> out;
+        for (const auto& [id, info] : variables)
+        {
+            const auto at = locations.find(id);
+            if (at == locations.end())
+            {
+                continue;  // a built-in
+            }
+            InterfaceVar v;
+            v.id            = id;
+            v.output        = info.second == 3;
+            v.name          = names.count(id) ? names[id] : std::string();
+            v.location_word = at->second.first;
+            v.location      = at->second.second;
+            uint32_t type   = pointee.count(info.first) ? pointee[info.first] : 0;
+            if (names.count(type))
+            {
+                v.block = names[type];
+            }
+            uint32_t width = 1;
+            while (array_element.count(type))
+            {
+                const uint32_t length = constants.count(array_length_of[type]) ? constants[array_length_of[type]] : 1;
+                width *= std::max(length, 1u);
+                type = array_element[type];
+            }
+            if (columns.count(type))
+            {
+                width *= columns[type];
+            }
+            v.width = width;
+            out.push_back(v);
+        }
+        return out;
+    }
+
+    // The consumer's inputs at the producer's outputs' locations, by name (or block type); the inputs the producer has
+    // no output for after every location it uses, where they meet nothing.
+    void lineUp(const std::vector<uint32_t>& producer, std::vector<uint32_t>& consumer, bool per_vertex_consumer)
+    {
+        (void)per_vertex_consumer;
+        std::unordered_map<std::string, uint32_t> by_name, by_block;
+        uint32_t next = 0;
+        for (const InterfaceVar& v : interfaceVars(producer))
+        {
+            if (!v.output)
+            {
+                continue;
+            }
+            if (!v.name.empty())
+            {
+                by_name[v.name] = v.location;
+            }
+            if (!v.block.empty())
+            {
+                by_block[v.block] = v.location;
+            }
+            next = std::max(next, v.location + v.width);
+        }
+        for (const InterfaceVar& v : interfaceVars(consumer))
+        {
+            if (v.output)
+            {
+                continue;
+            }
+            uint32_t location = 0;
+            if (!v.name.empty() && by_name.count(v.name))
+            {
+                location = by_name[v.name];
+            }
+            else if (!v.block.empty() && by_block.count(v.block))
+            {
+                location = by_block[v.block];
+            }
+            else
+            {
+                location = next;
+                next += v.width;
+            }
+            consumer[v.location_word] = location;
+        }
+    }
 }
 
 void initialize()
@@ -189,6 +371,23 @@ bool compile(const std::vector<Source>& sources, Program& out)
             {
                 out.local_size[i] = program.getLocalSize(i);
             }
+        }
+    }
+
+    // Each stage's inputs where the stage before it wrote them, by name, as GL links a program.
+    {
+        int previous = -1;
+        for (uint32_t st = 0; st < STAGE_COUNT; ++st)
+        {
+            if (st == STAGE_COMPUTE || out.spirv[st].empty())
+            {
+                continue;
+            }
+            if (previous >= 0)
+            {
+                lineUp(out.spirv[previous], out.spirv[st], st == STAGE_TESS_CONTROL || st == STAGE_TESS_EVALUATION);
+            }
+            previous = (int)st;
         }
     }
 

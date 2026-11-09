@@ -12701,6 +12701,47 @@ namespace
             ql_lighting_kept(shader.mName + ": no target");
             return false;
         }
+        // Programs GL keeps by name, to find which of Vulkan's draws goes wrong (QuasarVulkanKeepGL: comma-separated
+        // parts of program names, any case; "*" every one).
+        static LLCachedControl<std::string> keep_gl(gSavedSettings, "QuasarVulkanKeepGL", "");
+        if (!keep_gl().empty())
+        {
+            static std::string             parsed_from;
+            static std::vector<std::string> parts;
+            if (parsed_from != keep_gl())
+            {
+                parsed_from = keep_gl();
+                parts.clear();
+                std::string part;
+                for (char c : parsed_from + ",")
+                {
+                    if (c == ',')
+                    {
+                        LLStringUtil::trim(part);
+                        if (!part.empty())
+                        {
+                            LLStringUtil::toLower(part);
+                            parts.push_back(part);
+                        }
+                        part.clear();
+                    }
+                    else
+                    {
+                        part += c;
+                    }
+                }
+            }
+            std::string name = shader.mName;
+            LLStringUtil::toLower(name);
+            for (const std::string& part : parts)
+            {
+                if (part == "*" || name.find(part) != std::string::npos)
+                {
+                    ql_lighting_kept(shader.mName + ": kept by QuasarVulkanKeepGL");
+                    return false;
+                }
+            }
+        }
         const std::vector<LLGLSLShader::QLSource>& sources = shader.qlSources();
         static std::vector<QLVulkanPresenter::GpSource> gp_sources;
         gp_sources.clear();
