@@ -3100,8 +3100,9 @@ struct QLVulkanPresenter::Impl
 
     void extFree(ExtTexture& ext)
     {
-        // What Vulkan made to draw with it or into it goes first (the G-buffer draws, gbuffer*).
+        // What Vulkan made to draw with it or into it goes first (the G-buffer draws, gbuffer*; GL's programs, gp*).
         gbForget(ext);
+        gpForget(ext.image);
         if (ext.view) vkDestroyImageView(mDevice, ext.view, nullptr);
         if (ext.texSet && mGbTexPool) vkFreeDescriptorSets(mDevice, mGbTexPool, 1, &ext.texSet);
         ext.view = VK_NULL_HANDLE;
@@ -8355,6 +8356,7 @@ struct QLVulkanPresenter::Impl
         std::vector<GpPipe>   pipes;
     };
     std::vector<GpProgram> mGpPrograms;
+    std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
 
     static constexpr U32          GP_SLOTS = 4;
     static constexpr VkDeviceSize GP_SLOT_BYTES = 8ull << 20;  // a pass's blocks and vertices
@@ -8594,6 +8596,11 @@ struct QLVulkanPresenter::Impl
             destroyGpProgram(p);
         }
         mGpPrograms.clear();
+        for (GpProgram& p : mGpRetiredPrograms)
+        {
+            destroyGpProgram(p);
+        }
+        mGpRetiredPrograms.clear();
         for (GpTarget& t : mGpTargets)
         {
             destroyGpTarget(t);
@@ -8717,14 +8724,16 @@ struct QLVulkanPresenter::Impl
         {
             return mGpPrograms[index].ok ? index : -1;
         }
-        if (index >= 0 && mGpRecorded)
-        {
-            return -1;  // relinked while a pass that may name its pipelines is recorded: made again at the next
-        }
+
         if (index < 0)
         {
             index = (S32)mGpPrograms.size();
             mGpPrograms.emplace_back();
+        }
+        else if (mGpInPass)
+        {
+            // The pass being recorded may name the old pipelines: they go as the next pass begins, every slot done.
+            mGpRetiredPrograms.push_back(std::move(mGpPrograms[index]));
         }
         else
         {
@@ -8847,7 +8856,7 @@ struct QLVulkanPresenter::Impl
         }
         for (const ql_glsl::Attribute& a : p.refl.outputs)
         {
-            p.outputs = llmax(p.outputs, a.location + 1);
+            p.outputs = llmax(p.outputs, a.location + llmax(a.count, 1u));
         }
         p.ok = true;
         const double ms =
@@ -8900,11 +8909,28 @@ struct QLVulkanPresenter::Impl
         subpass.colorAttachmentCount    = t.colors;
         subpass.pColorAttachments       = color_refs;
         subpass.pDepthStencilAttachment = t.depth ? &depth_ref : nullptr;
+        // What the pass's commands before this render pass wrote (an earlier render pass on these attachments, or one
+        // whose output a draw here samples) done and visible before it loads, tests and writes them.
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass    = 0;
+        dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
         VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
         pass_info.attachmentCount = count;
         pass_info.pAttachments    = attachments;
         pass_info.subpassCount    = 1;
         pass_info.pSubpasses      = &subpass;
+        pass_info.dependencyCount = 1;
+        pass_info.pDependencies   = &dependency;
         VkRenderPass pass = VK_NULL_HANDLE;
         if (vkCreateRenderPass(mDevice, &pass_info, nullptr, &pass) != VK_SUCCESS)
         {
@@ -8944,7 +8970,7 @@ struct QLVulkanPresenter::Impl
             bool same = g.colors == d.color_count && g.depth == (d.depth != 0) && g.width == d.width && g.height == d.height;
             for (U32 i = 0; i < count && same; ++i)
             {
-                same = g.names[i] == names[i] && g.images[i] == images[i];
+                same = g.names[i] == names[i] && g.images[i] == images[i] && g.formats[i] == formats[i];
             }
             if (same)
             {
@@ -9354,6 +9380,60 @@ struct QLVulkanPresenter::Impl
         }
     }
 
+    // An image GL has let go of (extFree): the targets and views made of it go (another image may come to have its
+    // handle). During a pass, which may name them, it goes as the next begins.
+    std::vector<VkImage> mGpForgetLater;
+    void gpForget(VkImage image)
+    {
+        if (!image || !mDevice)
+        {
+            return;
+        }
+        if (mGpInPass)
+        {
+            mGpForgetLater.push_back(image);
+            return;
+        }
+        bool named = false;
+        for (const GpTarget& t : mGpTargets)
+        {
+            for (VkImage i : t.images)
+            {
+                named = named || i == image;
+            }
+        }
+        for (const GpView& v : mGpViews)
+        {
+            named = named || v.image == image;
+        }
+        if (!named)
+        {
+            return;
+        }
+        gpWaitSlots();
+        for (size_t t = 0; t < mGpTargets.size();)
+        {
+            const GpTarget& g = mGpTargets[t];
+            if (std::find(std::begin(g.images), std::end(g.images), image) != std::end(g.images))
+            {
+                destroyGpTarget(mGpTargets[t]);
+                mGpTargets.erase(mGpTargets.begin() + (std::ptrdiff_t)t);
+                continue;
+            }
+            ++t;
+        }
+        for (size_t v = 0; v < mGpViews.size();)
+        {
+            if (mGpViews[v].image == image)
+            {
+                if (mGpViews[v].view) vkDestroyImageView(mDevice, mGpViews[v].view, nullptr);
+                mGpViews.erase(mGpViews.begin() + (std::ptrdiff_t)v);
+                continue;
+            }
+            ++v;
+        }
+    }
+
     bool gpPassBegin()
     {
         if (!createGpObjects())
@@ -9365,7 +9445,16 @@ struct QLVulkanPresenter::Impl
             gpWhy("a pass began inside another");
             return false;
         }
-        if (!mGpRetired.empty())
+        if (!mGpForgetLater.empty())
+        {
+            const std::vector<VkImage> later = std::move(mGpForgetLater);
+            mGpForgetLater.clear();
+            for (VkImage image : later)
+            {
+                gpForget(image);
+            }
+        }
+        if (!mGpRetired.empty() || !mGpRetiredPrograms.empty())
         {
             gpWaitSlots();
             for (VkImageView view : mGpRetired)
@@ -9373,6 +9462,11 @@ struct QLVulkanPresenter::Impl
                 if (view) vkDestroyImageView(mDevice, view, nullptr);
             }
             mGpRetired.clear();
+            for (GpProgram& old : mGpRetiredPrograms)
+            {
+                destroyGpProgram(old);
+            }
+            mGpRetiredPrograms.clear();
         }
         GpSlot& slot = mGpSlots[mGpNextSlot];
         if (slot.submitted)
@@ -9436,10 +9530,11 @@ struct QLVulkanPresenter::Impl
     // A GL name's image taken from GL's queue the first time the pass touches it (outside a render pass).
     void gpAcquire(GLuint name, VkImage image, VkImageAspectFlags aspect, bool attachment)
     {
-        for (const GpAcquired& a : mGpAcquired)
+        for (GpAcquired& a : mGpAcquired)
         {
             if (a.image == image)
             {
+                a.attachment = a.attachment || attachment;  // its release makes its attachment writes available
                 return;
             }
         }
@@ -9486,6 +9581,17 @@ struct QLVulkanPresenter::Impl
         if (p.outputs > d.color_count)
         {
             gpWhy(llformat("%s writes %u colours into a target of %u", p.name.c_str(), p.outputs, d.color_count));
+            return false;
+        }
+        if (d.bounds_max > d.bounds_min && (!mHasDepthBounds || !d.depth))
+        {
+            gpWhy(p.name + ": held to depth bounds, which this device or target has not");
+            return false;
+        }
+        // The default textures, made again if the G-buffer's failure took them (destroyGbObjects).
+        if ((!mGbWhite.view || !mGbBlack.view) && !createGbDefaults())
+        {
+            gpWhy("its default textures could not be made");
             return false;
         }
         const S32 target_index = gpTarget(d);
@@ -9580,10 +9686,13 @@ struct QLVulkanPresenter::Impl
                     // GL_SAMPLER_CUBE_MAP_ARRAY (and its shadow, int and uint kinds) read a cube array; every other
                     // sampler here a 2D texture.
                     const bool wants_cube = r.gl_type >= 0x900C && r.gl_type <= 0x900F;
-                    if (wants_cube && (tex->texture == 0 || tex->texture == d.white_texture))
+                    // GL's shadow samplers (2D, 2D array, cube, cube array) compare against a depth texture.
+                    const bool wants_depth = r.gl_type == 0x8B62 || r.gl_type == 0x8DC4 || r.gl_type == 0x8DC5 ||
+                                             r.gl_type == 0x900D;
+                    if ((wants_cube || wants_depth) && (tex->texture == 0 || tex->texture == d.white_texture))
                     {
                         give_back();
-                        gpWhy(p.name + ": " + element + " has no cube array bound");
+                        gpWhy(p.name + ": " + element + " has nothing of its kind bound");
                         return false;
                     }
                     if (tex->texture == 0)
@@ -9601,7 +9710,7 @@ struct QLVulkanPresenter::Impl
                         VkFormat format = VK_FORMAT_UNDEFINED;
                         bool cube = false;
                         view = gpView(tex->texture, image, format, is_depth, &cube);
-                        if (view && cube != wants_cube)
+                        if (view && (cube != wants_cube || (wants_depth && !is_depth)))
                         {
                             give_back();
                             gpWhy(llformat("%s: %s (GL name %u) is not the kind of texture it reads", p.name.c_str(),
@@ -9871,8 +9980,19 @@ struct QLVulkanPresenter::Impl
         }
         if (result != VK_SUCCESS)
         {
-            // GL signalled, which nothing will wait for: the semaphore is left signalled, so the pass is given up for
-            // good rather than risk the next wait.
+            // GL signalled and gave its images up: an empty batch takes the signal and gives one back, which GL waits
+            // for, so GL has its images again (Vulkan never took them). The draws are lost this once, and the runner
+            // is given up for good: GL draws the lighting from now on.
+            VkSubmitInfo hand_back = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            hand_back.waitSemaphoreCount   = 1;
+            hand_back.pWaitSemaphores      = &mGpGLDoneVK;
+            hand_back.pWaitDstStageMask    = &wait_stage;
+            hand_back.signalSemaphoreCount = 1;
+            hand_back.pSignalSemaphores    = &mGpVKDoneVK;
+            if (vkQueueSubmit(mQueue, 1, &hand_back, VK_NULL_HANDLE) == VK_SUCCESS)
+            {
+                gl.WaitSemaphoreEXT(mGpVKDoneGL, 0, nullptr, (GLuint)mGpNames.size(), mGpNames.data(), layouts.data());
+            }
             mGpReady = false;
             mGpNote  = llformat("stopped: a pass could not be submitted (VkResult %d)", (S32)result);
             LL_WARNS("Vulkan") << "GL programs in Vulkan " << mGpNote << LL_ENDL;

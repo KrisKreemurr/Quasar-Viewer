@@ -821,6 +821,7 @@ ALUniformBuffer::ALUniformBuffer(ALUniformBuffer&& other) noexcept
     : mName(other.mName)
     , mSize(other.mSize)
     , mShadow(std::move(other.mShadow))
+    , mQLCopy(std::move(other.mQLCopy))
     , mDirty(other.mDirty)
     , mRingOffset(other.mRingOffset)
     , mRingGeneration(other.mRingGeneration)
@@ -845,6 +846,7 @@ ALUniformBuffer& ALUniformBuffer::operator=(ALUniformBuffer&& other) noexcept
         mName = other.mName;
         mSize = other.mSize;
         mShadow = std::move(other.mShadow);
+        mQLCopy = std::move(other.mQLCopy);
         mDirty = other.mDirty;
         mRingOffset = other.mRingOffset;
         mRingGeneration = other.mRingGeneration;

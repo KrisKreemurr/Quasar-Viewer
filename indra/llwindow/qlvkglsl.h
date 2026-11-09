@@ -95,6 +95,7 @@ namespace ql_glsl
         std::string name;
         uint32_t    location = 0;
         uint32_t    gl_type = 0;
+        uint32_t    count = 1;  // an array's size: its elements take the locations from `location` on
     };
 
     struct Program

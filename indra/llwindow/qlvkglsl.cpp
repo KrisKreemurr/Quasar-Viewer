@@ -263,7 +263,7 @@ bool compile(const std::vector<Source>& sources, Program& out)
         {
             continue;
         }
-        out.inputs.push_back({ a.name, a.layoutLocation(), (uint32_t)a.glDefineType });
+        out.inputs.push_back({ a.name, a.layoutLocation(), (uint32_t)a.glDefineType, a.size > 0 ? (uint32_t)a.size : 1u });
     }
     for (int i = 0; i < program.getNumPipeOutputs(); ++i)
     {
@@ -272,7 +272,8 @@ bool compile(const std::vector<Source>& sources, Program& out)
         {
             continue;
         }
-        out.outputs.push_back({ stripIndex(a.name), a.layoutLocation(), (uint32_t)a.glDefineType });
+        out.outputs.push_back({ stripIndex(a.name), a.layoutLocation(), (uint32_t)a.glDefineType,
+                                a.size > 0 ? (uint32_t)a.size : 1u });
     }
     return true;
 }
