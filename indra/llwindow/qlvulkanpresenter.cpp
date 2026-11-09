@@ -9708,11 +9708,12 @@ struct QLVulkanPresenter::Impl
                             tex = &d.textures[i];
                         }
                     }
+                    // A sampler GL has no unit for: GL's compiler found the program never reads it (Vulkan's, which
+                    // does not optimize, keeps it). Nothing reads it here either: an empty unit's black stands in.
+                    static const QLVulkanPresenter::GpTexture unread = {};
                     if (!tex)
                     {
-                        give_back();
-                        gpWhy(p.name + ": no texture for " + element);
-                        return false;
+                        tex = &unread;
                     }
                     VkImageView view = VK_NULL_HANDLE;
                     VkImage image = VK_NULL_HANDLE;
