@@ -753,6 +753,7 @@ void LLPresetsManager::getLooksControlNames(std::vector<std::string>& names)
         "QuasarPS1Lines",
         "QuasarPS1ColorBits",
         "QuasarPS1Dither",
+        "QuasarPS1Double",
     };
     names = looks_controls;
 }

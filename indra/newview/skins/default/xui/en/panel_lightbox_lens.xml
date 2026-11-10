@@ -3132,7 +3132,7 @@ wired.)
 		<accordion_tab
 		 expanded="false"
 		 layout="topleft"
-		 height="167"
+		 height="191"
 		 name="atab_sec_ps1"
 		 title="PS1 Look"
 		 header_tool_tip="The frame as a PlayStation drew it: a low resolution, colour cut to a few bits a channel, and the console's dither pattern of dots and crosses over every gradient."
@@ -3140,7 +3140,7 @@ wired.)
 			<panel
 			 follows="all"
 			 layout="topleft"
-			 height="138"
+			 height="162"
 			 left="0"
 			 top="0"
 			 right="-1"
@@ -3155,6 +3155,17 @@ wired.)
 				 name="ps1_enabled"
 				 tool_tip="Draws the frame as a PlayStation did: low resolution, few colours, ordered dither"
 				 control_name="QuasarPS1Filter" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 height="16"
+				 label="2x resolution"
+				 name="ps1_double"
+				 tool_tip="Twice the lines, as an emulator's 2x resolution: still pixelated, with more detail; the dither pattern keeps the console's size"
+				 enabled_control="QuasarPS1Filter"
+				 control_name="QuasarPS1Double" />
 				<setting_row
 				 follows="left|top|right"
 				 layout="topleft"

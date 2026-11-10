@@ -61,6 +61,7 @@ uniform float     uRefWipePos;      // Seam position, 0..1 across the frame.
 uniform int       uPS1Lines;        // The lines the picture is drawn at, top to bottom.
 uniform int       uPS1Bits;         // Bits a colour channel keeps.
 uniform int       uPS1Dither;       // The dither pattern's strength, in hundredths.
+uniform int       uPS1Scale;        // 1, or 2 for twice the lines: finer pixels, the dither kept at the console's size.
 
 // =============================================================================
 // Forward Declarations
@@ -212,7 +213,7 @@ vec3 applyWipeSeam(vec3 color, vec2 uv)
 vec2 ps1Snap(vec2 uv, out ivec2 cell)
 {
     vec2  size  = vec2(textureSize(diffuseRect, 0));
-    float lines = float(uPS1Lines);
+    float lines = float(uPS1Lines * max(uPS1Scale, 1));
     vec2  grid  = vec2(max(1.0, floor(lines * size.x / size.y + 0.5)), lines);
     vec2  c     = floor(uv * grid);
     cell = ivec2(c);
@@ -228,9 +229,13 @@ vec3 ps1Quantize(vec3 color, ivec2 cell)
                                             3.0, -1.0,  2.0, -2.0);
     // GL's rows run bottom up: the cell's row counted from the top, so the
     // pattern is the console's way up.
+    // At twice the lines, each console pixel is two by two of the finer ones, and the
+    // dither keeps the console pixel's size, as an emulator's scaled dithering does.
+    int   scale = max(uPS1Scale, 1);
+    ivec2 base  = cell / scale;
     int   lines = max(uPS1Lines, 1);
-    int   row   = (lines - 1 - cell.y) & 3;
-    float d     = ps1_dither[row * 4 + (cell.x & 3)];
+    int   row   = (lines - 1 - base.y) & 3;
+    float d     = ps1_dither[row * 4 + (base.x & 3)];
 
     int   bits   = clamp(uPS1Bits, 1, 8);
     float levels = exp2(float(bits));      // 32 for 5 bits

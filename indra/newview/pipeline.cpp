@@ -12143,6 +12143,8 @@ void LLPipeline::renderFinalize()
             static LLCachedControl<F32>  ps1_lines(gSavedSettings, "QuasarPS1Lines", 240.f);
             static LLCachedControl<F32>  ps1_bits(gSavedSettings, "QuasarPS1ColorBits", 5.f);
             static LLCachedControl<F32>  ps1_dither(gSavedSettings, "QuasarPS1Dither", 1.f);
+            static LLCachedControl<bool> ps1_double(gSavedSettings, "QuasarPS1Double", false);
+            static const LLStaticHashedString ps1_scale_name("uPS1Scale");
             static const LLStaticHashedString ps1_lines_name("uPS1Lines");
             static const LLStaticHashedString ps1_bits_name("uPS1Bits");
             static const LLStaticHashedString ps1_dither_name("uPS1Dither");
@@ -12150,6 +12152,7 @@ void LLPipeline::renderFinalize()
             blit.uniform1i(ps1_lines_name, ps1 ? llclamp(ll_round(ps1_lines()), 60, 2160) : 0);
             blit.uniform1i(ps1_bits_name, llclamp(ll_round(ps1_bits()), 1, 8));
             blit.uniform1i(ps1_dither_name, llclamp(ll_round(ps1_dither() * 100.f), 0, 400));
+            blit.uniform1i(ps1_scale_name, ps1_double ? 2 : 1);
         }
 
         // Film Grain

@@ -398,6 +398,17 @@
             <key>Value</key>
             <real>5</real>
         </map>
+        <key>QuasarPS1Double</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar PS1 look: twice the lines, as an emulator's 2x resolution: still pixelated, with more detail, the dither pattern kept at the console's own size.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
         <key>QuasarPS1Dither</key>
         <map>
             <key>Comment</key>
