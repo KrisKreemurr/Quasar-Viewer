@@ -13203,6 +13203,19 @@ namespace
         return sQLRunOpen;
     }
 
+    // While a run is open, the uniforms of the programs Vulkan draws are set for the mirror alone (QuasarVulkanSilentGL):
+    // GL is given them all at once (glProgramUniform) when the run goes, before GL's next draw.
+    void ql_silent_begin()
+    {
+        static LLCachedControl<bool> silent(gSavedSettings, "QuasarVulkanSilentGL", true);
+        LLGLSLShader::sQLSilent = silent() && on_main_thread();
+    }
+    void ql_silent_end()
+    {
+        LLGLSLShader::sQLSilent = false;
+        LLGLSLShader::qlReplayStale();
+    }
+
     // The run open, or a new one begun.
     bool ql_run_begin()
     {
@@ -13213,6 +13226,10 @@ namespace
             {
                 ql_lighting_kept(QLVulkanPresenter::glInfo());
             }
+            else
+            {
+                ql_silent_begin();
+            }
         }
         return sQLRunOpen;
     }
@@ -13221,6 +13238,7 @@ namespace
     // after it, where Vulkan cannot make it).
     void ql_run_hand_over()
     {
+        ql_silent_end();  // GL has every uniform before anything of its own
         if (!sQLRunOpen || sQLHandingOver)
         {
             return;
@@ -13259,6 +13277,7 @@ namespace
     void ql_run_carried()
     {
         sQLRunOpen = false;
+        ql_silent_end();
     }
 
     // llrender's call before GL's work on the GPU (qlglwork.h): the run handed over first, unless the work is the run's.

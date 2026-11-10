@@ -2773,6 +2773,17 @@
             <key>Value</key>
             <real>1</real>
         </map>
+        <key>QuasarVulkanSilentGL</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (with QuasarVulkanLighting): while Vulkan records GL's draws, the uniforms of the programs it draws are kept for Vulkan alone and given to GL only when GL next draws, rather than at every set. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanSceneStage</key>
         <map>
             <key>Comment</key>

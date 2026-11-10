@@ -623,8 +623,14 @@ public:
         U32         mWords = 0;       // its first word in qlWords
         mutable U8  mKind = 0;        // 0 float, 1 int, 2 uint: the setter's
         mutable bool mTranspose = false;
+        GLint       mLocation = -1;   // its first element's location
     };
     bool mQLWanted = false;
+    // Quasar (QuasarVulkanSilentGL): while sQLSilent, a setter whose uniform the mirror keeps writes the mirror alone
+    // and marks it stale; qlReplayStale gives GL every stale uniform of every program (glProgramUniform, from the
+    // mirror) before GL next draws (newview's hand-over of a Vulkan run).
+    static bool sQLSilent;
+    static void qlReplayStale();
     const std::vector<QLSource>& qlSources() const { return mQLSources; }
     const std::vector<QLRegion>& qlRegions() const { return mQLRegions; }
     const U32* qlWords() const { return mQLWords.data(); }
@@ -766,6 +772,11 @@ private:
     void qlNoteObject(GLuint object);
     void qlMapRegion(const std::string& name, GLenum type, GLint size, GLint location);
     void qlMirror(GLint location, U8 kind, U32 components, GLsizei count, const void* v, bool transpose = false) const;
+    bool qlSilence(GLint location) const;  // true: GL's call is skipped and its region left to qlReplayStale
+    void qlReplay() const;
+    void qlForgetStale() const;
+    mutable std::vector<U8> mQLStale;      // per region: GL has not been given what the mirror holds
+    mutable bool            mQLAnyStale = false;
     std::vector<QLSource>  mQLSources;
     std::vector<QLRegion>  mQLRegions;
     mutable std::vector<U32> mQLWords;

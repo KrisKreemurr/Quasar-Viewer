@@ -664,6 +664,7 @@ LLGLSLShader::LLGLSLShader()
 
 LLGLSLShader::~LLGLSLShader()
 {
+    qlForgetStale();
     // Leave the registry, which needs no GL context. unloadInternal() is the usual way out of
     // it, but a program can be destroyed without ever being unloaded -- and this one is about
     // to delete its children the same way -- so every pointer sInstances holds would otherwise
@@ -864,6 +865,7 @@ void LLGLSLShader::clearConfiguration()
 void LLGLSLShader::unloadInternal()
 {
     sInstances.erase(this);
+    qlForgetStale();
 
     // A bound program is unbound before it is deleted, so the bound-program statics never
     // name a dead program, or an owned variant freed right after this.
@@ -996,6 +998,7 @@ void LLGLSLShader::qlMapRegion(const std::string& name, GLenum type, GLint size,
     region.mElements   = (U32)llmax(size, 1);
     region.mComponents = components;
     region.mWords      = (U32)mQLWords.size();
+    region.mLocation   = location;
     mQLWords.resize(mQLWords.size() + (size_t)region.mElements * components, 0);
     const S32 index = (S32)mQLRegions.size();
     mQLRegions.push_back(region);
@@ -1016,6 +1019,122 @@ void LLGLSLShader::qlMapRegion(const std::string& name, GLenum type, GLint size,
     for (U32 e = 1; e < region.mElements; ++e)
     {
         note(glGetUniformLocation(mProgramObject, llformat("%s[%u]", name.c_str(), e).c_str()), e);
+    }
+}
+
+bool LLGLSLShader::sQLSilent = false;
+
+namespace
+{
+    std::vector<const LLGLSLShader*> sQLStalePrograms;  // those with a stale region, once each
+}
+
+bool LLGLSLShader::qlSilence(GLint location) const
+{
+    if (!sQLSilent || location < 0 || (size_t)location >= mQLLocations.size())
+    {
+        return false;
+    }
+    const S32 region = mQLLocations[location].mRegion;
+    if (region < 0 || mQLRegions[region].mLocation < 0)
+    {
+        return false;
+    }
+    if (mQLStale.size() != mQLRegions.size())
+    {
+        mQLStale.assign(mQLRegions.size(), 0);
+    }
+    mQLStale[region] = 1;
+    if (!mQLAnyStale)
+    {
+        mQLAnyStale = true;
+        sQLStalePrograms.push_back(this);
+    }
+    return true;
+}
+
+void LLGLSLShader::qlReplay() const
+{
+    mQLAnyStale = false;
+    if (!mProgramObject || mQLStale.size() != mQLRegions.size())
+    {
+        mQLStale.clear();
+        return;
+    }
+    for (size_t i = 0; i < mQLRegions.size(); ++i)
+    {
+        if (!mQLStale[i])
+        {
+            continue;
+        }
+        mQLStale[i] = 0;
+        const QLRegion& r = mQLRegions[i];
+        const GLuint p = mProgramObject;
+        const GLint loc = r.mLocation;
+        const GLsizei n = (GLsizei)r.mElements;
+        const U32* w = mQLWords.data() + r.mWords;
+        const GLfloat* f = reinterpret_cast<const GLfloat*>(w);
+        const GLint* iv = reinterpret_cast<const GLint*>(w);
+        const GLuint* uv = reinterpret_cast<const GLuint*>(w);
+        const GLboolean tr = r.mTranspose ? GL_TRUE : GL_FALSE;
+        switch (r.mType)
+        {
+            case GL_FLOAT_MAT2: glProgramUniformMatrix2fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT3: glProgramUniformMatrix3fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT4: glProgramUniformMatrix4fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT2x3: glProgramUniformMatrix2x3fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT3x2: glProgramUniformMatrix3x2fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT2x4: glProgramUniformMatrix2x4fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT4x2: glProgramUniformMatrix4x2fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT3x4: glProgramUniformMatrix3x4fv(p, loc, n, tr, f); continue;
+            case GL_FLOAT_MAT4x3: glProgramUniformMatrix4x3fv(p, loc, n, tr, f); continue;
+            default: break;
+        }
+        // Vectors and scalars as the setter wrote them: a float, int or uint kind (a bool takes any of them).
+        const U32 c = llclamp(r.mComponents, 1u, 4u);
+        if (r.mKind == 1)
+        {
+            c == 1 ? glProgramUniform1iv(p, loc, n, iv) : c == 2 ? glProgramUniform2iv(p, loc, n, iv)
+                   : c == 3 ? glProgramUniform3iv(p, loc, n, iv) : glProgramUniform4iv(p, loc, n, iv);
+        }
+        else if (r.mKind == 2)
+        {
+            c == 1 ? glProgramUniform1uiv(p, loc, n, uv) : c == 2 ? glProgramUniform2uiv(p, loc, n, uv)
+                   : c == 3 ? glProgramUniform3uiv(p, loc, n, uv) : glProgramUniform4uiv(p, loc, n, uv);
+        }
+        else
+        {
+            c == 1 ? glProgramUniform1fv(p, loc, n, f) : c == 2 ? glProgramUniform2fv(p, loc, n, f)
+                   : c == 3 ? glProgramUniform3fv(p, loc, n, f) : glProgramUniform4fv(p, loc, n, f);
+        }
+    }
+}
+
+// Off the stale list (unloaded, relinked or destroyed): its stale uniforms die with its program.
+void LLGLSLShader::qlForgetStale() const
+{
+    if (mQLAnyStale)
+    {
+        sQLStalePrograms.erase(std::remove(sQLStalePrograms.begin(), sQLStalePrograms.end(), this),
+                               sQLStalePrograms.end());
+        mQLAnyStale = false;
+    }
+    mQLStale.clear();
+}
+
+// static
+void LLGLSLShader::qlReplayStale()
+{
+    if (sQLStalePrograms.empty())
+    {
+        return;
+    }
+    // Copied first: a program unloaded since (its regions cleared) replays nothing.
+    std::vector<const LLGLSLShader*> programs;
+    programs.swap(sQLStalePrograms);
+    for (const LLGLSLShader* program : programs)
+    {
+        program->qlReplay();
     }
 }
 
@@ -2434,12 +2553,12 @@ void LLGLSLShader::uploadFloat(GLint location, GLfloat x) const
 #if LL_WINDOWS
     if (isBoolLocation(location))
     {
-        glUniform1i(location, bool_value(x));
+        if (!qlSilence(location)) glUniform1i(location, bool_value(x));
         { const GLint ql_v[1] = { bool_value(x) }; qlMirror(location, 1, 1, 1, ql_v); }
         return;
     }
 #endif
-    glUniform1f(location, x);
+    if (!qlSilence(location)) glUniform1f(location, x);
     { const GLfloat ql_v[1] = { x }; qlMirror(location, 0, 1, 1, ql_v); }
 }
 
@@ -2458,12 +2577,12 @@ void LLGLSLShader::uploadFloats(GLint location, U32 count, const GLfloat* v) con
             bools = heap_bools.data();
         }
         std::transform(v, v + count, bools, [](GLfloat x) { return bool_value(x); });
-        glUniform1iv(location, count, bools);
+        if (!qlSilence(location)) glUniform1iv(location, count, bools);
         qlMirror(location, 1, 1, count, bools);
         return;
     }
 #endif
-    glUniform1fv(location, count, v);
+    if (!qlSilence(location)) glUniform1fv(location, count, v);
     qlMirror(location, 0, 1, count, v);
 }
 
@@ -2472,12 +2591,12 @@ void LLGLSLShader::uploadUInt(GLint location, GLuint x) const
 #if LL_WINDOWS
     if (isBoolLocation(location))
     {
-        glUniform1i(location, bool_value(x));
+        if (!qlSilence(location)) glUniform1i(location, bool_value(x));
         { const GLint ql_v[1] = { bool_value(x) }; qlMirror(location, 1, 1, 1, ql_v); }
         return;
     }
 #endif
-    glUniform1ui(location, x);
+    if (!qlSilence(location)) glUniform1ui(location, x);
     { const GLuint ql_v[1] = { x }; qlMirror(location, 2, 1, 1, ql_v); }
 }
 
@@ -2497,7 +2616,7 @@ void LLGLSLShader::uniform1i(U32 index, GLint x)
         const GLint location = mUniform[index];
         if (location >= 0 && mUniformCache.changed(location, UniformCache::Kind::Int, uniform_bits(x)))
         {
-            glUniform1i(location, x);
+            if (!qlSilence(location)) glUniform1i(location, x);
             { const GLint ql_v[1] = { x }; qlMirror(location, 1, 1, 1, ql_v); }
         }
     }
@@ -2577,7 +2696,7 @@ void LLGLSLShader::uniform2f(U32 index, GLfloat x, GLfloat y)
         const GLint location = mUniform[index];
         if (location >= 0 && mUniformCache.changed(location, UniformCache::Kind::Vec2, uniform_bits(x), uniform_bits(y)))
         {
-            glUniform2f(location, x, y);
+            if (!qlSilence(location)) glUniform2f(location, x, y);
             { const GLfloat ql_v[2] = { x, y }; qlMirror(location, 0, 2, 1, ql_v); }
         }
     }
@@ -2601,7 +2720,7 @@ void LLGLSLShader::uniform3f(U32 index, GLfloat x, GLfloat y, GLfloat z)
         if (location >= 0
             && mUniformCache.changed(location, UniformCache::Kind::Vec3, uniform_bits(x), uniform_bits(y), uniform_bits(z)))
         {
-            glUniform3f(location, x, y, z);
+            if (!qlSilence(location)) glUniform3f(location, x, y, z);
             { const GLfloat ql_v[3] = { x, y, z }; qlMirror(location, 0, 3, 1, ql_v); }
         }
     }
@@ -2626,7 +2745,7 @@ void LLGLSLShader::uniform4f(U32 index, GLfloat x, GLfloat y, GLfloat z, GLfloat
             && mUniformCache.changed(location, UniformCache::Kind::Vec4,
                                      uniform_bits(x), uniform_bits(y), uniform_bits(z), uniform_bits(w)))
         {
-            glUniform4f(location, x, y, z, w);
+            if (!qlSilence(location)) glUniform4f(location, x, y, z, w);
             { const GLfloat ql_v[4] = { x, y, z, w }; qlMirror(location, 0, 4, 1, ql_v); }
         }
     }
@@ -2654,12 +2773,12 @@ void LLGLSLShader::uniform1iv(U32 index, U32 count, const GLint* v)
         if (count != 1)
         {
             mUniformCache.forget(location);
-            glUniform1iv(location, count, v);
+            if (!qlSilence(location)) glUniform1iv(location, count, v);
             qlMirror(location, 1, 1, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::Int, uniform_bits(v[0])))
         {
-            glUniform1iv(location, 1, v);
+            if (!qlSilence(location)) glUniform1iv(location, 1, v);
             qlMirror(location, 1, 1, 1, v);
         }
     }
@@ -2687,13 +2806,13 @@ void LLGLSLShader::uniform4iv(U32 index, U32 count, const GLint* v)
         if (count != 1)
         {
             mUniformCache.forget(location);
-            glUniform4iv(location, count, v);
+            if (!qlSilence(location)) glUniform4iv(location, count, v);
             qlMirror(location, 1, 4, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::IVec4,
                                        uniform_bits(v[0]), uniform_bits(v[1]), uniform_bits(v[2]), uniform_bits(v[3])))
         {
-            glUniform4iv(location, 1, v);
+            if (!qlSilence(location)) glUniform4iv(location, 1, v);
             qlMirror(location, 1, 4, 1, v);
         }
     }
@@ -2753,12 +2872,12 @@ void LLGLSLShader::uniform2fv(U32 index, U32 count, const GLfloat* v)
         if (count != 1)
         {
             mUniformCache.forget(location);
-            glUniform2fv(location, count, v);
+            if (!qlSilence(location)) glUniform2fv(location, count, v);
             qlMirror(location, 0, 2, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::Vec2, uniform_bits(v[0]), uniform_bits(v[1])))
         {
-            glUniform2fv(location, 1, v);
+            if (!qlSilence(location)) glUniform2fv(location, 1, v);
             qlMirror(location, 0, 2, 1, v);
         }
     }
@@ -2786,13 +2905,13 @@ void LLGLSLShader::uniform3fv(U32 index, U32 count, const GLfloat* v)
         if (count != 1)
         {
             mUniformCache.forget(location);
-            glUniform3fv(location, count, v);
+            if (!qlSilence(location)) glUniform3fv(location, count, v);
             qlMirror(location, 0, 3, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::Vec3,
                                        uniform_bits(v[0]), uniform_bits(v[1]), uniform_bits(v[2])))
         {
-            glUniform3fv(location, 1, v);
+            if (!qlSilence(location)) glUniform3fv(location, 1, v);
             qlMirror(location, 0, 3, 1, v);
         }
     }
@@ -2821,14 +2940,14 @@ void LLGLSLShader::uniform4fv(U32 index, U32 count, const GLfloat* v)
         {
             LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
             mUniformCache.forget(location);
-            glUniform4fv(location, count, v);
+            if (!qlSilence(location)) glUniform4fv(location, count, v);
             qlMirror(location, 0, 4, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::Vec4,
                                        uniform_bits(v[0]), uniform_bits(v[1]), uniform_bits(v[2]), uniform_bits(v[3])))
         {
             LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
-            glUniform4fv(location, 1, v);
+            if (!qlSilence(location)) glUniform4fv(location, 1, v);
             qlMirror(location, 0, 4, 1, v);
         }
     }
@@ -2843,7 +2962,7 @@ void LLGLSLShader::fastUniform4fv(U32 index, U32 count, const GLfloat* v)
     llassert(index < mUniform.size());
     llassert(mUniform[index] >= 0);
     const GLint location = mUniform[index];
-    glUniform4fv(location, count, v);
+    if (!qlSilence(location)) glUniform4fv(location, count, v);
     qlMirror(location, 0, 4, count, v);
     if (count == 1)
     {
@@ -2879,14 +2998,14 @@ void LLGLSLShader::uniform4uiv(U32 index, U32 count, const GLuint* v)
         {
             LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
             mUniformCache.forget(location);
-            glUniform4uiv(location, count, v);
+            if (!qlSilence(location)) glUniform4uiv(location, count, v);
             qlMirror(location, 2, 4, count, v);
         }
         else if (mUniformCache.changed(location, UniformCache::Kind::UVec4,
                                        uniform_bits(v[0]), uniform_bits(v[1]), uniform_bits(v[2]), uniform_bits(v[3])))
         {
             LL_PROFILE_ZONE_SCOPED_CATEGORY_SHADER;
-            glUniform4uiv(location, 1, v);
+            if (!qlSilence(location)) glUniform4uiv(location, 1, v);
             qlMirror(location, 2, 4, 1, v);
         }
     }
@@ -2908,7 +3027,7 @@ void LLGLSLShader::uniformMatrix2fv(U32 index, U32 count, GLboolean transpose, c
 
         if (mUniform[index] >= 0)
         {
-            glUniformMatrix2fv(mUniform[index], count, transpose, v);
+            if (!qlSilence(mUniform[index])) glUniformMatrix2fv(mUniform[index], count, transpose, v);
             qlMirror(mUniform[index], 0, 4, count, v, transpose != GL_FALSE);
         }
     }
@@ -2930,7 +3049,7 @@ void LLGLSLShader::uniformMatrix3fv(U32 index, U32 count, GLboolean transpose, c
 
         if (mUniform[index] >= 0)
         {
-            glUniformMatrix3fv(mUniform[index], count, transpose, v);
+            if (!qlSilence(mUniform[index])) glUniformMatrix3fv(mUniform[index], count, transpose, v);
             qlMirror(mUniform[index], 0, 9, count, v, transpose != GL_FALSE);
         }
     }
@@ -2952,7 +3071,7 @@ void LLGLSLShader::uniformMatrix3x4fv(U32 index, U32 count, GLboolean transpose,
 
         if (mUniform[index] >= 0)
         {
-            glUniformMatrix3x4fv(mUniform[index], count, transpose, v);
+            if (!qlSilence(mUniform[index])) glUniformMatrix3x4fv(mUniform[index], count, transpose, v);
             qlMirror(mUniform[index], 0, 12, count, v, transpose != GL_FALSE);
         }
     }
@@ -2974,7 +3093,7 @@ void LLGLSLShader::uniformMatrix4fv(U32 index, U32 count, GLboolean transpose, c
 
         if (mUniform[index] >= 0)
         {
-            glUniformMatrix4fv(mUniform[index], count, transpose, v);
+            if (!qlSilence(mUniform[index])) glUniformMatrix4fv(mUniform[index], count, transpose, v);
             qlMirror(mUniform[index], 0, 16, count, v, transpose != GL_FALSE);
         }
     }
