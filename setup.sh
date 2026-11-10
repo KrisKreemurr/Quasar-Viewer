@@ -1,7 +1,7 @@
 #!/bin/bash
 # Quasar on Slipstream: one-time WSL setup and first Windows build.
 # Run in Ubuntu with:  curl -L https://raw.githubusercontent.com/KrisKreemurr/Quasar-Viewer/quasar/slipstream/setup.sh | bash
-set -e
+set -eo pipefail
 cd ~
 # Slipstream's own Windows builds use Ubuntu 24.04 with clang/LLD 22 (their release.yml);
 # Ubuntu ships 18, so LLVM 22 comes from apt.llvm.org. Only the first run installs
@@ -33,7 +33,13 @@ fi
 [ -d ~/quasar-slipstream ] || git clone --branch quasar/slipstream --single-branch https://github.com/KrisKreemurr/Quasar-Viewer.git ~/quasar-slipstream
 cd ~/quasar-slipstream
 git pull
-make windows
+# The whole log is kept (also on C:), and a failure prints only the real errors
+if ! make windows 2>&1 | tee ~/quasar-build.log; then
+  cp ~/quasar-build.log /mnt/c/dev/quasar-build.log 2>/dev/null || true
+  echo; echo "===== BUILD FAILED: the errors (full log in C:\\dev\\quasar-build.log) ====="
+  grep -E -B2 -A10 "error:|Error [0-9]|FAILED:|CMake Error" ~/quasar-build.log | grep -v "warning:" | head -80
+  exit 1
+fi
 rm -rf /mnt/c/dev/QuasarSlipstream
 7z x -o/mnt/c/dev/QuasarSlipstream build-windows-x86_64/package/*_win64.zip >/dev/null
 # A double-click rebuild for Windows, so Linux never has to be opened again
