@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ legacy_header_height="18"
+ height="330"
+ layout="topleft"
+ name="grid_manager"
+ help_topic="grid_manager"
+ title="GRIDS"
+ can_resize="true"
+ min_width="420"
+ min_height="260"
+ width="480">
+    <text
+     follows="left|top|right"
+     height="30"
+     layout="topleft"
+     left="12"
+     name="intro_text"
+     top="24"
+     word_wrap="true"
+     width="456">
+        Add an OpenSim grid by its login address, for example login.osgrid.org. The built-in Second Life grids cannot be removed.
+    </text>
+    <scroll_list
+     follows="all"
+     height="140"
+     layout="topleft"
+     left="12"
+     name="grid_list"
+     top_pad="6"
+     width="456">
+        <scroll_list.columns
+         name="name"
+         label="Grid"
+         relative_width="0.4" />
+        <scroll_list.columns
+         name="platform"
+         label="Type"
+         relative_width="0.2" />
+        <scroll_list.columns
+         name="login"
+         label="Login address"
+         relative_width="0.4" />
+    </scroll_list>
+    <button
+     follows="left|bottom"
+     height="20"
+     label="Refresh"
+     layout="topleft"
+     left="12"
+     name="refresh_btn"
+     tool_tip="Fetch the selected grid's information again"
+     top_pad="8"
+     width="80" />
+    <button
+     follows="left|bottom"
+     height="20"
+     label="Remove"
+     layout="topleft"
+     left_pad="6"
+     name="remove_btn"
+     tool_tip="Remove the selected grid from the list"
+     width="80" />
+    <line_editor
+     follows="left|right|bottom"
+     height="22"
+     label="Login address of a grid, e.g. login.osgrid.org"
+     layout="topleft"
+     left="12"
+     max_length_chars="256"
+     name="uri_edit"
+     top_pad="14"
+     width="368" />
+    <button
+     follows="right|bottom"
+     height="22"
+     label="Add"
+     layout="topleft"
+     left_pad="8"
+     name="add_btn"
+     width="80" />
+    <text
+     follows="left|right|bottom"
+     height="32"
+     layout="topleft"
+     left="12"
+     name="status_text"
+     top_pad="8"
+     word_wrap="true"
+     width="456" />
+</floater>

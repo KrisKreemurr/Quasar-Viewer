@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel label="Sesler" name="Preference Media panel">
+	<panel.string name="middle_mouse">
+		Orta Fare
+	</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="Genel" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

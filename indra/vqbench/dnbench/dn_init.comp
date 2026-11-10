@@ -1,0 +1,55 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// dnbench (perf-4k60): a seeded synthetic denoiser input -- the guides (GEOM, both parities), the history ages
+// (HIST's age layers) and a noisy diffuse / specular signal with its variance in IN and OUT -- in the layouts
+// clean_pdn_common.glsl documents. A procedural "room": a floor and a wall plane plus a grid of boxes (depth steps
+// and normal creases: the edge stops have work to do), roughness and history lengths varying per box, ~5 % of
+// texels young (disocclusion), ~3 % without a surface.
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_pdn_common.glsl"
+const float HT_REF_MS = 1000.0 / 60.0;   // (= clean_history_time.glsl; that file reads the frame info)
+layout(set = 1, binding = 0, rgba16f) uniform image2DArray uDnIn;
+layout(set = 1, binding = 2, rgba32ui) uniform uimage2DArray uDnGeom;
+layout(set = 1, binding = 3, rgba32ui) uniform uimage2DArray uDnHist;
+layout(set = 1, binding = 4, rgba16f) uniform image2DArray uDnOut;
+layout(push_constant) uniform P { uvec4 a; } pc;   // x, y extent; z seed; w the age layer base (HIST layers - 2)
+
+uint hsh(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float rnd(inout uint s) { s = hsh(s); return float(s >> 8) * (1.0 / 16777216.0); }
+
+void main()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(pc.a.xy);
+    if (any(greaterThanEqual(m, D))) return;
+    uint s = hsh(uint(m.x) * 73856093u ^ uint(m.y) * 19349663u ^ pc.a.z);
+    const vec2 uv = (vec2(m) + 0.5) / vec2(D);
+    // the boxes: 24 x 14 cells, each a raised block or a hole in the floor
+    const ivec2 cell = ivec2(uv * vec2(24.0, 14.0));
+    uint cs = hsh(uint(cell.x) * 92837111u ^ uint(cell.y) * 689287499u ^ pc.a.z);
+    const float cr = rnd(cs), cr2 = rnd(cs), cr3 = rnd(cs);
+    float z = mix(3.0, 40.0, uv.y * uv.y);              // the floor's view depth (grazing at the top)
+    vec3 n = normalize(vec3(0.0, 0.6, 1.0));
+    vec2 grad = vec2(0.0, 74.0 / float(D.y) * uv.y);
+    float rough = 0.2 + 0.6 * cr2;
+    if (cr < 0.35) { z *= 0.85; n = normalize(vec3(cr2 - 0.5, cr3 - 0.5, 1.0)); grad = vec2(0.002, 0.004) * z; }
+    if (uv.x < 0.12) { z = 6.0 + 30.0 * uv.y; n = vec3(1.0, 0.0, 0.0); grad = vec2(0.0, 30.0 / float(D.y)); rough = 0.9; }
+    const bool none = rnd(s) < 0.03;
+    const float lenF = (cr3 < 0.1 || rnd(s) < 0.05) ? 1.0 + floor(3.0 * rnd(s)) : 8.0 + floor(24.0 * rnd(s));
+    const uint specIt = cr2 < 0.15 ? 0u : (cr2 < 0.5 ? 2u : 3u);
+    const float W = cr < 0.05 ? 0.0 : 1.0;
+    const uvec4 g = uvec4(floatBitsToUint(none ? -1.0 : z), pdnPackNR(n, rough), packHalf2x16(grad),
+                          pdnPackMeta(lenF, lenF, specIt, W));
+    // the signal: a smooth light pool x the box tint + noise, its variance (alpha) from the noise
+    const vec3 base = vec3(0.4 + 0.5 * cr, 0.35 + 0.4 * cr2, 0.3 + 0.5 * cr3) * (0.5 + 0.5 * sin(uv.x * 9.0) * cos(uv.y * 7.0));
+    const float nd = (rnd(s) - 0.5) * 0.6, ns = (rnd(s) - 0.5) * 0.9;
+    const vec4 d = vec4(max(base * (1.0 + nd), 0.0), 0.02 + 0.05 * rnd(s));
+    const vec4 sp = vec4(max(base.bgr * 0.5 * (1.0 + ns), 0.0), 0.03 + 0.08 * rnd(s));
+    for (int par = 0; par < 2; ++par)
+    {
+        imageStore(uDnGeom, ivec3(m, par), g);
+        imageStore(uDnHist, ivec3(m, int(pc.a.w) + par), uvec4(floatBitsToUint(lenF * HT_REF_MS), floatBitsToUint(lenF * HT_REF_MS), 0u, 0u));
+    }
+    imageStore(uDnIn, ivec3(m, 0), d);  imageStore(uDnIn, ivec3(m, 1), sp);
+    imageStore(uDnOut, ivec3(m, 0), d); imageStore(uDnOut, ivec3(m, 1), sp);
+}

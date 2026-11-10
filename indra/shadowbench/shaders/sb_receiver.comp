@@ -1,0 +1,43 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// shadowbench -- receiver-side sun shadow factor, evaluated with the VIEWER'S OWN code:
+// clean_draw_common.glsl's sunShadowT (cascade pick, normal / light offsets, the
+// SlipstreamRenderShadowFilterQuality filter, the blend band, the translucency tint),
+// included verbatim as the deferred lighting compute includes it. The harness only
+// supplies the receiver points (a synthetic G-buffer: world position + normal per pixel)
+// and writes the visibility (+ tint) out.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+vec2 sb_px;
+// (the draw view's push block, named as the viewer's compute includers name it: view = the
+// draw-view entry; w / h = the receiver image)
+layout(push_constant) uniform SbPush { uint view; uint f8; uint w; uint h; } g_draw_push;
+#define CLEAN_EXTERNAL_DRAW_PUSH
+#define CLEAN_FRAG_XY sb_px
+#define CLEAN_COMPUTE_LIGHT
+#define CLEAN_NO_TANGENT_IN
+#include "clean_draw_common.glsl"
+
+// harness G-buffer (set 3: no viewer binding lives there): world position (w 1 = a surface)
+// and normal per pixel, and the result (rgb tint x visibility, a visibility).
+layout(set = 3, binding = 0, rgba32f) uniform readonly image2D sbPos;
+layout(set = 3, binding = 1, rgba32f) uniform readonly image2D sbNrm;
+layout(set = 3, binding = 2, rgba32f) uniform writeonly image2D sbOut;
+
+void main()
+{
+    const uvec2 g = gl_GlobalInvocationID.xy;
+    if (g.x >= g_draw_push.w || g.y >= g_draw_push.h) return;
+    sb_px = vec2(g) + 0.5;
+    const vec4 P = imageLoad(sbPos, ivec2(g));
+    const vec3 N = normalize(imageLoad(sbNrm, ivec2(g)).xyz);
+    if (P.w < 0.5) { imageStore(sbOut, ivec2(g), vec4(1.0)); return; }
+    vec3 tint;
+    // The lit kernels skip the lookup at N.L <= 0 (clean_surface_light.glsl); the harness
+    // evaluates every receiver so back-facing receivers count as 1 (same as the skip).
+    const float nl = dot(N, atmosLightDir());
+    const float v = nl > 0.0 ? sunShadowT(P.xyz, N, tint) : 1.0;
+    if (nl <= 0.0) tint = vec3(1.0);
+    imageStore(sbOut, ivec2(g), vec4(tint * v, v));
+}

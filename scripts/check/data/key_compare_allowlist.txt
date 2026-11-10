@@ -1,0 +1,20 @@
+# Key comparisons that deliberately stay hard-coded (checked by check_key_commands.py)
+# <file name> | <the line, whitespace collapsed> | <reason>
+lllocationinputctrl.cpp | bool pasting = mask == MASK_CONTROL && key == 'V'; | standard paste into a text field
+llviewerwindow.cpp | if ((key == KEY_MOUSELOOK) && !(mask & (MASK_CONTROL | MASK_ALT))) | chat history / list navigation passthrough (not a binding), or dead code (#if 0)
+llviewerwindow.cpp | if (!(key == KEY_UP && mask == MASK_CONTROL) && !(key == KEY_DOWN && mask == MASK_CONTROL) && !(key == KEY_UP && mask == MASK_ALT) && !(key == KEY_DOWN && mask == MASK_ALT)) | chat history / list navigation passthrough (not a binding), or dead code (#if 0)
+slchatbar.cpp | if (KEY_RETURN == key && mask == (MASK_CONTROL | MASK_SHIFT)) | older whisper alias next to the rebindable chat_whisper
+llpreviewgesture.cpp | if(('S' == key) && (MASK_CONTROL == (mask & MASK_CONTROL))) | standard save in a floater
+llpreviewnotecard.cpp | if(('S' == key) && (MASK_CONTROL == (mask & MASK_CONTROL))) | standard save in a floater
+llpreviewscript.cpp | if (('A' == key) && (MASK_CONTROL == (mask & MASK_MODIFIERS))) | standard select-all in the script text editor
+llprogressview.cpp | if( ('Q' == key) && (MASK_CONTROL == mask) ) | quit on the progress screen, before any bindings are loaded
+llsetkeybinddialog.cpp | if ((key == 'Q' && mask == MASK_CONTROL) || key == KEY_ESCAPE) | the dialog that records bindings: cancel keys must stay fixed
+lltoastalertpanel.cpp | else if (KEY_TAB == key && mask == MASK_SHIFT) | dialog button navigation
+fsareasearch.cpp | if (key == 'C' && mask == MASK_CONTROL) | standard copy / select all in a list
+fsareasearch.cpp | if (key == 'A' && mask == MASK_CONTROL) | standard copy / select all in a list
+fsfloatercontacts.cpp | if (mask == MASK_CONTROL && key == 'F') | standard find (focus the active tab's filter) inside the Contacts floater
+fsfloatercontacts.cpp | if (mask == MASK_CONTROL && key == 'W' && getHost()) | standard close-tab inside the Contacts floater's host
+llviewerinput.cpp | const bool default_shoulder = first_person && b.command() == "ots_swap_shoulder" && (!b.mouse.isProvided() || b.mouse().empty() || b.mouse() == "NONE") && (!b.controller.isProvided() || b.controller().empty()) && LLKeyboard::keyFromString(b.key(), &key) && key == ' ' && LLKeyboard::maskFromString(b.mask(), &mask) && mask == MASK_SHIFT; | saved-file v5 migration: remove only the obsolete shipped first-person shoulder chord
+llviewerinput.cpp | if (b.command() == "ots_swap_shoulder" || (LLKeyboard::keyFromString(b.key(), &key) && key == ' ' && LLKeyboard::maskFromString(b.mask(), &mask) && mask == MASK_SHIFT)) | saved-file v5 migration: preserve a user's conflicting chord before adding the TPS default
+llfloaterpopout.cpp | if (!handled && key == KEY_TAB && !(mask & (MASK_CONTROL | MASK_ALT))) | standard focus traversal within a native UI root (#1013), after focused controls and declared commands
+llnewui.cpp | if (ki == Rml::Input::KI_UNKNOWN && (mask & MASK_CONTROL) && key == 'A') | standard select-all in the new UI command field

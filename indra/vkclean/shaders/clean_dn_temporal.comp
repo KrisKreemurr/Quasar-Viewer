@@ -1,0 +1,1065 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — DIFFUSE / SPECULAR DENOISER, temporal pass (#85 phase 2; LLCleanDenoiserVK). One
+// invocation per denoiser texel, both signals (diffuse and specular keep separate histories,
+// lengths, variances and caps):
+//
+//   * REPROJECTION: the surface back along this frame's motion vector (object motion included:
+//     dancing avatars under club lights) to last frame's unjittered UV, else the producer's
+//     camera-only position (MOT x); 2x2 bilinear taps of last frame's history, each kept only
+//     when last frame's guide there is the same surface: its view depth within 4 % of the
+//     depth the producer expects (MOT z) and its normal within ~30 deg. Nothing kept: a
+//     disocclusion (history length 0, this frame's sample alone). (DN_F_REPROJ_SEARCH, the GI
+//     denoiser) before giving up, the best-matching texel of the 3x3 around the point (depth
+//     plane + normal): sub-texel motion across a thin strand keeps its history.
+//   * SPECULAR VIRTUAL MOTION: a smooth surface's reflected light does not move with the
+//     surface but with its mirror image (the producer's virtual point at the hit / light
+//     distance behind the surface, MOT y). Below roughness ~0.35 the specular history is taken
+//     from there (blended toward the surface's with roughness), where the guide still agrees.
+//   * SIGNAL REFERENCE W (anti-lag for lights): the producer's noise-free scale of the signal
+//     (for the projector sampler: the unshadowed target sum). A relative change beyond
+//     prm1.z means a light switched, dimmed, recoloured or moved: the history is cut in
+//     proportion -- whatever the clamp would have kept (club lights do not ghost).
+//   * MOVING LIGHTS (dnMoveHist, #869): the reprojection follows the camera / the surface, not a
+//     light -- a moved light's shadow history is wrong wherever the shadow moved: the clamp keeps it
+//     where the 3x3 is mixed (lag in the moving penumbra) and cuts it to ~1 frame where it is not
+//     (one binary ray), texel by texel: grain. The producer's moved share (MOT w) caps the length
+//     at the move history in proportion, keeps a longer variance history (a stable a-trous
+//     kernel: no per-frame flicker of the blur strength) and vetoes the ReSTIR-converged
+//     shortcut (its reservoir M says nothing about a moving shadow). The producer meanwhile
+//     evaluates several lights there (RS_MOVE_LIGHTS): more samples, not more blur.
+//   * NEIGHBOURHOOD CLAMP: the history colour is clamped per channel to this frame's raw 3x3
+//     (same surface) mean +- gamma sigma; the further it had to move, the shorter the history
+//     gets (anti-lag, as the RT shadow mask's accumulate()). (DN_F_RADIANCE: sigma at least the
+//     history's per-sample spread -- a reservoir-reusing sampler's 3x3 is correlated.)
+//   * ADAPTIVE LENGTH: alpha = 1 / frames; diffuse up to prm0.x, specular from prm1.w (a
+//     mirror) to prm0.y (rough): low roughness keeps a short history (its lobe is sharp and
+//     view-dependent), and takes a small spatial kernel later (pdnSpecIters).
+//   * VARIANCE: an exponentially weighted luminance variance per signal (fp16-safe), replaced
+//     by the 3x3 spatial estimate while the history is young (< 4 frames, as SVGF); with the
+//     disocclusion history fix (DN_HFIX_SHIFT) the a-trous input's variance is floored at a
+//     few-sample estimate's while the history is shorter than N frames.
+//   * (#869) THE SPLIT CHANNEL (dnSplitTemporal; images with the split layers): the dominant
+//     lights' own visibility, each accumulated onto ITS light's history (matched by split id, not
+//     by slot), clamped against the same light's 3x3, capped while that light moves.
+// Writes HIST (this parity), GEOM w (lengths + the specular a-trous depth) and OUT (rgb +
+// variance: the a-trous input). Debug view RAW: no accumulation (the raw signal passes).
+layout(local_size_x = 8, local_size_y = 8) in;
+#define DN_TEMPORAL_PASS
+#include "clean_dn_common.glsl"
+#define DENOISE_TIME_HISTORY
+#include "clean_receiver_motion.glsl"
+#define DENOISE_NO_ATROUS
+#include "clean_denoise_common.glsl"
+#include "clean_sun_history.glsl"   // accumulate / accumulateLum / changeDetect (the RT mask's: the sun channel)
+
+struct Tap { vec3 d; vec3 s; float vd; float vs; float ld; float ls; float W; float moved; float caster; float visibility;
+             uint pending; };
+// (#1038, DN_F_MOVE_ZTOL) the extra depth tolerance (m) of this texel's history taps: its surface's
+// own motion (dnMoveDepthTol); 0 for static surfaces and without the bit.
+float g_dn_zx = 0.0;
+bool g_dn_prior_receiver = false;
+uint g_dn_specular_owner = 0u;
+vec3 g_dn_prior_normal = vec3(0.0);
+
+// Four-frame EW variance, independent of colour length. Prior colour contributes
+// only a squared difference: it is never accumulated into the current colour.
+// The current neighbourhood bounds the extra kernel width, including at light-off.
+float dnRecoverSkinnedVariance(float priorVar, float priorLum, float currentLum,
+                              float spatialVar, float energy)
+{
+    if (!(energy > 0.0) || isnan(energy) || isinf(energy)
+        || !(priorVar >= 0.0) || isinf(priorVar)
+        || !(priorLum >= 0.0) || isinf(priorLum)
+        || !(currentLum >= 0.0) || isinf(currentLum)
+        || !(spatialVar >= 0.0) || isinf(spatialVar)) return 0.0;
+    const float scale = min(energy, 122.0); // 4 * scale^2 stays below FP16's 60000 cap
+    const float delta = clamp(currentLum - priorLum, -244.0, 244.0);
+    const float sampleVar = max(min(spatialVar, 60000.0), 0.5 * delta * delta);
+    return min(0.75 * min(priorVar, 60000.0) + 0.25 * sampleVar, 4.0 * scale * scale);
+}
+
+// Current raw AND its same-surface neighbourhood must move in the same direction.
+// Do not use the widened historical variance as a change threshold: that is the
+// stale-shadow failure itself. Scale-relative, bounded; zero-noise binary edges snap.
+bool dnCasterChange(float raw, float mean, float prior, float sigma)
+{
+    const float energy = max(max(raw, mean), max(prior, 1e-4));
+    const float tolerance = max(0.10 * energy, min(0.5 * sigma, 0.25 * energy));
+    return (raw - prior) * (mean - prior) > 0.0
+        && min(abs(raw - prior), abs(mean - prior)) > tolerance;
+}
+// THE EVIDENCE PRIOR (radiance GEOM meta bits 0-9): the receiver's visibility evidence (dnCasterEvidence)
+// accumulated like its colour, 1 / (length + 1) -- a running mean of `length + 1` frames' evidence, an EMA
+// once the colour's length is capped. 10 bits: the old 5-bit code lost every step under 1 / 60 (at a
+// 32-frame rate, a 0 / 1 pick's), so a mixed prior drifted to ~0.5 and a lit one wandered -- a biased,
+// noisy reference.
+float dnCasterEvidenceAlpha(float length) { return htAlpha(1.0 / max(length + 1.0, 1.0)); }
+bool dnCasterEvidenceOn() { return dnRadiance() && dnCasterPolicy() == 2u && dnDebug() != PDN_DBG_HISTORY_CAUSE; }
+// THE SAMPLING NOISE of (3x3 mean - prior) under NO change (its standard deviation). A stochastic estimate
+// (one or two RIS picks: 0 / 1 per light) takes values in [0, 1], so its variance is at most p (1 - p)
+// (Bhatia-Davis) whatever the light mix, disc or emitter sampling. The producer's fresh picks are
+// independent across texels (pdnEvidenceWeight): the mean of n texels, `stochastic` of them sampled, has
+// p (1 - p) stochastic / n^2; the prior, the same means over L = length + 1 frames, that / L. p is
+// pooled from both (L prior + mean) / (L + 1): a young prior of one or two means is no certainty, even at
+// 0 or 1 (a reset restarted from one unanimous 3x3 otherwise reset again at its next mixed one). Exact
+// texels add nothing: an all-exact 3x3 has noise 0 (the test as before).
+float dnCasterSamplingNoise(float prior, float mean, float stochastic, float n, float length)
+{
+    if (!(prior >= 0.0) || !(n > 0.0) || !(stochastic > 0.0)) return 0.0;
+    const float L = max(length + 1.0, 1.0);
+    const float p = clamp((L * prior + mean) / (L + 1.0), 0.0, 1.0);
+    return sqrt(p * (1.0 - p) * (stochastic / (n * n)) * (1.0 + 1.0 / L));
+}
+// A change must exceed DN_CASTER_NOISE_K x that noise in ONE frame, or DN_CASTER_PENDING_K x it in the
+// same direction in TWO consecutive frames (dnCasterPending: the history meta's pending bits). Around a
+// settled p = 0.5 nine binary texels are at best unanimous (2.9 noise: 2 / 512 of the frames under no
+// change) -- never a one-frame change; two frames of <= 1 of 9 against the prior confirm in < 0.1 % of
+// the frames, and a silhouette's 6 same-surface texels still reach it when the change is real. So the
+// mixed light of a static or animating receiver keeps its history; one light of two blocked (0.5 -> 0)
+// or freed resets in two frames; a caster's shadow arriving on a lit / leaving a shadowed history, in one.
+#define DN_CASTER_NOISE_K 3.5
+#define DN_CASTER_PENDING_K 2.2
+bool dnCasterVisibilityChange(float current, float mean, float prior, float sigma, float noise)
+{
+    return current >= 0.0 && mean >= 0.0 && prior >= 0.0
+        && dnCasterChange(current, mean, prior, sigma)
+        && abs(mean - prior) > DN_CASTER_NOISE_K * noise;
+}
+// This frame's half-significant deviation: 0 none, 1 darker, 2 brighter (the pending bits)
+uint dnCasterPending(float current, float mean, float prior, float sigma, float noise)
+{
+    if (!(current >= 0.0 && mean >= 0.0 && prior >= 0.0) || !dnCasterChange(current, mean, prior, sigma)
+        || !(abs(mean - prior) > DN_CASTER_PENDING_K * noise)) return 0u;
+    return mean < prior ? 1u : 2u;
+}
+bool dnCasterConfirmed(uint pending, uint previous) { return pending != 0u && pending == previous; }
+// A YOUNG history (a reset less than DN_CASTER_FOLLOW_LEN frames ago) whose evidence still deviates
+// (pending): the caster's edge is still crossing its 3x3 -- the reset fired on the neighbours' change, a
+// frame or two before this texel's own light changed, and restarted from its last old-state sample. Keep
+// the two-frame cap (no restart) while the deviation lasts, so that sample leaves at once instead of
+// at 1 / length.
+#define DN_CASTER_FOLLOW_LEN 8.0
+bool dnCasterFollow(uint pending, float length) { return pending != 0u && length < DN_CASTER_FOLLOW_LEN; }
+// The value the test takes as THIS texel's: its own when exact; a stochastic one is a single 0 / 1 pick
+// (half the frames on the old side of a real change, which the test's same-direction rule then vetoed:
+// a moving caster's shadow over mixed light trailed) -- the 3x3 mean, which already contains it.
+float dnCasterCurrent(float own, float mean, bool ownExact)
+{
+    return ownExact ? own : mean;
+}
+// The evidence the prior accumulates (and a reset restarts it from): with stochastic texels in the 3x3,
+// their mean -- one texel's own 0 / 1 picks kept a young prior at an extreme, where the noise bound is
+// smallest, and every next pick that disagreed reset it again (a self-sustaining reset loop); all
+// exact, this texel's own value.
+float dnCasterEvidence(float own, float mean, float stochastic)
+{
+    return stochastic > 0.0 ? mean : own;
+}
+float dnCasterVisibilityAcc(float prior, float current, float alpha)
+{
+    return current < 0.0 ? prior : prior < 0.0 ? current : mix(prior, current, alpha);
+}
+bool dnCasterShouldCap(uint policy, bool affected, bool changed)
+{
+    return policy == 1u ? affected : policy == 2u && changed;
+}
+float dnCasterHistoryCap(float full, float step)
+{
+    return min(full, max(2.0 * step, 0.1));
+}
+
+float dnPreviousDepthTolerance(float expectedDepth, float relativeTolerance)
+{
+    const float tolerance = max(expectedDepth * relativeTolerance, 0.03);
+    // The new expected depth is FP16. Reserve a conservative two-ULP margin;
+    // quantization must not widen acceptance through a neighbouring wall.
+    return g_dn_prior_receiver ? max(tolerance - expectedDepth / 512.0, 0.0) : tolerance;
+}
+
+bool dnPreviousNormalAgrees(vec3 previousNormal, vec3 currentNormal, float cut)
+{
+    return g_dn_prior_receiver
+        ? dot(previousNormal, g_dn_prior_normal) >= receiverPreviousNormalCut(cut)
+        : !(dot(previousNormal, currentNormal) < cut);
+}
+
+// Bilinear 2x2 history fetch at continuous texel coordinate hc of last frame's layer pl,
+// same-surface taps only. False: no tap survived.
+// (DN_F_INFO) every same-surface tap counts (its value is a history or a seeded estimate); an
+// UNKNOWN one (that signal's length 0: never sampled) only at DN_UNKNOWN_W, per signal.
+bool dnFetchHistory(vec2 hc, uint pl, float pw, vec3 N, float ncos, float ztol, out Tap t, out float wsum, bool planeAllowed)
+{
+    t = Tap(vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0u);
+    wsum = 0.0;
+    float wd = 0.0, ws = 0.0;
+    float visibilityWeight = 0.0;
+    const ivec2 D = ivec2(dp.dims.xy);
+    const vec2 b = floor(hc);
+    const vec2 f = hc - b;
+    float wW = 0.0, bwPend = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 o = ivec2(k & 1, k >> 1);
+        const ivec2 q = ivec2(b) + o;
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+        const float bw = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        if (bw <= 1e-4) continue;
+        const DnGeom g = dnGeom(q, pl);
+        if (g.z <= 0.0) continue;
+        const float tapDepth = planeAllowed ? dnPreviousDepthAt(g, q, hc) : g.z;
+        if (!(tapDepth > 0.0) || abs(tapDepth - pw) > dnPreviousDepthTolerance(pw, ztol) + g_dn_zx) continue;
+        if (!dnPreviousNormalAgrees(g.n, N, ncos)) continue;
+        vec3 hd, hs; float vd, vs;
+        pdnUnpackHist(imageLoad(uDnHist, ivec3(q, int(pl))), hd, hs, vd, vs);
+        const float qlD = g.lenD, qlS = g.lenS;
+        const float bd = bw * dnConf(qlD);
+        const float bs = (!dnExactSpecular() || dnSpecularOwner(q, pl) == g_dn_specular_owner) ? bw * dnConf(qlS) : 0.0;
+        t.d += bd * hd; t.vd += bd * vd; t.ld += bd * qlD; wd += bd;
+        t.s += bs * hs; t.vs += bs * vs; t.ls += bs * qlS; ws += bs;
+        t.W += bw * pdnMetaW(g.meta);
+        t.moved = max(t.moved, pdnMetaConv(g.meta) ? 1.0 : 0.0);
+        t.caster = max(t.caster, (g.meta & 0x800u) != 0u ? 1.0 : 0.0);
+        const float visibility = dnCasterEvidenceOn() ? pdnMetaVisibility(g.meta) : -1.0;
+        if (visibility >= 0.0) { t.visibility += bw * visibility; visibilityWeight += bw; }
+        if (bw > bwPend) { bwPend = bw; t.pending = pdnMetaPending(g.meta); }
+        wsum += bw;
+    }
+    if (wsum < 1e-3) return false;
+    t.W /= wsum;
+    t.visibility = visibilityWeight > 0.0 ? t.visibility / visibilityWeight : -1.0;
+    t.d /= wd; t.vd /= wd; t.ld /= wd;   // diffuse has support; ownership can leave specular with none
+    if (ws > 1e-6) { t.s /= ws; t.vs /= ws; t.ls /= ws; }
+    return true;
+}
+
+// (DN_F_REPROJ_SEARCH) The bilinear 2x2 found no same-surface tap: the BEST-MATCHING texel of last
+// frame's 3x3 around hc -- its depth against this surface's plane carried to that texel (pw + the
+// gradient over the offset: a sloped / grazing surface keeps its neighbours, a silhouette does not),
+// normal within ~37 deg -- stands in (point sample; a texel never sampled, both lengths 0, does not).
+bool dnSearchHistory(vec2 hc, uint pl, float pw, vec3 N, vec2 grad, out Tap t)
+{
+    t = Tap(vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0u);
+    const ivec2 D = ivec2(dp.dims.xy);
+    const ivec2 c = ivec2(floor(hc + 0.5));
+    float best = 1.0;
+    ivec2 bq = ivec2(-1);
+    uint bmeta = 0u;
+    for (int k = 0; k < 9; ++k)
+    {
+        const ivec2 q = c + ivec2(k % 3 - 1, k / 3 - 1);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+        const DnGeom g = dnGeom(q, pl);
+        if (g.z <= 0.0 || !dnPreviousNormalAgrees(g.n, N, 0.8)) continue;
+        if (g.lenD <= 0.0 && g.lenS <= 0.0) continue;
+        const float dz = dot(grad, vec2(q) - hc);
+        const float predicted = dnPreviousDepthAt(g, q, hc);
+        if (!(predicted > 0.0)) continue;
+        const float e = dnShadowPlane()
+            ? abs(predicted - pw) / (dnPreviousDepthTolerance(pw, 0.04) + g_dn_zx)
+            : abs(g.z - (pw + dz)) / (max(pw * 0.04, 0.03) + 0.5 * abs(dz) + g_dn_zx);
+        if (e < best) { best = e; bq = q; bmeta = g.meta; }
+    }
+    if (bq.x < 0) return false;
+    pdnUnpackHist(imageLoad(uDnHist, ivec3(bq, int(pl))), t.d, t.s, t.vd, t.vs);
+    const vec2 ages = dnAges(bq, pl).xy / HT_REF_MS;
+    t.ld = ages.x; t.ls = ages.y;
+    if (dnExactSpecular() && dnSpecularOwner(bq, pl) != g_dn_specular_owner) { t.s = vec3(0.0); t.vs = 0.0; t.ls = 0.0; }
+    t.W = pdnMetaW(bmeta);
+    t.moved = pdnMetaConv(bmeta) ? 1.0 : 0.0;
+    t.caster = (bmeta & 0x800u) != 0u ? 1.0 : 0.0;
+    t.visibility = dnCasterEvidenceOn() ? pdnMetaVisibility(bmeta) : -1.0;
+    t.pending = pdnMetaPending(bmeta);
+    return true;
+}
+
+// Clamp + anti-lag (accumulate() of clean_denoise_common.glsl, for an HDR signal): returns the
+// clamped history, shortens len by how far the clamp moved it relative to the signal.
+vec3 dnClamp(vec3 hist, vec3 mean, vec3 sigma, float gamma, inout float len, out bool clamped)
+{
+    const vec3 lo = max(mean - gamma * sigma, vec3(0.0)), hi = mean + gamma * sigma;
+    const vec3 hc = clamp(hist, lo, hi);
+    const float cut = pdnLum(abs(hc - hist)) / max(pdnLum(hist) + pdnLum(mean), 1e-4);
+    clamped = cut > 0.0;
+    if (cut > 0.05) len = min(len, mix(8.0, 1.0, clamp((cut - 0.05) * 3.0, 0.0, 1.0)));
+    return hc;
+}
+
+// ==================== SUN / MOON CHANNEL (DN_F_SUN; the merged RT shadow pass) ====================
+// The RT shadow mask's sun denoiser (clean_rt_mask_temporal.comp, SVGF mode) on the denoiser's
+// guides -- a visibility, not a ratio, so none of the W anti-lag above (a club light switching
+// says nothing about the sun):
+//   * EXACT REPROJECTION (DN_F_SUN_EXACT, the mask's #674 rtExactHc): below the render extent
+//     without jitter, texel t samples render px floor((t + 0.5) r) + 0.5 (dnRenderPx truncates),
+//     so the continuous inverse lands a quarter texel off a static receiver every frame; the
+//     real sample centres are inverted instead (piecewise linear between them).
+//   * same-surface bilinear history taps (the guides' depth + normal tests);
+//   * HISTORY CAP (the mask's historyCap + sunMoveCap): static casters the full length without a
+//     TAA / FSR resolve (the denoiser is the only integrator of a jittered hard edge), else 8
+//     frames on hard edges rising to the full length from ~4 texels of penumbra; MOVING casters
+//     (the producer's rtNoteBlocker bit, kept for sun1.z frames by a countdown) 1 frame at
+//     contact, the moving-caster hard history beyond, at most sun0.z; and a moving sun caps the
+//     history so a penumbra lags at most half a texel (a sun <-> moon switch: the host cuts it);
+//   * CLAMP: static casters against the luminance box of the accepted taps' FAST means + this
+//     texel's new fast mean (a sub-texel caster missed by this frame's 3x3 keeps its history),
+//     moving casters against this frame's same-surface 3x3 (mean +- sun1.y sigma) with the
+//     change detector cutting the length where centre and mean both left the noise band;
+//   * VARIANCE for the a-trous: the fast moments' sample variance, at least the Bhatia-Davis
+//     bound m (1 - m) / rays where a caster was met, over the history length (the estimate's).
+// Bilinear 2x2 of last frame's sun history (layer 2 + pl) at hc, same-surface taps only (last
+// frame's guide, layer pl). fbox: the accepted taps' fast means (x min, y max).
+bool dnFetchSun(vec2 hc, uint pl, float pw, vec3 N, out PdnSunHist h, out vec2 fbox)
+{
+    h = PdnSunHist(vec3(0.0), 0.0, 0.0, 0.0, 0.0, 0.0, -1.0);
+    fbox = vec2(1e30, -1e30);
+    const ivec2 D = ivec2(dp.dims.xy);
+    const vec2 b = floor(hc);
+    const vec2 f = hc - b;
+    float wsum = 0.0, rsum = 0.0, rw = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 o = ivec2(k & 1, k >> 1);
+        const ivec2 q = ivec2(b) + o;
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+        const float bw = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        if (bw <= 1e-4) continue;
+        const DnGeom g = dnGeom(q, pl);
+        if (g.z <= 0.0) continue;
+        const float tapDepth = dnPreviousDepthAt(g, q, hc);
+        if (!(tapDepth > 0.0) || abs(tapDepth - pw) > dnPreviousDepthTolerance(pw, 0.04)) continue;
+        if (!dnPreviousNormalAgrees(g.n, N, 0.85)) continue;
+        PdnSunHist t = pdnUnpackSunHist(imageLoad(uDnHist, ivec3(q, int(2u + pl))));
+        const vec2 sunAge = dnAges(q, pl).zw / HT_REF_MS;
+        t.len = sunAge.x; t.cnt = sunAge.y;
+        if (!(t.len > 0.0)) continue;   // (no surface / never accumulated there)
+        h.acc += bw * pdnSunVis(t.acc);
+        h.var += bw * t.var;
+        h.len += bw * t.len;
+        h.fm += bw * t.fm;
+        h.fm2 += bw * t.fm2;
+        h.cnt = max(h.cnt, t.cnt);
+        if (t.r >= 0.0) { rsum += bw * t.r; rw += bw; }
+        if (!isnan(t.fm) && !isinf(t.fm)) fbox = vec2(min(fbox.x, t.fm), max(fbox.y, t.fm));
+        wsum += bw;
+    }
+    if (wsum < 0.1) return false;   // (too little of the footprint matched: disocclusion)
+    const float iw = 1.0 / wsum;
+    h.acc *= iw; h.var *= iw; h.len *= iw; h.fm *= iw; h.fm2 *= iw;
+    h.r = rw > 0.0 ? rsum / rw : -1.0;
+    if (any(isnan(vec2(h.fm, h.fm2))) || any(isinf(vec2(h.fm, h.fm2)))) return false;
+    return true;
+}
+
+// Longest history for penumbra radius r (texels; < 0 = no caster met) -- the mask's historyCap.
+// ctl.y is temporal-only; spatial dispatches replace it with their iteration.
+// RR consumes a jittered frame without a TAA/SR resolve, as the separate mask does.
+bool dnSunSelfIntegrated()
+{
+    return ssr.taa_params.w < 0.5 || (dp.ctl.y & 8u) != 0u;
+}
+float dnSunHistoryCap(float r, bool dyn, bool hard)
+{
+    return sunHistoryLimit(r, dyn, hard, dp.sun0.x, dp.sun0.y, dp.sun0.z, 8.0, dnSunSelfIntegrated());
+}
+// A penumbra of radius r moves ~r x the light's step (disc radii) per frame: lag <= half a texel.
+float dnSunMoveCap(float r, float cap)
+{
+    return sunHistoryMoveLimit(r, cap, htMotion(sunHistoryMotion(dp.sun0.w)));
+}
+void dnSunTemporal(ivec2 m, uint par, DnGeom g, vec2 hc, float pw)
+{
+    const ivec2 D = ivec2(dp.dims.xy);
+    const vec4 raw4 = imageLoad(uDnIn, ivec3(m, 2));
+    const vec3 rs = pdnSunVis(raw4.rgb);
+    float rr;
+    bool dynNow;
+    pdnSunDecA(raw4.a, rr, dynNow);
+    // ---- this frame's same-surface 3x3 (the projector channels' test) ----
+    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    float nn = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const ivec2 o = ivec2(dx, dy);
+            const ivec2 q = clamp(m + o, ivec2(0), D - 1);
+            vec3 v = rs;
+            if (o != ivec2(0))
+            {
+                const DnGeom gq = dnGeom(q, par);
+                const float zp = dnSurfaceDepthAt(g, m, q);
+                if (dnShadowPlane() && !(zp > 0.0)) continue;
+                if (gq.z <= 0.0 || abs(gq.z - zp) > max(0.04 * g.z, 0.02) || dot(gq.n, g.n) < 0.8) continue;
+                v = pdnSunVis(imageLoad(uDnIn, ivec3(q, 2)).rgb);
+            }
+            m1 += v; m2 += v * v; nn += 1.0;
+        }
+    const vec3 mean = m1 / nn;
+    const vec3 sigma = sqrt(max(m2 / nn - mean * mean, vec3(0.0)));
+    const float rl = dnLum3(rs), ml = dnLum3(mean), sl = dnLum3(sigma);
+
+    // ---- history ----
+    vec2 hcs = hc;
+    if (!dnSampleGridHistory() && (dp.ctl.x & DN_F_SUN_EXACT) != 0u && dnSunSelfIntegrated() && (dp.dims.x < dp.dims.z || dp.dims.y < dp.dims.w))
+    {
+        const vec2 r = dp.dims.zw / dp.dims.xy;   // render px per texel
+        hcs = pdnExactHc((hc + 0.5) * r, r, hc);
+    }
+    PdnSunHist h;
+    vec2 fbox;
+    const bool have = dnSunHistOk() && pw > 0.0 && !dnSunRaw()
+                   && dnFetchSun(hcs, par ^ 1u, pw, g.n, h, fbox);
+    // ---- moving casters (this frame's rays met one, or the countdown from earlier frames) ----
+    const float persist = dp.sun1.z;
+    const float hcnt = have ? h.cnt : 0.0;
+    const bool dynTagged = have && (dynNow || (persist > 0.0 && hcnt > 0.0));
+    const bool sunChanged = dynTagged && dnCasterVisibilityChange(rl, ml, dnLum3(h.acc), sl, 0.0);   // (sun rays: no one-pick evidence)
+    const bool dyn = dnCasterPolicy() == 2u ? sunChanged : dynTagged;
+    const float cnt = persist == 0.0 ? 0.0 : (dynNow ? persist : max(hcnt - htStep(), 0.0));
+    const bool hard = (dp.ctl.x & DN_F_SUN_HARD) != 0u;
+    vec2 hm = vec2(rl, rl * rl);
+    float sa = 0.0;   // the change detector (moving casters only)
+    if (have)
+    {
+        hm = vec2(h.fm, h.fm2);
+        const float fs = sqrt(max(hm.y - hm.x * hm.x, 0.0));
+        if (dyn) sa = max(changeDetect(rl, ml, hm.x, 2.0 * fs + 0.08),
+            (dnCasterPolicy() != 0u && sunChanged) ? 1.0 : 0.0);
+        // leading edge: this frame's rays met the mover and the texel went dark beyond the noise
+        const float tc = min(0.9, inversesqrt(dnSunRays()));
+        if (dyn && dynNow && dnLum3(h.acc) - rl > tc && dnLum3(h.acc) - ml > 0.15) sa = 1.0;
+    }
+    const float rUse = rr >= 0.0 ? rr : (have ? h.r : -1.0);
+    const float sourceCap = dnSunMoveCap(rUse, dnSunHistoryCap(rUse, dyn, hard));
+    const float scapN = dyn && dnCasterPolicy() != 0u ? dnCasterHistoryCap(sourceCap, htStep()) : sourceCap;
+    const float scap = mix(scapN, 1.0, sa);
+    float slen, scut = 0.0;
+    vec3 sun;
+    const float hlen = have ? h.len : 0.0;
+    if (!dyn)
+    {
+        // static casters: the fast means' luminance box + this texel's new fast mean
+        const float fn = have ? mix(hm.x, rl, htAlpha(max(1.0 / max(htAdvance(hlen, scap), 1.0), 0.33))) : rl;
+        const vec2 fb = fbox.x <= fbox.y ? vec2(min(fbox.x, fn), max(fbox.y, fn)) : vec2(fn);
+        sun = accumulateLum(rs, fb.x - 0.02, fb.y + 0.02, have ? h.acc : rs, hlen, scap, slen, scut);
+    }
+    else
+    {
+        const float gm = max(dp.sun1.y, 0.5);
+        sun = accumulate(rs, mean - gm * sigma - 0.01, mean + gm * sigma + 0.01, h.acc, hlen, scap, slen);
+        // certainty bypass: every ray blocked / clear with the neighbourhood agreeing
+        if ((rl <= 0.004 && ml < 0.5) || (rl >= 0.996 && ml > 0.5)) { sun = rs; slen = min(htStep(), scap); }
+    }
+    sun = pdnSunVis(sun);
+    // the penumbra radius the history holds (the mask's accRadius)
+    const float hr = have ? h.r : -1.0;
+    const float srad = rr < 0.0 ? hr : (hr < 0.0 ? rr : mix(hr, rr, htAlpha(max(1.0 / max(slen, 1.0), 0.25))));
+    // fast moments (re-seeded from the 3x3 on a detected change / a mover's cut)
+    vec2 mom = have ? mix(hm, vec2(rl, rl * rl), htAlpha(dyn ? 0.33 : max(1.0 / max(slen, 1.0), 0.33))) : vec2(rl, rl * rl);
+    const float reseed = (dyn && slen < 1.5 && scapN > 1.5) ? 1.0 : sa;
+    mom = mix(mom, vec2(ml, ml * ml + sl * sl), htAlpha(reseed));
+    // the raw sample variance (fast moments), at least the Bhatia-Davis bound where a caster was met
+    float rvar = max(mom.y - mom.x * mom.x, 0.0);
+    if (srad >= 0.0)
+    {
+        const float mm = clamp(dnLum3(sun), 0.0, 1.0);
+        rvar = max(rvar, mm * (1.0 - mm) / dnSunRays());
+    }
+    if (!(rvar >= 0.0)) rvar = 0.0;
+    const float evar = rvar / max(slen, 1.0);   // the estimate's (the a-trous luminance stop)
+    const vec2 localAges = dnAges(m, par).xy;
+    imageStore(uDnHist, ivec3(m, dnAgeLayer(par)), floatBitsToUint(vec4(localAges, slen * HT_REF_MS, cnt * HT_REF_MS)));
+    imageStore(uDnHist, ivec3(m, int(2u + par)), pdnPackSunHist(sun, rvar, slen, cnt, mom.x, mom.y, srad));
+    imageStore(uDnOut, ivec3(m, 2), vec4(sun, min(evar, 60000.0)));
+}
+
+// ==================== SPLIT CHANNEL (#869; clean_pdn_common.glsl SPLIT CHANNEL) ====================
+// Per slot of this texel (its light by SPLIT ID, not by slot): this frame's one-ray visibility
+// accumulated onto THAT LIGHT's history --
+//   * HISTORY BY KEY: last frame's bilinear 2x2 at the reprojected point (the projector channels'
+//     same-surface tests: depth vs the expected one, normal), each tap contributing the slot whose
+//     id is this light's -- wherever it sat last frame; no tap with it: the light is new here
+//     (length 0), never another light's history;
+//   * CLAMP + ANTI-LAG: against this frame's same-surface 3x3 of the SAME light's raw samples (mean
+//     +- gamma sigma, widened toward the Bernoulli spread as few neighbours carry it -- the
+//     DN_F_INFO rule), shortening the history by how far it had to move;
+//   * MOVED LIGHT (the raw word's bit 15: pass 15's rsMoved): the history capped at the moving-
+//     light history (dnMoveHist; 4 frames without the rule) -- its shadow moved;
+//   * NO INFORMATION (the light has no term here this frame): a weight-0 sample -- the history
+//     holds, else the 3x3 mean seeds it, else UNKNOWN (length 0, value 1).
+// Raw routing / the raw views: this frame's samples pass (no-information slots as 1).
+// Writes GEOM layer 2 + parity z, w (the histories; x, y the producer's ids kept) and OUT's split
+// layer (the a-trous input; empty slots 1).
+void dnSplitTemporal(ivec2 m, uint par, DnGeom g, vec2 hc, float pw, bool histOk)
+{
+    const ivec2 D = ivec2(dp.dims.xy);
+    const int L = dnSplitLayer();
+    const int gl = PDN_SPLIT_GEOM_PAR + int(par);
+    // The host copied this frame's RAW to layer 4 before this dispatch. Current
+    // HISTORY writes to gl must never become another invocation's RAW input.
+    const uvec4 cur = imageLoad(uDnGeom, ivec3(m, PDN_SPLIT_GEOM_FINAL));
+    if (dnExactSpecular())
+    {
+        imageStore(uDnGeom, ivec3(m, gl), cur); // retain exact-light identity only
+        imageStore(uDnHist, ivec3(m, dnSplitAgeLayer(par)), uvec4(0u));
+        imageStore(uDnOut, ivec3(m, L), imageLoad(uDnIn, ivec3(m, L)));
+        return; // exact RGB never enters history or a neighbourhood
+    }
+    uvec4 cid, cw;
+    vec4 cr;
+    for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+    {
+        cid[k] = pdnSplitWord(cur.xy, k);
+        cw[k] = pdnSplitWord(cur.zw, k);
+        cr[k] = cid[k] != 0u ? pdnSplitRawVal(cw[k]) : -1.0;
+    }
+    imageStore(uDnHist, ivec3(m, dnSplitAgeLayer(par)), uvec4(0u));
+    if (all(equal(cid, uvec4(0u))))
+    {
+        imageStore(uDnGeom, ivec3(m, gl), uvec4(0u));
+        imageStore(uDnOut, ivec3(m, L), vec4(1.0));
+        return;
+    }
+    // ---- this frame's same-surface 3x3, per light ----
+    vec4 s1 = vec4(0.0), s2 = vec4(0.0), nn = vec4(0.0);
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const ivec2 o = ivec2(dx, dy);
+            uvec4 qs = cur;
+            if (o != ivec2(0))
+            {
+                const ivec2 q = m + o;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+                const DnGeom gq = dnGeom(q, par);
+                const float zp = dnSurfaceDepthAt(g, m, q);
+                if (dnShadowPlane() && !(zp > 0.0)) continue;
+                if (gq.z <= 0.0 || abs(gq.z - zp) > max(0.04 * g.z, 0.02) || dot(gq.n, g.n) < 0.8) continue;
+                qs = imageLoad(uDnGeom, ivec3(q, PDN_SPLIT_GEOM_FINAL));
+            }
+            for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+            {
+                const int j = pdnSplitFind(qs.xy, cid[k]);
+                if (j < 0) continue;
+                const float v = pdnSplitRawVal(pdnSplitWord(qs.zw, uint(j)));
+                if (v < 0.0) continue;
+                s1[k] += v; s2[k] += v * v; nn[k] += 1.0;
+            }
+        }
+    // ---- last frame's history of each light (by id), same-surface bilinear taps ----
+    vec4 hv = vec4(0.0), hl = vec4(0.0), hw = vec4(0.0);
+    if (histOk)
+    {
+        const vec2 b = floor(hc);
+        const vec2 f = hc - b;
+        const uint pl = par ^ 1u;
+        for (int t = 0; t < 4; ++t)
+        {
+            const ivec2 o = ivec2(t & 1, t >> 1);
+            const ivec2 q = ivec2(b) + o;
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+            const float bw = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+            if (bw <= 1e-4) continue;
+            const DnGeom gq = dnGeom(q, pl);
+            const float tapDepth = dnPreviousDepthAt(gq, q, hc);
+            if (gq.z <= 0.0 || !(tapDepth > 0.0) || abs(tapDepth - pw) > dnPreviousDepthTolerance(pw, 0.04)
+                || !dnPreviousNormalAgrees(gq.n, g.n, 0.85)) continue;
+            const uvec4 qs = imageLoad(uDnGeom, ivec3(q, PDN_SPLIT_GEOM_PAR + int(pl)));
+            for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+            {
+                const int j = pdnSplitFind(qs.xy, cid[k]);
+                if (j < 0) continue;
+                const uint w = pdnSplitWord(qs.zw, uint(j));
+                const float len = uintBitsToFloat(imageLoad(uDnHist, ivec3(q, dnSplitAgeLayer(pl))))[j] / HT_REF_MS;
+                const float c = bw * dnConf(len);   // (an unknown tap: DN_UNKNOWN_W)
+                hv[k] += c * pdnSplitHistVal(w); hl[k] += c * len; hw[k] += c;
+            }
+        }
+    }
+    const bool rawV = dnRawView();
+    const float gamma = dp.prm0.z;
+    const float maxL = clamp(dp.prm0.x, 1.0, 31.0);
+    const float mvH = dnMoveHist() > 0u ? float(dnMoveHist()) : 4.0;
+    uvec4 hw4 = uvec4(0u);
+    vec4 outV = vec4(1.0), splitAges = vec4(0.0);
+    for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+    {
+        if (cid[k] == 0u) continue;
+        const float r = cr[k];
+        float val, len;
+        if (rawV)
+        {
+            val = r >= 0.0 ? r : 1.0;
+            len = 0.0;
+        }
+        else
+        {
+            const bool have = hw[k] > 0.02;
+            float hval = have ? hv[k] / hw[k] : 0.0;
+            float hlen = have ? hl[k] / hw[k] : 0.0;
+            const float n9 = nn[k];
+            const float m1 = n9 > 0.0 ? s1[k] / n9 : 0.0;
+            if (have && n9 > 0.0)
+            {
+                float sig = sqrt(max(s2[k] / n9 - m1 * m1, 0.0));
+                const float bb = clamp((s1[k] + 0.5) / (n9 + 1.0), 0.0, 1.0);
+                sig = max(sig, sqrt(max(1.0 - n9 / 9.0, 0.0)) * sqrt(bb * (1.0 - bb)));
+                const float lo = max(m1 - gamma * sig, 0.0), hi = min(m1 + gamma * sig, 1.0);
+                const float hcl = clamp(hval, lo, hi);
+                const float cut = abs(hcl - hval) / max(hval + m1, 1e-4);
+                if (cut > 0.05) hlen = min(hlen, mix(8.0, 1.0, clamp((cut - 0.05) * 3.0, 0.0, 1.0)));
+                hval = hcl;
+            }
+            const float cap = pdnSplitRawMoved(cw[k]) ? max(min(maxL, mvH), 1.0) : maxL;
+            if (r >= 0.0)
+            {
+                const float nf = htAdvance(have ? hlen : 0.0, cap);
+                val = have ? mix(hval, r, htAlpha(1.0 / max(nf, 1.0))) : r;
+                len = nf;
+            }
+            else if (have && hlen > 0.0) { val = hval; len = min(hlen, cap); }
+            else if (n9 > 0.0)           { val = m1; len = min(htStep(), cap); }
+            else                         { val = 1.0; len = 0.0; }   // (UNKNOWN)
+        }
+        val = clamp(val, 0.0, 1.0);
+        if (isnan(val)) { val = 1.0; len = 0.0; }
+        splitAges[k] = len * HT_REF_MS;
+        hw4[k] = pdnSplitHistPack(val, len, r >= 0.0 ? r : val);
+        outV[k] = pdnSplitHistVal(hw4[k]);   // (the stored value: history and a-trous input agree)
+    }
+    imageStore(uDnHist, ivec3(m, dnSplitAgeLayer(par)), floatBitsToUint(splitAges));
+    imageStore(uDnGeom, ivec3(m, gl), uvec4(cur.xy, pdnSplitPack4(hw4)));
+    imageStore(uDnOut, ivec3(m, L), outV);
+}
+
+void main()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(dp.dims.xy);
+    if (any(greaterThanEqual(m, D))) return;
+    const uint par = dnParity();
+    const uvec4 graw = imageLoad(uDnGeom, ivec3(m, int(par)));
+    const DnGeom g = dnGeom(m, par);
+    g_dn_specular_owner = dnSpecularOwner(m, par);
+    if (g.z <= 0.0)
+    {
+        if (dnSplitOn())   // (#869: no surface -- the producer wrote empty slots; the a-trous input lit)
+            imageStore(uDnOut, ivec3(m, dnSplitLayer()), dnExactSpecular() ? vec4(0.0) : vec4(1.0));
+        // No surface (sky, cleared, unlit): nothing to accumulate; zero history (a later
+        // surface here starts fresh -- its guide check fails on the -1 depth anyway).
+        imageStore(uDnHist, ivec3(m, dnAgeLayer(par)), uvec4(0u));
+        if (dnSplitOn()) imageStore(uDnHist, ivec3(m, dnSplitAgeLayer(par)), uvec4(0u));
+        imageStore(uDnHist, ivec3(m, int(par)), uvec4(0u));
+        imageStore(uDnOut, ivec3(m, 0), vec4(0.0));
+        imageStore(uDnOut, ivec3(m, 1), vec4(0.0));
+        if (dnSunOn())   // (the sun channel: lit, no history)
+        {
+            imageStore(uDnHist, ivec3(m, int(2u + par)), uvec4(0u));
+            imageStore(uDnOut, ivec3(m, 2), vec4(1.0, 1.0, 1.0, 0.0));
+        }
+        return;
+    }
+    const vec4 rD4 = imageLoad(uDnIn, ivec3(m, 0));
+    const vec4 rS4 = imageLoad(uDnIn, ivec3(m, 1));
+    const vec3 rD = pdnSane(rD4.rgb), rS = pdnSane(rS4.rgb);
+    const float hitDist = rS4.a;
+    const float W = pdnMetaW(g.meta);
+    // (DN_F_INFO) this texel's signals carry information (else: keep the history, see below)
+    const bool info = dnInfoOn();
+    const bool infoD = !info || dnInfoD(W, rD4);
+    const bool infoS = !info || dnInfoS(W, rS4);
+
+    // ---- this frame's 3x3 neighbourhood (same surface: the depth plane + normal; DN_F_INFO:
+    //      informative texels only) ----
+    const uvec4 mo = imageLoad(uDnMot, m);
+    const float ownVisibility = pdnVisibilityValue(mo.w >> 9u);
+    float visSum = 0.0, visSum2 = 0.0, visN = 0.0;
+    float visStoch = 0.0;   // (the 3x3's texels whose evidence is a stochastic estimate)
+    vec3 sD = vec3(0.0), sD2 = vec3(0.0), sS = vec3(0.0), sS2 = vec3(0.0);
+    float nnD = 0.0, nnS = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const ivec2 o = ivec2(dx, dy);
+            const ivec2 q = clamp(m + o, ivec2(0), D - 1);
+            vec3 qd = rD, qs = rS;
+            bool iD = infoD, iS = infoS;
+            float qvis = ownVisibility;
+            bool qExact = (mo.w & PDN_MOT_EVIDENCE_EXACT) != 0u;
+            if (o != ivec2(0))
+            {
+                const DnGeom gq = dnGeom(q, par);
+                const float zp = dnSurfaceDepthAt(g, m, q);
+                if (dnShadowPlane() && !(zp > 0.0)) continue;
+                if (gq.z <= 0.0 || abs(gq.z - zp) > max(0.04 * g.z, 0.02) || dot(gq.n, g.n) < 0.8) continue;
+                const vec4 qd4 = imageLoad(uDnIn, ivec3(q, 0));
+                const vec4 qs4 = imageLoad(uDnIn, ivec3(q, 1));
+                if (dnRadiance() && dnCasterPolicy() == 2u)
+                {
+                    const uint mot = imageLoad(uDnMot, q).w;
+                    qvis = pdnVisibilityValue(mot >> 9u);
+                    qExact = (mot & PDN_MOT_EVIDENCE_EXACT) != 0u;
+                }
+                qd = pdnSane(qd4.rgb);
+                qs = pdnSane(qs4.rgb);
+                if (info)
+                {
+                    const float Wq = pdnMetaW(gq.meta);
+                    iD = dnInfoD(Wq, qd4);
+                    iS = dnInfoS(Wq, qs4);
+                }
+                if (iS && dnSpecularLobeGuard())
+                {
+                    // Young-history means/clamps must obey the same sharp-lobe footprint.
+                    const float normalPower = mix(256.0, 32.0, smoothstep(0.0, 0.6, g.rough));
+                    iS = length(vec2(o)) <= pdnSpecRadius(g.rough, hitDist, g.z)
+                      && abs(g.rough - gq.rough) <= 0.05
+                      && pow(max(dot(g.n, gq.n), 0.0), normalPower) >= 0.5;
+                }
+            }
+            // Residual specular excludes its exact owner's light. Neighbours
+            // with another owner do not describe the same residual integrand.
+            const bool sameSpecularOwner = !dnExactSpecular() || dnSpecularOwner(q, par) == g_dn_specular_owner;
+            if (!sameSpecularOwner) iS = false;
+            if (dnRadiance() && dnCasterPolicy() == 2u && qvis >= 0.0)
+            { visSum += qvis; visSum2 += qvis * qvis; visN += 1.0; visStoch += qExact ? 0.0 : 1.0; }
+            if (iD) { sD += qd; sD2 += qd * qd; nnD += 1.0; }
+            if (iS) { sS += qs; sS2 += qs * qs; nnS += 1.0; }
+        }
+    // (nothing informative around: the raw default, no clamp below)
+    const vec3 mD = nnD > 0.0 ? sD / nnD : rD, mS = nnS > 0.0 ? sS / nnS : rS;
+    vec3 sigD = nnD > 0.0 ? sqrt(max(sD2 / nnD - mD * mD, vec3(0.0))) : vec3(0.0);
+    vec3 sigS = nnS > 0.0 ? sqrt(max(sS2 / nnS - mS * mS, vec3(0.0))) : vec3(0.0);
+    // (DN_F_INFO) FEW INFORMATIVE SAMPLES: 1-3 one-pick ratios (mostly exactly 0 or 1) give a
+    // collapsed box (sigma ~0) that clamps the history onto them and cuts its length -- a reset
+    // every frame, the noise of the first version. The ratio is bounded in [0, 1], so its spread
+    // is at most the Bernoulli m (1 - m) (Laplace-smoothed mean: never 0 from a few samples);
+    // the box is widened toward it as the informative count falls (a full 3x3: unchanged).
+    if (info)
+    {
+        const float kD = sqrt(max(1.0 - nnD / 9.0, 0.0)), kS = sqrt(max(1.0 - nnS / 9.0, 0.0));
+        const vec3 bD = clamp((sD + 0.5) / (nnD + 1.0), vec3(0.0), vec3(1.0));
+        const vec3 bS = clamp((sS + 0.5) / (nnS + 1.0), vec3(0.0), vec3(1.0));
+        sigD = max(sigD, kD * sqrt(bD * (1.0 - bD)));
+        sigS = max(sigS, kS * sqrt(bS * (1.0 - bS)));
+    }
+    // Spatial luminance variance (young histories): of the 3x3's luminances, approximated by
+    // the per-channel variances' luminance (exact for grey signals, close for coloured ones).
+    const float spVarD = pdnLum(sigD * sigD), spVarS = pdnLum(sigS * sigS);
+
+    // ---- reprojection ----
+    float pw = uintBitsToFloat(mo.z);
+    vec2 hc = vec2(m) + unpackHalf2x16(mo.x);   // camera-only (the producer's)
+    vec2 hcCam = hc;
+    bool hcMv = false;   // (hc follows the motion vectors: object motion included)
+    bool receiverInvalid = false;
+    bool currentRiggedReceiver = false;
+    if (ssr.taa_params.y > 0.5)
+    {
+        // Motion vectors (UV, current minus previous, unjittered): this texel's sample pixel's
+        // unjittered UV back along them -> last frame's denoiser texel centre coordinates.
+        const ivec2 rp = dnRenderPx(m);
+        const vec4 motion = texelFetch(uDnMotion, rp, 0);
+        // Class 2 includes invalid-prior code 3: current identity is separate
+        // from whether the previous pose can validate a history tap.
+        currentRiggedReceiver = receiverMotionClass(motion.w) == 2u;
+        const vec2 mv = motion.xy;
+        const vec2 jit = ssr.taa_params.w > 0.5 ? ssr.taa_jitter.zw * 0.5 : vec2(0.0);
+        const vec2 puv = (vec2(rp) + 0.5) / dp.dims.zw - jit - mv;
+        const bool finiteUv = !any(isnan(puv)) && !any(isinf(puv));
+        if (finiteUv)
+        {
+            hc = puv * dp.dims.xy - 0.5; hcMv = true;
+        }
+        const mat4 previousVp = ssr.views[CLEAN_VIEW_Z].taa_prev_vp;
+        const vec3 previousW = vec3(previousVp[0][3], previousVp[1][3], previousVp[2][3]);
+        // Previous clip W is view depth for this perspective camera only.
+        // Static/orthographic receivers preserve the legacy path verbatim.
+        if (dnLocalReceiverGuides() && receiverMotionClass(motion.w) == 2u
+            && dot(previousW, previousW) > 1e-12)
+        {
+            g_dn_prior_receiver = true;
+            receiverInvalid = !finiteUv || !(motion.z > 0.0) || isinf(motion.z)
+                           || !receiverHasPreviousNormal(motion.w);
+            if (!receiverInvalid)
+            {
+                pw = motion.z;
+                g_dn_prior_normal = receiverPreviousNormal(motion.w);
+            }
+        }
+    }
+    // MOT/motion vectors project into the previous unjittered image, but the
+    // history is stored on the previous jittered, integer-selected raster grid.
+    // Correct both routes before their disagreement test; never relax geometry.
+    if (dnSampleGridHistory())
+    {
+        hc = dnSampleHistoryHc(hc);
+        hcCam = dnSampleHistoryHc(hcCam);
+    }
+    // (#869, dnSurfMoveTexels) the surface itself moved since last frame: the motion vectors'
+    // reprojection disagrees with the camera-only one (static geometry: the same point)
+    const float smT = dnSurfMoveTexels();
+    const bool surfMoved = smT > 0.0 && hcMv && pw > 0.0 && length(hc - hcCam) > smT;
+    // (#1038, DN_F_MOVE_ZTOL) a surface that moved on its own (more than half a texel beyond the
+    // camera's reprojection): its history taps' depth tolerance grows by its own motion
+    if (!g_dn_prior_receiver && dnMoveZTol() && hcMv && length(hc - hcCam) > 0.5)
+        g_dn_zx = dnMoveDepthTol(hc - hcCam, pw);
+    // (#869) the moving-light rule: the moved lights' share kMv (full at half the target)
+    const float mvH = float(dnMoveHist());
+    const float fMv = mvH > 0.0 ? float(mo.w & 0xFFu) / 255.0 : 0.0;
+    const float kMv = clamp(2.0 * fMv, 0.0, 1.0);
+    // The radiance grid has the same truncated sample centres as the sun grid. Full
+    // resolution and jittered histories keep their existing mapping.
+    const vec2 hcSun = hc;
+    const bool exactRad = !dnSampleGridHistory() && dnRadiance() && ssr.taa_params.w < 0.5 && any(lessThan(dp.dims.xy, dp.dims.zw));
+    const vec2 renderPerTexel = dp.dims.zw / dp.dims.xy;
+    if (exactRad) hc = pdnExactHc((hc + 0.5) * renderPerTexel, renderPerTexel, hc);
+    const bool histOk = dnHistOk() && pw > 0.0 && !dnRawView() && !receiverInvalid;
+    Tap h = Tap(vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0u);
+    float hw = 0.0;
+    bool have = histOk && dnFetchHistory(hc, par ^ 1u, pw, g.n, 0.85, 0.04, h, hw, true);
+    // (DN_F_REPROJ_SEARCH) no bilinear tap on this surface: the best-matching texel around hc
+    if (histOk && !have && dnReprojSearch()) have = dnSearchHistory(hc, par ^ 1u, pw, g.n, g.grad, h);
+    // Only the actual receiver's matched surface tap qualifies; a later virtual
+    // specular tap must not turn an unmatched receiver into a recovery candidate.
+    const bool receiverHistoryMatched = have;
+    const Tap receiverHistory = h;
+    vec3 hS = h.s;
+    float hvS = h.vs, hlS = h.ls;
+    const bool casterNow = dnRadiance() && (mo.w & 256u) != 0u;
+    const bool casterAffected = dnRadiance() && (casterNow || (have && h.caster > 0.0));
+    // SPECULAR VIRTUAL MOTION (smooth lobes): the reflected light's history at the mirror
+    // image's previous position, where last frame's guide is still this surface (looser depth:
+    // the virtual position lands elsewhere on the same plane).
+    const float kv = (hitDist > 0.0) ? 1.0 - smoothstep(0.1, 0.35, g.rough) : 0.0;
+    if (histOk && kv > 0.0)
+    {
+        Tap v;
+        float vw;
+        vec2 hv = vec2(m) + unpackHalf2x16(mo.y);
+        if (dnSampleGridHistory()) hv = dnSampleHistoryHc(hv);
+        else if (exactRad) hv = pdnExactHc((hv + 0.5) * renderPerTexel, renderPerTexel, hv);
+        if (dnFetchHistory(hv, par ^ 1u, pw, g.n, 0.95, 0.10, v, vw, length(hv - hc) <= 0.5))
+        {
+            const float k = have ? kv : 1.0;
+            hS = mix(hS, v.s, k); hvS = mix(hvS, v.vs, k); hlS = mix(hlS, v.ls, k);
+            if (!have) { h = v; have = true; }
+        }
+        else if (dnSpecularLobeGuard())
+        {
+            // Surface motion cannot track a moving sharp highlight. A failed
+            // virtual lookup must not silently grant it the surface's long age.
+            hlS *= 1.0 - kv;
+        }
+    }
+    // A short colour history still contains old G. Keep its reset exact,
+    // including virtual specular history; the optional moment-only floor below
+    // cannot retain a prior colour or increase the reset colour length.
+    // Leaving/stopping a changed footprint also needs one fresh restart.
+    const bool resetColour = dnRadianceMoveReset() && (fMv >= 0.05 || (have && h.moved > 0.0));
+    if (dnRadianceMoveReset() && (fMv >= 0.05 || (have && h.moved > 0.0))) have = false;
+    float lenD = have ? h.ld : 0.0;
+    float lenS = have ? hlS : 0.0;
+    // (DN_F_INFO) the history holds a real estimate (not only unknown taps' defaults)
+    const bool estD = have && lenD > 0.0, estS = have && lenS > 0.0;
+    vec3 hD = have ? h.d : rD;
+    if (!have) { hS = rS; hvS = spVarS; }
+    float hvD = have ? h.vd : spVarD;
+
+    const float visMean = visSum / max(visN, 1.0);
+    const float visSigma = sqrt(max(visSum2 / max(visN, 1.0) - visMean * visMean, 0.0));
+    // (the evidence's sampling noise: dnCasterSamplingNoise; a deviation pending since last frame confirms).
+    // One test for both channels: the residual specular's shadows are the same lights' and casters'.
+    const bool testV = casterAffected && receiverHistoryMatched && visN > 0.0;
+    const float noiseV = dnCasterSamplingNoise(receiverHistory.visibility, visMean, visStoch, visN, receiverHistory.ld);
+    const float curV = dnCasterCurrent(ownVisibility, visMean, (mo.w & PDN_MOT_EVIDENCE_EXACT) != 0u);
+    const uint pendV = testV ? dnCasterPending(curV, visMean, receiverHistory.visibility, visSigma, noiseV) : 0u;
+    const bool edgeV = testV
+        && (dnCasterVisibilityChange(curV, visMean, receiverHistory.visibility, visSigma, noiseV)
+            || dnCasterConfirmed(pendV, receiverHistory.pending));
+    const bool casterChangeD = have && (dnCasterPolicy() == 2u ? edgeV : dnCasterPolicy() == 1u && casterAffected
+        && dnCasterChange(pdnLum(rD), pdnLum(mD), pdnLum(hD), pdnLum(sigD)));
+    const bool casterChangeS = have && (dnCasterPolicy() == 2u ? edgeV : dnCasterPolicy() == 1u && casterAffected
+        && dnCasterChange(pdnLum(rS), pdnLum(mS), pdnLum(hS), pdnLum(sigS)));
+    if (casterChangeD) { lenD = 0.0; hD = rD; }
+    if (casterChangeS) { lenS = 0.0; hS = rS; }
+
+    // A moved light leaving the footprint (or stopping) must not restore the old long
+    // history. Bit 15 is available in radiance mode: its converged shortcut is disabled.
+    if (dnRadiance() && have && h.moved > 0.0 && fMv < 0.05) { lenD = 0.0; lenS = 0.0; }
+
+    // ---- signal reference W: the light set itself changed -> cut the history ----
+    bool referenceCut = false;
+    if (have && dp.prm1.z > 0.0)
+    {
+        const float r = abs(W - h.W) / max(max(W, h.W), 1e-4);
+        const float cut = smoothstep(dp.prm1.z, 2.0 * dp.prm1.z, r);
+        referenceCut = cut > 0.0;
+        lenD *= 1.0 - cut;
+        lenS *= 1.0 - cut;
+    }
+
+    // ---- neighbourhood clamp + anti-lag ----
+    const float gamma = dp.prm0.z;
+    // (DN_F_RADIANCE, clean_dn_common.glsl) a reservoir-reusing radiance signal: the 3x3's sigma floored at the
+    // history's own per-sample spread -- a neighbourhood that shares one pick is no evidence of a change
+    if (have && dnRadiance())
+    {
+        sigD = max(sigD, dnRadSpread(hvD, mD, hD));
+        sigS = max(sigS, dnRadSpread(hvS, mS, hS));
+    }
+    bool clampedD = false, clampedS = false;
+    if (have)
+    {
+        if (nnD > 0.0) hD = dnClamp(hD, mD, sigD, gamma, lenD, clampedD);
+        if (nnS > 0.0) hS = dnClamp(hS, mS, sigS, gamma, lenS, clampedS);
+    }
+
+    // ---- adaptive length, accumulation, variance ----
+    float maxD = max(dp.prm0.x, 1.0);
+    float maxS = max(mix(dp.prm1.w, dp.prm0.y, smoothstep(0.05, 0.6, g.rough)), 1.0);
+    if (kMv > 0.0)   // (#869: a moved light's shadow -- the history cap)
+    {
+        maxD = max(min(maxD, mix(maxD, mvH, kMv)), 1.0);
+        if (!dnMoveDiffOnly()) maxS = max(min(maxS, mix(maxS, mvH, kMv)), 1.0);
+    }
+    const bool follow = dnCasterFollow(pendV, receiverHistory.ld);   // (pendV: policy 2 only)
+    const bool casterCapD = dnCasterShouldCap(dnCasterPolicy(), casterAffected, casterChangeD || follow);
+    const bool casterCapS = dnCasterShouldCap(dnCasterPolicy(), casterAffected, casterChangeS || follow);
+    if (casterCapD) maxD = dnCasterHistoryCap(maxD, htStep());
+    if (casterCapS) maxS = dnCasterHistoryCap(maxS, htStep());
+    float nD = htAdvance(lenD, maxD);
+    float nS = htAdvance(lenS, maxS);
+    const float aD = lenD > 0.0 ? htAlpha(1.0 / max(nD, 1.0)) : 1.0;
+    const float aS = lenS > 0.0 ? htAlpha(1.0 / max(nS, 1.0)) : 1.0;
+    vec3 accD = mix(hD, rD, aD);
+    vec3 accS = mix(hS, rS, aS);
+    // (#1038, DN_F_YOUNG_BOOST) NO USABLE HISTORY (a disocclusion -- a whole avatar revealed at once
+    // has no settled neighbour to fill from): the first estimate is the same-surface 3x3 mean of this
+    // frame's raw samples (the centre included; informative ones only), not the lone sample. Still
+    // length 1: the next frames' own samples take over at 1/2, 1/3, ... Only on such texels.
+    if (!have && dnYoungBoost() && !dnRawView())   // (raw routing / views: this frame's samples, untouched)
+    {
+        if (infoD && nnD > 1.5) accD = mD;
+        if (infoS && nnS > 1.5) accS = mS;
+    }
+    const float lD = pdnLum(rD), lS = pdnLum(rS);
+    const float muD = pdnLum(hD), muS = pdnLum(hS);
+    // (#869) A STABLE KERNEL under a moved light: the colour keeps the short (capped) history, but
+    // the variance -- the a-trous luminance stop, i.e. the blur strength -- keeps a LONGER moment
+    // history (up to RS_MOVE_VAR_LEN frames, in proportion to the moved share), and is not replaced
+    // by this frame's 3x3 once the capped history is warm. A per-frame 3x3 variance makes the
+    // kernel strength flicker frame to frame, which the eye reads as crawling "water".
+    const float RS_MOVE_VAR_LEN = 16.0;
+    const float aVD = have ? htAlpha(1.0 / max(max(nD, mix(nD, RS_MOVE_VAR_LEN, kMv)), 1.0)) : aD;
+    const float kMvS = dnMoveDiffOnly() ? 0.0 : kMv;   // (DN_F_MOVE_DIFF_ONLY: the specular as without the rule)
+    const float aVS = have ? htAlpha(1.0 / max(max(nS, mix(nS, RS_MOVE_VAR_LEN, kMvS)), 1.0)) : aS;
+    float varD = (1.0 - aVD) * (hvD + aVD * (lD - muD) * (lD - muD));
+    float varS = (1.0 - aVS) * (hvS + aVS * (lS - muS) * (lS - muS));
+    // (young history: the 3x3 spatial estimate, as SVGF -- under the move cap only while the
+    // capped history itself is still filling, not every frame)
+    if (nD < (kMv > 0.0 ? min(4.0, maxD) : 4.0)) varD = max(varD, spVarD);
+    if (nS < (kMvS > 0.0 ? min(4.0, maxS) : 4.0)) varS = max(varS, spVarS);
+    if (!(varD >= 0.0)) varD = spVarD;   // (NaN)
+    if (!(varS >= 0.0)) varS = spVarS;
+    // (DN_F_INFO) NO INFORMATION this frame -- a WEIGHT-0 SAMPLE: the (clamped) history unchanged
+    // at its length; cut to nothing by the anti-lag (W / clamp), the informative same-surface 3x3
+    // mean replaces it, else it holds at length 1. With no usable history that 3x3 mean SEEDS it
+    // at length 1 (spatial fill: a disoccluded texel is a full tap of the a-trous and the upsample
+    // at once). Only with neither does the texel stay UNKNOWN (length 0, the default value,
+    // down-weighted as a tap: dnConf).
+    if (!infoD)
+    {
+        if (have && lenD > 0.0)     { accD = hD; nD = min(lenD, maxD); varD = hvD; }
+        else if (nnD > 0.0)          { accD = mD; nD = min(htStep(), maxD); varD = spVarD; }
+        else if (estD)               { accD = hD; nD = min(htStep(), maxD); varD = hvD; }
+        else                         { accD = have ? hD : rD; nD = 0.0; varD = have ? hvD : spVarD; }
+        if (!(varD >= 0.0)) varD = 0.0;
+    }
+    if (!infoS)
+    {
+        if (have && lenS > 0.0)     { accS = hS; nS = min(lenS, maxS); varS = hvS; }
+        else if (nnS > 0.0)          { accS = mS; nS = min(htStep(), maxS); varS = spVarS; }
+        else if (estS)               { accS = hS; nS = min(htStep(), maxS); varS = hvS; }
+        else                         { accS = have ? hS : rS; nS = 0.0; varS = have ? hvS : spVarS; }
+        if (!(varS >= 0.0)) varS = 0.0;
+    }
+
+    const bool recoverVariance = dnSkinnedVarianceRecovery() && currentRiggedReceiver
+        && g_dn_prior_receiver && !receiverInvalid && receiverHistoryMatched && resetColour
+        && W > 0.0 && !isinf(W) && receiverHistory.W > 0.0 && !isinf(receiverHistory.W);
+    float recoveredD = 0.0, recoveredS = 0.0;
+    if (recoverVariance)
+    {
+        if (receiverHistory.ld >= 0.5)
+            recoveredD = dnRecoverSkinnedVariance(receiverHistory.vd, pdnLum(receiverHistory.d),
+                lD, spVarD, max(lD, pdnLum(mD)));
+        if (receiverHistory.ls >= 0.5)
+            recoveredS = dnRecoverSkinnedVariance(receiverHistory.vs, pdnLum(receiverHistory.s),
+                lS, spVarS, max(lS, pdnLum(mS)));
+        varD = max(varD, recoveredD);
+        varS = max(varS, recoveredS);
+    }
+    imageStore(uDnHist, ivec3(m, dnAgeLayer(par)), floatBitsToUint(vec4(nD * HT_REF_MS, nS * HT_REF_MS, 0.0, 0.0)));
+    const uint specIt = pdnSpecIters(g.rough, hitDist, g.z, 7u);
+    imageStore(uDnHist, ivec3(m, int(par)), pdnPackHist(pdnSane(accD), pdnSane(accS), varD, varS));
+    // (#869 / #85) ReSTIR-converged diffuse: the producer's reused reservoir M (layer 0 a = 1000 + M)
+    // and this history both long -- the a-trous trims its iterations (DN_CONV_SHIFT)
+    const float rsMraw = rD4.a >= 1000.0 ? rD4.a - 1000.0 : 0.0;
+    // (#869) never where a moved light lights the texel: a reused pick's M is the light SELECTION's
+    // confidence, and a moved light keeps it (re-weighed, not dropped) while its shadow moves
+    // (a share under 5 %: a faint far mover does not cost the cell its shortcut)
+    // (#869, dnSurfMoveTexels) nor on a surface that moved on its own (an animated avatar): the
+    // shadow of a still light slides over it in surface space
+    const bool conv = dnConvIters() != 0u && infoD && rsMraw >= DN_RS_M && nD >= DN_CONV_AGE && !(fMv >= 0.05)
+                   && !surfMoved;
+    uint finalMeta = pdnPackMeta(nD, nS, specIt, W) | ((conv || (dnRadiance() && fMv >= 0.05)) ? 0x8000u : 0u);
+    // Actual ages are HIST milliseconds. Radiance reuses compatibility bits0..9
+    // for the visibility evidence's prior (10 bits); bit10 marks changed pixels, bit11 caster presence,
+    // bits 16-17 the pending deviation (pdnMetaPending).
+    if (dnRadiance())
+    {
+        const float priorVisibility = receiverHistoryMatched ? receiverHistory.visibility : -1.0;
+        const float visibility = dnCasterVisibilityAcc(priorVisibility,
+            dnCasterEvidence(ownVisibility, visMean, visStoch),
+            casterChangeD ? 1.0 : dnCasterEvidenceAlpha(receiverHistory.ld));
+        finalMeta = (finalMeta & ~0xFFFu) | pdnMetaVisibilityCode(visibility)
+            | (casterNow ? 0x800u : 0u) | ((casterCapD || casterCapS) ? 0x400u : 0u)
+            | ((casterChangeD ? 0u : pendV) << PDN_META_PEND_SHIFT);
+    }
+    if (dnDebug() == PDN_DBG_HISTORY_CAUSE)
+    {
+        // Diagnostic mode replaces visibility evidence, never consumes it. Switching
+        // into/out of this view resets history on the host. Ages remain in HIST.
+        // Preserve W, specular iterations and the moving/converged bit. Transport
+        // causes here so the spatial pass still filters real colour and feedback.
+        const uint causes = W > 0.0 ? ((receiverHistoryMatched ? 0u : 1u)
+            | (resetColour || referenceCut ? 2u : 0u) | (clampedD || clampedS ? 4u : 0u)) : 0u;
+        finalMeta = (finalMeta & ~7u) | causes;
+    }
+    imageStore(uDnGeom, ivec3(m, int(par)), uvec4(graw.xyz, finalMeta));
+    // (RenderVKDenoiseDebug 1, DN_F_INFO: the raw view marks the texels without information --
+    // magenta = picks that carried no light, dark blue = no ray-traced projector candidate)
+    vec3 outD = accD;
+    // Diagnostic output only, after the real colour history was stored. The
+    // spatial pass transports this mask without filtering it into neighbours.
+    if (dnDebug() == PDN_DBG_SKIN_RECOVERY)
+        outD = vec3(currentRiggedReceiver ? 1.0 : 0.0,
+                    currentRiggedReceiver && resetColour ? 1.0 : 0.0,
+                    recoveredD > 0.0 || recoveredS > 0.0 ? 1.0 : 0.0);
+    if (info && dnDebug() == PDN_DBG_RAW && !infoD) outD = W > 0.0 ? vec3(1.0, 0.0, 1.0) : vec3(0.0, 0.0, 0.3);
+    // (DN_HFIX_SHIFT) a YOUNG history (a disocclusion): the a-trous sees at least a few-sample
+    // estimate's variance, ~ scale^2 / n with the scale the larger of its own value and the same-
+    // surface 3x3 mean -- a lone 1-sample outlier gets a wide luminance stop (its neighbours average
+    // it) instead of the near-zero spread of a thin strand's 1-2 texel gated 3x3. OUT only: the
+    // history's own variance (HIST) is not inflated, so the boost ends with the youth.
+    float varDo = varD, varSo = varS;
+    {
+        const float yD = nD > 0.0 ? dnYouth(nD) : 0.0, yS = nS > 0.0 ? dnYouth(nS) : 0.0;
+        if (yD > 0.0) { const float l = max(pdnLum(accD), pdnLum(mD)); varDo = max(varD, yD * l * l / nD); }
+        if (yS > 0.0) { const float l = max(pdnLum(accS), pdnLum(mS)); varSo = max(varS, yS * l * l / nS); }
+    }
+    imageStore(uDnOut, ivec3(m, 0), vec4(pdnSane(outD), min(varDo, 60000.0)));
+    imageStore(uDnOut, ivec3(m, 1), vec4(pdnSane(accS), min(varSo, 60000.0)));
+    if (dnSunOn()) dnSunTemporal(m, par, g, hcSun, pw);   // (the merged RT shadow pass's sun / moon)
+    if (dnSplitOn()) dnSplitTemporal(m, par, g, hc, pw, histOk);   // (#869: the split lights' own visibility)
+}

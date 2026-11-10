@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<panel name="preferences_sound_general">
+	<scroll_container name="sound_scroll">
+	<panel name="sound_scroll_panel">
+	<slider label="Master-Lautstärke" name="System Volume"/>
+	<check_box initial_value="true" name="mute_when_minimized"/>
+	<slider label="Schaltflächen" name="UI Volume"/>
+	<slider label="Umgebung" name="Wind Volume"/>
+	<slider label="Soundeffekte" name="SFX Volume"/>
+	<slider label="Musik wird gestreamt" name="Music Volume"/>
+	<check_box label="Aktiviert" name="enable_music"/>
+	<slider label="Medien" name="Media Volume"/>
+	<check_box label="Aktiviert" name="enable_media"/>
+	<slider label="Voice-Chat" name="Voice Volume"/>
+	<check_box label="Aktiviert" name="enable_voice_check"/>
+	<check_box label="Medien, die an andere Avatare angehängt sind, wiedergeben." name="media_show_on_others_btn" tool_tip="Diese Option deaktivieren, um Medien für andere Avataren, die sich in der Nähe befinden, auszublenden." value="true"/>
+	<check_box label="Sounds von Gesten abspielen" name="gesture_audio_play_btn" tool_tip="Markieren, um Sounds von Gesten zu hören" value="true"/>
+	<text name="Listen from">Zuhören von:</text>
+	<check_box label="Avatarlippen beim Sprechen bewegen" name="enable_lip_sync"/>
+	<check_box label="Sprachfunktion beim Drücken folgender Taste(n) ein-/ausschalten:" name="push_to_talk_toggle_check" tool_tip="Wenn der Umschaltmodus aktiviert ist, drücken Sie die Auslöse-Taste EINMAL, um Ihr Mikrofon ein- oder auszuschalten. Wenn der Umschaltmodus nicht aktiviert ist, ist das Mikrofon nur dann eingeschaltet, wenn Sie die Auslösetaste gedrückt halten."/>
+	<button label="Eingabe-/Ausgabegeräte" name="device_settings_btn"/>
+	<panel label="Geräte-Einstellungen" name="device_settings_panel"/>
+	<combo_box name="media_auto_play_combo">
+		<item name="autoplay_enabled" label="Ja"/>
+		<item name="autoplay_ask" label="Fragen"/>
+		<item name="autoplay_disabled" label="Nein"/>
+	</combo_box>
+
+	</panel>
+	</scroll_container>
+</panel>

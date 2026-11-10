@@ -1,0 +1,500 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — SNOW MESH TILE CACHE: PLAN, COMPACTION and CULL (#1496; vkgfx/llcleanweathervk.cpp
+// recordMeshTiles; the layout and the cache's contract: clean_weather_snowmesh_tiles.glsl). The mesh
+// set (clean_weather_snowmesh.comp's layout: 2 the index pool, 6 the snow passes' marks, 9 the tile
+// state, 10 the parameters, 11 the draws) and its own 128 B push block. Every recording:
+//   SELECT   the reference scan's dirty tiles (the snow's slow change), at most b3.w per recording --
+//            the rest stay drawn as built (consistent: their texels moved less than the next scan
+//            sees) and are taken by a later recording.
+//   PLAN A   per tile: keyed to its world tile (wrap-around slot; an entering tile -- a snap -- is
+//            unkeyed: nothing valid), the dirty radii (a changed texel moves vertices up to 2 tiles
+//            and cells up to 3 tiles away: clean_weather_snowmesh.comp LOCAL PATCHES' margins), the
+//            reach (built while within a layer's reach + H of the camera, evicted past + 2H), the
+//            cell list (a tile that may be DRAWN now: at once; one only within the margin: capped).
+//   PLAN B   the vertex list: invalid vertices that a cell build of this recording reads (the tile's
+//            own and its 8 neighbours': a cell reads corners up to 8 texels out and the neighbour
+//            blocks' apron slots), + the band list (inner: the ring surface under the vertices).
+//   COMPACT  when the active pool half is 3/4 full with a quarter of a half dead (or over): the live
+//            ranges are copied into the other half (a prefix sum over the records; one workgroup per
+//            tile copies its range) -- a copy, never a rebuild.
+//   CULL     per tile and view (the main view's cone, each sun cascade's planes): its stride from the
+//            LIVE camera, its seams, the band / fade culls -> one VkDrawIndexedIndirectCommand.
+// CROSS-TILE INVARIANTS (scripts/check/checks/snow_mesh_tiles.py tests them on a CPU model):
+//   I1 a vertex is computed once, into its own slot, from the texels alone (no camera): every tile
+//      that indexes it sees the same position -- no cracks between tiles built in different frames;
+//   I2 a change marks every tile whose vertices (2 tiles) or cells (3 tiles) read it, and the cells of
+//      a tile are only built when the vertices of its 3 x 3 neighbourhood are valid (PLAN B);
+//   I3 the drawn stride of a tile is never coarser than the one its AABB's distance asks for, and the
+//      AABB holds every vertex its cells index: a coarse tile's dmin >= the switch distance, so every
+//      vertex on its border is fully morphed onto the coarse lattice (morph complete at 0.92 x it):
+//      a T-junction with a finer neighbour closes; its seam skirts are the safety net;
+//   I4 every view draws the stride chosen from the MAIN camera (the same geometry in the G-buffer,
+//      the pre-pass and every cascade).
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_weather_snowmesh_tiles.glsl"
+
+layout(std430, set = 0, binding = 2) buffer WxMeshIdx { uint mesh_idx[]; };
+layout(std430, set = 0, binding = 6) readonly buffer WxMeshMarks { uint mk[]; };
+const uint kMkHead = 8u;   // (clean_weather_snowmesh.comp)
+layout(std430, set = 0, binding = 9) buffer WxTileState { uint ts[]; };
+layout(std430, set = 0, binding = 10) readonly buffer WxTileParams { vec4 par[]; };
+layout(std430, set = 0, binding = 11) buffer WxTileDraws { uint dr[]; };
+
+layout(push_constant) uniform TilePush
+{
+    vec4  a0;   // the inner grid: x0, y0, 1 / extent, top
+    vec4  a1;   // its shear xy, its map box's span, its resolution
+    vec4  a2;   // the ring: x0, y0, 1 / extent, top
+    vec4  a3;   // its shear xy, span, resolution (0: the ring does not run this recording)
+    uvec4 b0;   // x the mode, y the ring's ALLOCATED resolution (the layout), z the epochs (inner | ring << 16), w flags (kPf*)
+    ivec4 b1;   // the windows' origins (world tiles): inner xy, ring zw
+    ivec4 b2;   // the windows' moves since the last plan (tiles): inner xy, ring zw
+    uvec4 b3;   // x the pool half (triangles), y the prefetch cap, z the strides (inner bits 0..2, ring 4..6), w the scan cap
+} tp;
+const uint kPfMarks = 1u;       // the published inner grid's marks are new (read them once)
+const uint kPfWhich = 2u;       // ... the published grid is grid 1 (its mask)
+const uint kPfRingReset = 4u;   // the ring was re-keyed: every inner tile's ring surface is refreshed
+const uint kPfDumpAll = 8u;     // the snow dump: every tile in reach is built at once (no cap)
+const uint kPfCompact = 16u;    // a layer was re-keyed: its old ranges are unreferenced -- compact now
+const uint kPfNoEvict = 32u;    // an offscreen recording (a snapshot's camera): build what it draws, evict nothing
+uint nViews() { return (tp.b0.w >> 8u) & 15u; }
+const uint kModeSelect = 1u, kModePlanA = 2u, kModePlanB = 3u, kModeCompactScan = 4u, kModeCompactCopy = 5u, kModeCull = 6u;
+
+// The cull's parameters (par[kParCull ..]; llcleanweathervk.cpp recordMeshTiles):
+vec3  pCam()       { return par[kParCull].xyz; }       // the MAIN camera (the VS's: its records' c6)
+float pMargin(uint layer) { return layer == 0u ? par[kParCull].w : par[kParCull + 2u].y; }   // H (m)
+vec3  pFwd()       { return par[kParCull + 1u].xyz; }
+float pConeCos()   { return par[kParCull + 1u].w; }
+float pKeep()      { return par[kParCull + 2u].x; }
+float pReach(uint layer) { return layer == 0u ? par[kParCull + 2u].z : par[kParCull + 2u].w; }   // rOut
+vec2  pLod(uint layer)   { return layer == 0u ? par[kParCull + 3u].xy : par[kParCull + 3u].zw; }
+vec4  pPlane(uint c, uint i) { return par[kParCull + 4u + c * 6u + i]; }
+
+const float kRingCut = 0.98;   // (clean_weather_snowmesh.comp)
+const float kBandIn = 0.75, kRingBandIn = 0.8;
+
+TsLayout lay() { return tsLayout(uint(tp.a1.w + 0.5), tp.b0.y); }
+uint tilesPer(uint layer) { return layer == 0u ? uint(tp.a1.w + 0.5) / 8u : tp.b0.y / 8u; }
+uint epochOf(uint layer) { return layer == 0u ? (tp.b0.z & 0xFFFFu) : (tp.b0.z >> 16u); }
+ivec2 originOf(uint layer) { return layer == 0u ? tp.b1.xy : tp.b1.zw; }
+ivec2 moveOf(uint layer) { return layer == 0u ? tp.b2.xy : tp.b2.zw; }
+bool ringRuns() { return tp.a3.w > 0.5; }
+uint slotOf(uint layer, ivec2 g)
+{
+    const uint T = tilesPer(layer);
+    const ivec2 W = originOf(layer) + g;
+    return wrapTile(W.y, T) * T + wrapTile(W.x, T);
+}
+uint keyOf(uint layer, ivec2 g) { const ivec2 W = originOf(layer) + g; return (uint(W.x) & 0xFFFFu) | (uint(W.y) << 16u); }
+bool inWin(uint layer, ivec2 q) { const int T = int(tilesPer(layer)); return all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, ivec2(T))); }
+bool keyedRec(uint layer, ivec2 g, uint rec) { return ts[rec + kRKey] == keyOf(layer, g) && ts[rec + kREpoch] == epochOf(layer); }
+
+// ---- the dirty radii ----
+uint maskBit(uint base, uint idx) { return (ts[base + (idx >> 5u)] >> (idx & 31u)) & 1u; }
+// A grid tile position q (this window's coordinates; may lie outside it) CHANGED this recording: it
+// entered or left the window (the move: inside one window and not the other), or a mark / a selected
+// scan bit on it.
+bool changedAt(uint layer, ivec2 q)
+{
+    const int T = int(tilesPer(layer));
+    const ivec2 mv = moveOf(layer);
+    const bool inNew = inWin(layer, q);
+    const bool inOld = all(greaterThanEqual(q + mv, ivec2(0))) && all(lessThan(q + mv, ivec2(T)));
+    if (inNew != inOld) return true;
+    if (!inNew) return false;
+    const TsLayout L = lay();
+    const uint idx = uint(q.y * T + q.x);
+    if (maskBit(layer == 0u ? L.selI : L.selR, idx) != 0u) return true;
+    if (layer == 0u && (tp.b0.w & kPfMarks) != 0u)
+    {
+        const uint W = (L.NI + 31u) / 32u;
+        const uint mb = kMkHead + ((tp.b0.w & kPfWhich) != 0u ? W : 0u);
+        if (((mk[mb + (idx >> 5u)] >> (idx & 31u)) & 1u) != 0u) return true;
+    }
+    return false;
+}
+bool changedWithin(uint layer, ivec2 g, int r)
+{
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+            if (changedAt(layer, g + ivec2(dx, dy))) return true;
+    return false;
+}
+
+// ---- the reach ----
+// The plan's box of grid tile g: its columns' xy (the closed footprint + a texel: the smoothed outline)
+// at heights [zlo, zhi] -- the record's hint once its vertices were built, else the whole map box (a
+// sheared column sweeps span x shear). false: a built tile without a single texel.
+bool planBox(uint layer, ivec2 g, uint rec, uint stv, out vec2 lo, out vec2 hi)
+{
+    const vec4 F0 = layer == 0u ? tp.a0 : tp.a2, F1 = layer == 0u ? tp.a1 : tp.a3;
+    const float res = layer == 0u ? tp.a1.w : float(tp.b0.y);
+    const float w = 1.0 / (F0.z * res);
+    const vec2 u0 = F0.xy + vec2(g) * 8.0 * w - w, u1 = F0.xy + vec2(g + 1) * 8.0 * w + 2.0 * w;
+    float zlo = F0.w - F1.z, zhi = F0.w;
+    if ((stv & kSHint) != 0u)
+    {
+        zlo = orderedFloat(ts[rec + kRHintLo]);
+        zhi = orderedFloat(ts[rec + kRHintHi]);
+        if (zlo > zhi) { lo = hi = vec2(0.0); return false; }
+    }
+    const vec2 sA = (F0.w - zhi) * F1.xy, sB = (F0.w - zlo) * F1.xy;
+    lo = u0 + min(sA, sB);
+    hi = u1 + max(sA, sB);
+    return true;
+}
+float rMinXY(vec2 lo, vec2 hi) { const vec2 c = pCam().xy; return length(c - clamp(c, lo, hi)); }
+float rMaxXY(vec2 lo, vec2 hi) { const vec2 c = pCam().xy; return length(max(abs(c - lo), abs(c - hi))); }
+// The inner grid's EDGE FADE's largest value over a box (clean_weather_snowmesh.comp edgeFade: its uv
+// is linear in xy and z, so the box's corners bound it).
+float innerEdgeFadeMax(vec2 lo, vec2 hi, float zlo, float zhi)
+{
+    float e = 1.0;
+    for (int k = 0; k < 8; ++k)
+    {
+        const vec3 P = vec3((k & 1) != 0 ? hi.x : lo.x, (k & 2) != 0 ? hi.y : lo.y, (k & 4) != 0 ? zhi : zlo);
+        const vec2 uv = (P.xy - (tp.a0.w - P.z) * tp.a1.xy - tp.a0.xy) * tp.a0.z;
+        e = min(e, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+    }
+    return 1.0 - smoothstep(0.02, 0.06, e);
+}
+float innerBandAtR(float r) { const float o = pReach(0u); return smoothstep(kBandIn * o, o, r); }
+// May the layer draw anything of a box (grown by H)? inner: its band is under 0.999 somewhere (the
+// FS keeps the inner layer there; the cull uses the same test on the built AABB). ring: its fade is
+// under 0.999 somewhere and the inner band reaches the ring's cut somewhere.
+bool reachOK(uint layer, vec2 lo, vec2 hi, float zlo, float zhi, float H)
+{
+    const float rmin = max(rMinXY(lo, hi) - H, 0.0), rmax = rMaxXY(lo, hi) + H;
+    if (layer == 0u) return innerBandAtR(rmin) < 0.999;
+    const float o = pReach(1u);
+    if (smoothstep(kRingBandIn * o, o, rmin) >= 0.999) return false;
+    if (!ringRuns()) return false;
+    return innerBandAtR(rmax) >= kRingCut || innerEdgeFadeMax(lo - H, hi + H, zlo, zhi) >= kRingCut;
+}
+
+// ---- SELECT ----
+void planSelect()
+{
+    const uint layer = gl_WorkGroupID.z;
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (!inWin(layer, g) || (layer == 1u && !ringRuns())) return;
+    const TsLayout L = lay();
+    const uint T = tilesPer(layer), idx = uint(g.y) * T + uint(g.x);
+    if (maskBit(layer == 0u ? L.scanI : L.scanR, idx) == 0u) return;
+    // (only a tile with built vertices has anything to invalidate: an unbuilt one -- out of reach, its
+    // reference stale -- would be flagged every recording and starve the cap; it is built from its
+    // texels when it comes into reach)
+    const uint rec = tsRecord(L, layer, slotOf(layer, g));
+    if (!keyedRec(layer, g, rec) || (ts[rec + kRState] & kSV) == 0u) return;
+    if (atomicAdd(ts[kHSoft], 1u) >= tp.b3.w) return;   // (the rest: a later recording)
+    atomicOr(ts[(layer == 0u ? L.selI : L.selR) + (idx >> 5u)], 1u << (idx & 31u));
+}
+
+// ---- PLAN A ----
+void freeRange(uint rec)
+{
+    atomicAdd(ts[kHDead], ts[rec + kRTotal]);
+}
+void planA()
+{
+    const uint layer = gl_WorkGroupID.z;
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (!inWin(layer, g) || (layer == 1u && !ringRuns())) return;
+    const TsLayout L = lay();
+    const uint rec = tsRecord(L, layer, slotOf(layer, g));
+    uint stv = ts[rec + kRState];
+    if (!keyedRec(layer, g, rec))
+    {
+        // An ENTERING tile (the slot held the world tile that left on the other side) or a new epoch:
+        // nothing in the record is valid. Its old range is dead (a new epoch's pool starts empty).
+        if (ts[rec + kREpoch] == epochOf(layer) && (stv & kSLive) != 0u) freeRange(rec);
+        stv = 0u;
+        ts[rec + kRKey] = keyOf(layer, g);
+        ts[rec + kREpoch] = epochOf(layer);
+        ts[rec + kRTotal] = 0u;
+    }
+    else
+    {
+        if ((stv & kSV) != 0u && changedWithin(layer, g, 2)) stv &= ~kSV;   // (the height hint stays: a change is local)
+        if ((stv & kSC) != 0u && changedWithin(layer, g, 3))
+        {
+            if ((stv & kSLive) != 0u) freeRange(rec);
+            stv &= ~(kSC | kSLive);
+        }
+    }
+    vec2 lo, hi;
+    const bool some = planBox(layer, g, rec, stv, lo, hi);
+    const float zlo = (stv & kSHint) != 0u ? orderedFloat(ts[rec + kRHintLo]) : (layer == 0u ? tp.a0.w - tp.a1.z : tp.a2.w - tp.a3.z);
+    const float zhi = (stv & kSHint) != 0u ? orderedFloat(ts[rec + kRHintHi]) : (layer == 0u ? tp.a0.w : tp.a2.w);
+    const float H = pMargin(layer);
+    const bool drawable = some && reachOK(layer, lo, hi, zlo, zhi, 0.0);
+    const bool wanted = some && reachOK(layer, lo, hi, zlo, zhi, H);
+    const bool keep = some && reachOK(layer, lo, hi, zlo, zhi, 2.0 * H);
+    if (!keep && (stv & kSC) != 0u && (tp.b0.w & kPfNoEvict) == 0u)
+    {
+        // EVICTION: out of reach + 2H -- the range is freed (the compaction reclaims it), the vertices stay
+        if ((stv & kSLive) != 0u) freeRange(rec);
+        stv &= ~(kSC | kSLive);
+        atomicAdd(ts[kHEvict], 1u);
+    }
+    // (V clears: the cells phase / vertices phase set kSC / kSV when they ran)
+    ts[rec + kRState] = stv;
+    if (wanted && (stv & kSC) == 0u)
+    {
+        bool take = drawable || (tp.b0.w & kPfDumpAll) != 0u;
+        if (!take)
+        {
+            take = atomicAdd(ts[kHPref], 1u) < tp.b3.y;
+            if (!take) atomicOr(ts[kHFlags], 4u);
+        }
+        if (take)
+        {
+            const uint i = atomicAdd(ts[kHCList], 1u);
+            if (i < L.NT) ts[L.clist + i] = tileEntry(layer, uvec2(g));
+            else atomicOr(ts[kHFlags], 8u);
+            const uint T = tilesPer(layer), idx = uint(g.y) * T + uint(g.x);
+            atomicOr(ts[(layer == 0u ? L.dueI : L.dueR) + (idx >> 5u)], 1u << (idx & 31u));
+        }
+    }
+}
+
+// ---- PLAN B ----
+bool cellsDue(uint layer, ivec2 q)
+{
+    if (!inWin(layer, q)) return false;
+    const TsLayout L = lay();
+    const uint T = tilesPer(layer), idx = uint(q.y) * T + uint(q.x);
+    return maskBit(layer == 0u ? L.dueI : L.dueR, idx) != 0u;
+}
+// The ring tiles under an inner tile's box changed this recording (selected, so rebuilt now).
+bool ringChangedUnder(vec2 lo, vec2 hi, float zlo, float zhi)
+{
+    if (!ringRuns()) return false;
+    const TsLayout L = lay();
+    const int TR = int(tilesPer(1u));
+    vec2 ulo = vec2(1e30), uhi = vec2(-1e30);
+    for (int k = 0; k < 8; ++k)
+    {
+        const vec3 P = vec3((k & 1) != 0 ? hi.x : lo.x, (k & 2) != 0 ? hi.y : lo.y, (k & 4) != 0 ? zhi : zlo);
+        const vec2 uv = (P.xy - (tp.a2.w - P.z) * tp.a3.xy - tp.a2.xy) * tp.a2.z * tp.a3.w / 8.0;   // (ring tiles)
+        ulo = min(ulo, uv); uhi = max(uhi, uv);
+    }
+    // (ringTopAt reads the ring's texels up to 2 out: one tile of margin)
+    const ivec2 a = max(ivec2(floor(ulo)) - 1, ivec2(0)), b = min(ivec2(floor(uhi)) + 1, ivec2(TR - 1));
+    for (int y = a.y; y <= b.y; ++y)
+        for (int x = a.x; x <= b.x; ++x)
+            if (maskBit(L.selR, uint(y * TR + x)) != 0u) return true;
+    return false;
+}
+void planB()
+{
+    const uint layer = gl_WorkGroupID.z;
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (!inWin(layer, g) || (layer == 1u && !ringRuns())) return;
+    const TsLayout L = lay();
+    const uint rec = tsRecord(L, layer, slotOf(layer, g));
+    const uint stv = ts[rec + kRState];
+    bool band = false;
+    if ((stv & kSV) == 0u)
+    {
+        bool need = false;
+        for (int dy = -1; dy <= 1 && !need; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (cellsDue(layer, g + ivec2(dx, dy))) { need = true; break; }
+        if (need)
+        {
+            const uint i = atomicAdd(ts[kHVList], 1u);
+            if (i < L.NT) ts[L.vlist + i] = tileEntry(layer, uvec2(g));
+            else atomicOr(ts[kHFlags], 8u);
+            band = layer == 0u;
+        }
+    }
+    else if (layer == 0u)
+    {
+        vec2 lo, hi;
+        if (planBox(0u, g, rec, stv, lo, hi))
+        {
+            const float zlo = orderedFloat(ts[rec + kRHintLo]), zhi = orderedFloat(ts[rec + kRHintHi]);
+            band = (tp.b0.w & kPfRingReset) != 0u || ringChangedUnder(lo, hi, zlo, zhi);
+        }
+    }
+    if (band)
+    {
+        const uint i = atomicAdd(ts[kHBList], 1u);
+        if (i < L.NI) ts[L.blist + i] = tileEntry(0u, uvec2(g));
+        else atomicOr(ts[kHFlags], 8u);
+    }
+}
+
+// ---- COMPACTION ----
+bool liveRec(uint r)
+{
+    const TsLayout L = lay();
+    const uint layer = r < L.NI ? 0u : 1u;
+    const uint rec = L.table + kRecWords * r;
+    return (ts[rec + kRState] & kSLive) != 0u && ts[rec + kREpoch] == epochOf(layer) && ts[rec + kRTotal] > 0u;
+}
+shared uint sScan[64];
+shared uint sRun;
+void compactScan()
+{
+    // one workgroup: decide, then the live ranges' new offsets (record order)
+    const TsLayout L = lay();
+    const uint P = tp.b3.x;
+    const uint bump = ts[kHBump], dead = ts[kHDead];
+    const bool go = (tp.b0.w & kPfCompact) != 0u || bump > P || (bump * 4u > P * 3u && dead * 4u > P);
+    if (!go) return;   // (uniform: the header is the same for every invocation; the copy's dispatch stays 0)
+    const uint li = gl_LocalInvocationIndex;
+    if (li == 0u) sRun = 0u;
+    barrier();
+    for (uint c = 0u; c < L.NT; c += 64u)
+    {
+        const uint r = c + li;
+        const uint n = (r < L.NT && liveRec(r)) ? ts[L.table + kRecWords * r + kRTotal] : 0u;
+        sScan[li] = n;
+        barrier();
+        // (Hillis-Steele inclusive scan of 64)
+        for (uint o = 1u; o < 64u; o <<= 1u)
+        {
+            const uint v = li >= o ? sScan[li - o] : 0u;
+            barrier();
+            sScan[li] += v;
+            barrier();
+        }
+        if (r < L.NT) ts[L.nbase + r] = sRun + sScan[li] - n;
+        barrier();
+        if (li == 63u) sRun += sScan[63];
+        barrier();
+    }
+    if (li == 0u)
+    {
+        ts[kHSrc] = ts[kHActive];
+        ts[kHActive] = ts[kHActive] ^ 1u;
+        ts[kHLive] = sRun;
+        ts[kHBump] = sRun;
+        ts[kHDead] = 0u;
+        ts[kHCopy] = L.NT;
+        atomicOr(ts[kHFlags], 2u);
+    }
+}
+void compactCopy()
+{
+    // one workgroup per record: its live range -> the new half at its prefix offset
+    const TsLayout L = lay();
+    const uint r = gl_WorkGroupID.x;
+    if (r >= L.NT || !liveRec(r)) return;
+    const uint rec = L.table + kRecWords * r;
+    const uint src = ts[rec + kRBase], dst = ts[kHActive] * tp.b3.x + ts[L.nbase + r];
+    const uint n = 3u * ts[rec + kRTotal];
+    for (uint i = gl_LocalInvocationIndex; i < n; i += 64u) mesh_idx[3u * dst + i] = mesh_idx[3u * src + i];
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) ts[rec + kRBase] = dst;
+}
+
+// ---- CULL ----
+// The drawn stride of a built record from the MAIN camera (I3: never coarser than its AABB's distance
+// asks for; the finest built one else -- stride 1 is always built).
+uint drawStride(uint layer, uint rec, uint stv, out vec3 lo, out vec3 hi)
+{
+    lo = vec3(orderedFloat(ts[rec + kRLo]), orderedFloat(ts[rec + kRLo + 1u]), orderedFloat(ts[rec + kRLo + 2u]));
+    hi = vec3(orderedFloat(ts[rec + kRHi]), orderedFloat(ts[rec + kRHi + 1u]), orderedFloat(ts[rec + kRHi + 2u]));
+    const vec3 c = pCam();
+    const float dmin = length(max(max(lo - c, c - hi), vec3(0.0)));
+    const vec2 lod = pLod(layer);
+    const uint want = dmin < lod.x ? 1u : (dmin < lod.y ? 2u : 4u);
+    if (want == 4u && (stv & kSB4) != 0u) return 4u;
+    if (want >= 2u && (stv & kSB2) != 0u) return 2u;
+    return 1u;
+}
+bool drawnRec(uint layer, ivec2 g, out uint rec, out uint stv)
+{
+    rec = 0u; stv = 0u;
+    if (!inWin(layer, g)) return false;
+    rec = tsRecord(lay(), layer, slotOf(layer, g));
+    stv = ts[rec + kRState];
+    return keyedRec(layer, g, rec) && (stv & kSC) != 0u && ts[rec + kRTotal] > 0u;
+}
+bool coneKeeps(vec3 lo, vec3 hi)
+{
+    const float cosA = pConeCos();
+    if (cosA < -1.0) return true;   // (no view direction: everything)
+    const vec3 c = 0.5 * (lo + hi), d = c - pCam();
+    const float r = 0.5 * length(hi - lo), L = length(d);
+    if (L <= r + pKeep()) return true;
+    const float a = dot(d, pFwd());
+    const float e = sqrt(max(L * L - a * a, 0.0));
+    return e * cosA - a * sqrt(max(1.0 - cosA * cosA, 0.0)) <= r;   // (the sphere meets the cone)
+}
+bool planesKeep(uint c, vec3 lo, vec3 hi)
+{
+    for (uint i = 0u; i < 6u; ++i)
+    {
+        const vec4 p = pPlane(c, i);
+        const vec3 v = vec3(p.x >= 0.0 ? hi.x : lo.x, p.y >= 0.0 ? hi.y : lo.y, p.z >= 0.0 ? hi.z : lo.z);
+        if (dot(p.xyz, v) + p.w < 0.0) return false;
+    }
+    return true;
+}
+void tileCull()
+{
+    const uint layer = gl_WorkGroupID.z / kMaxViews, view = gl_WorkGroupID.z % kMaxViews;
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (view >= nViews() || (layer == 1u && !ringRuns())) return;
+    uint rec, stv;
+    if (!drawnRec(layer, g, rec, stv)) return;
+    vec3 lo, hi;
+    const uint s = drawStride(layer, rec, stv, lo, hi);
+    // the layer's culls (the FS / VS do the exact cut): inner past its band, the ring faded out or wholly
+    // inside the inner layer's band start
+    const float rmin = rMinXY(lo.xy, hi.xy);
+    if (layer == 0u)
+    {
+        if (innerBandAtR(rmin) >= 0.999) return;
+    }
+    else
+    {
+        const float o = pReach(1u);
+        if (smoothstep(kRingBandIn * o, o, rmin) >= 0.999) return;
+        if (innerBandAtR(rMaxXY(lo.xy, hi.xy)) < kRingCut && innerEdgeFadeMax(lo.xy, hi.xy, lo.z, hi.z) < kRingCut) return;
+    }
+    if (view == 0u ? !coneKeeps(lo, hi) : !planesKeep(view - 1u, lo, hi)) return;
+    // SEAMS: a neighbour tile drawn at another stride
+    bool seam = false;
+    const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    for (int i = 0; i < 4; ++i)
+    {
+        uint nrec, nst;
+        vec3 nlo, nhi;
+        if (drawnRec(layer, g + kN[i], nrec, nst) && drawStride(layer, nrec, nst, nlo, nhi) != s) seam = true;
+    }
+    const uint si = s == 1u ? 0u : (s == 2u ? 1u : 2u);
+    const uint c1 = ts[rec + kRS1], c2 = ts[rec + kRS1 + 1u];
+    uint off = 0u;
+    if (si >= 1u) off += (c1 & 0xFFFFu) + (c1 >> 16u);
+    if (si >= 2u) off += (c2 & 0xFFFFu) + (c2 >> 16u);
+    const uint cs = ts[rec + kRS1 + si];
+    const uint n = (cs & 0xFFFFu) + (seam ? (cs >> 16u) : 0u);
+    if (n == 0u) return;
+    const TsLayout L = lay();
+    const uint k = atomicAdd(dr[view], 1u);
+    if (k >= L.NT) return;
+    const uint o = drawCmd(L, view, k);
+    dr[o] = 3u * n;                               // indexCount
+    dr[o + 1u] = 1u;                              // instanceCount
+    dr[o + 2u] = 3u * (ts[rec + kRBase] + off);   // firstIndex
+    dr[o + 3u] = 0u;                              // vertexOffset
+    dr[o + 4u] = layer * 4u + si;                 // firstInstance: the VS's constants record
+    if (view == 0u) atomicAdd(ts[kHDrawn], 1u);
+}
+
+void main()
+{
+    const uint m = tp.b0.x;
+    if (m == kModeSelect) planSelect();
+    else if (m == kModePlanA) planA();
+    else if (m == kModePlanB) planB();
+    else if (m == kModeCompactScan) compactScan();
+    else if (m == kModeCompactCopy) compactCopy();
+    else if (m == kModeCull) tileCull();
+}

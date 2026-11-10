@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="all"
+ height="408"
+ label="Safety"
+ layout="topleft"
+ left="102"
+ name="safety"
+ top="1"
+ width="517">
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="33"
+   name="vr_title"
+   font.style="BOLD"
+   top_pad="10"
+   width="450">
+    VR safety and comfort (apply while Slipstream runs in a VR headset)
+  </text>
+  <check_box
+   control_name="SlipstreamVRSafetyGovernor"
+   follows="left|top"
+   height="16"
+   label="Protect against low frame rate (recommended)"
+   layout="topleft"
+   left="33"
+   name="vr_safety_governor"
+   top_pad="6"
+   width="450">
+    <check_box.commit_callback
+     function="Pref.VRSafetyGovernor" />
+  </check_box>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="42"
+   layout="topleft"
+   left="54"
+   name="vr_safety_governor_help"
+   top_pad="2"
+   wrap="true"
+   width="430">
+    A frame rate below the headset's refresh rate can cause motion sickness. When frames are missed, Slipstream lowers draw distance and other costly settings until the frame rate recovers, then restores them. Your settings are not changed.
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="33"
+   name="vr_comfort_title"
+   font.style="BOLD"
+   top_pad="6"
+   width="450">
+    Moving and turning
+  </text>
+  <slider
+   control_name="SlipstreamVRComfortVignette"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.05"
+   initial_value="0.5"
+   label="Comfort vignette when moving:"
+   label_width="200"
+   layout="topleft"
+   left="33"
+   max_val="1"
+   min_val="0"
+   name="vr_vignette"
+   tool_tip="Darkens the edges of your view while it moves without your head (thumbstick walking, flying, the fly cam, vehicles, smooth turning). Reduces motion sickness. 0 = off."
+   top_pad="6"
+   width="420" />
+  <check_box
+   control_name="SlipstreamVRSmoothTurn"
+   follows="left|top"
+   height="16"
+   label="Smooth turning (turning in steps is gentler for most people)"
+   layout="topleft"
+   left="33"
+   name="vr_smooth_turn"
+   tool_tip="The right thumbstick turns you continuously instead of in steps. Smooth turning makes many people feel sick."
+   top_pad="8"
+   width="450" />
+  <slider
+   control_name="SlipstreamVRSnapTurnDegrees"
+   decimal_digits="0"
+   follows="left|top"
+   height="16"
+   increment="15"
+   initial_value="30"
+   label="Turn step (degrees):"
+   label_width="200"
+   layout="topleft"
+   left="33"
+   max_val="90"
+   min_val="15"
+   name="vr_snap_degrees"
+   tool_tip="How far one flick of the right thumbstick turns you."
+   top_pad="6"
+   width="420" />
+  <slider
+   control_name="SlipstreamVRSmoothTurnSpeed"
+   decimal_digits="0"
+   follows="left|top"
+   height="16"
+   increment="10"
+   initial_value="90"
+   label="Smooth turning speed (degrees/s):"
+   label_width="200"
+   layout="topleft"
+   left="33"
+   max_val="360"
+   min_val="20"
+   name="vr_smooth_speed"
+   tool_tip="How fast smooth turning turns you at full stick."
+   top_pad="6"
+   width="420" />
+  <check_box
+   control_name="SlipstreamVRWallFreezesMovement"
+   follows="left|top"
+   height="16"
+   label="The thumbsticks do not move me while the UI wall is shown"
+   layout="topleft"
+   left="33"
+   name="vr_wall_freeze"
+   tool_tip="While the UI wall is up the sticks belong to the UI (walking around physically still works). Off: they move you as usual, except the pointing hand's stick while it points at the wall (it scrolls)."
+   top_pad="8"
+   width="450" />
+  <check_box
+   control_name="SlipstreamVRTeleportMove"
+   follows="left|top"
+   height="16"
+   label="Teleport with the left thumbstick instead of walking"
+   layout="topleft"
+   left="33"
+   name="vr_teleport_move"
+   tool_tip="Push the left thumbstick forward and hold to aim an arc at a landing spot (blue: you can go there, red: you can't), let it go to teleport there; pull it back to cancel. The right thumbstick still turns you and moves you up and down."
+   top_pad="8"
+   width="450" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="33"
+   name="vr_view_title"
+   font.style="BOLD"
+   top_pad="10"
+   width="450">
+    Your view
+  </text>
+  <spinner
+   control_name="SlipstreamVREyeHeight"
+   decimal_digits="2"
+   follows="left|top"
+   height="20"
+   increment="0.01"
+   initial_value="1.6"
+   label="My standing eye height (m):"
+   label_width="200"
+   layout="topleft"
+   left="33"
+   max_val="2.5"
+   min_val="0.5"
+   name="vr_eye_height"
+   tool_tip="At this real height your view is at your avatar's eyes. Recenter takes your current height instead (to play seated: sit down, then recenter)."
+   top_pad="6"
+   width="270" />
+  <button
+   follows="left|top"
+   height="20"
+   label="Recenter VR View"
+   layout="topleft"
+   left_pad="10"
+   name="vr_recenter"
+   tool_tip="What you face becomes your avatar's facing, and where your head is now becomes your avatar's eyes (also your height). The same as holding the left thumbstick down for a second."
+   top_delta="0"
+   width="140">
+    <button.commit_callback
+     function="View.VRRecenter" />
+  </button>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="33"
+   name="vr_view_height_label"
+   top_pad="10"
+   width="200">
+    View height with this avatar:
+  </text>
+  <combo_box
+   control_name="SlipstreamVRViewHeightMode"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="0"
+   name="vr_view_height_mode"
+   tool_tip="Saved for each avatar. At the avatar's eyes: the view is where your avatar's eyes are (as in mouselook). At my own height: your real height above the avatar's feet, whatever the avatar's size. Scale the world to my avatar: at the avatar's eyes, with the world (distances, depth, your head's movement) scaled to the avatar, so a small avatar sees a big world."
+   top_delta="-4"
+   width="220">
+    <combo_box.item
+     label="At the avatar's eyes"
+     name="vr_view_height_avatar"
+     value="0" />
+    <combo_box.item
+     label="At my own height"
+     name="vr_view_height_own"
+     value="1" />
+    <combo_box.item
+     label="Scale the world to my avatar"
+     name="vr_view_height_scaled"
+     value="2" />
+  </combo_box>
+  <slider
+   control_name="SlipstreamVRWorldScale"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.05"
+   initial_value="1"
+   label="World size with this avatar:"
+   label_width="200"
+   layout="topleft"
+   left="33"
+   max_val="4"
+   min_val="0.25"
+   name="vr_world_scale"
+   tool_tip="Saved for each avatar. 1 = real size. Above 1 the world looks bigger (you are smaller); below 1 it looks smaller."
+   top_pad="8"
+   width="420" />
+</panel>

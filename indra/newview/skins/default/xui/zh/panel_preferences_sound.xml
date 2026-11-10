@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel label="聲音" name="Preference Media panel">
+	<panel.string name="middle_mouse">
+		滑鼠中鍵
+	</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="基本設定" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

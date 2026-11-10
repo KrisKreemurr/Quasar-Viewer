@@ -1,0 +1,22 @@
+--- a/Source/Core/Memory.h
++++ b/Source/Core/Memory.h
+@@ -2,6 +2,7 @@
+ 
+ #include "../../Include/RmlUi/Core/Traits.h"
+ #include "../../Include/RmlUi/Core/Types.h"
++#include <memory>
+ 
+ namespace Rml {
+ 
+@@ -57,9 +58,9 @@
+ 	constexpr GlobalStackAllocator(const GlobalStackAllocator<U>&) noexcept
+ 	{}
+ 
+-	T* allocate(size_t num_objects) { return static_cast<T*>(Detail::GetGlobalBasicStackAllocator().allocate(alignof(T), num_objects * sizeof(T))); }
++	T* allocate(size_t num_objects) { return std::allocator<T>{}.allocate(num_objects); }
+ 
+-	void deallocate(T* ptr, size_t) noexcept { Detail::GetGlobalBasicStackAllocator().deallocate(ptr); }
++	void deallocate(T* ptr, size_t num_objects) noexcept { std::allocator<T>{}.deallocate(ptr, num_objects); }
+ };
+ 
+ template <class T, class U>

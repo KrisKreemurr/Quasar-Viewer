@@ -1,0 +1,80 @@
+/**
+ * @file   lltinygltfhelper.h
+ *
+ * $LicenseInfo:firstyear=2022&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2022, Linden Research, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
+ * $/LicenseInfo$
+ */
+
+
+#pragma once
+
+#include "llgltfmaterial.h"
+#include "llgltfmateriallist.h"
+#include "llpointer.h"
+#include "tinygltf/tiny_gltf.h"
+#include <functional>
+
+class LLImageRaw;
+class LLViewerFetchedTexture;
+
+namespace LLTinyGLTFHelper
+{
+    using TextureResolver = std::function<LLPointer<LLViewerFetchedTexture>(LLImageRaw*)>;
+    LLColor4 getColor(const std::vector<double>& in);
+    const tinygltf::Image* getImageFromTextureIndex(const tinygltf::Model& model, S32 texture_index);
+    LLImageRaw* getTexture(const std::string& folder, const tinygltf::Model& model, S32 texture_index, std::string& name, bool flip = true);
+    LLImageRaw* getTexture(const std::string& folder, const tinygltf::Model& model, S32 texture_index, bool flip = true);
+
+    bool loadModel(const std::string& filename, tinygltf::Model& model_out);
+    // #1443: the model without decoding its images (each image gets only its width, height,
+    // channels and bits): what the bulk upload list needs for its quote. Worker-safe.
+    bool loadModelImageSizes(const std::string& filename, tinygltf::Model& model_out);
+    bool saveModel(const std::string& filename, tinygltf::Model& model_in);
+
+    bool getMaterialFromModel(
+        const std::string& filename,
+        const tinygltf::Model& model,
+        S32 mat_index,
+        LLFetchedGLTFMaterial* material,
+        std::string& material_name,
+        bool flip = true, const TextureResolver& resolver = {});
+
+    void initFetchedTextures(tinygltf::Material& material,
+        LLPointer<LLImageRaw>& base_color_img,
+        LLPointer<LLImageRaw>& normal_img,
+        LLPointer<LLImageRaw>& mr_img,
+        LLPointer<LLImageRaw>& emissive_img,
+        LLPointer<LLImageRaw>& occlusion_img,
+        LLPointer<LLViewerFetchedTexture>& base_color_tex,
+        LLPointer<LLViewerFetchedTexture>& normal_tex,
+        LLPointer<LLViewerFetchedTexture>& mr_tex,
+        LLPointer<LLViewerFetchedTexture>& emissive_tex, const TextureResolver& resolver = {});
+
+    // The pixel work of initFetchedTextures (alpha stripped from normal / ORM / emissive,
+    // occlusion packed into the ORM red channel), no textures made: safe on a worker thread.
+    void packImages(const tinygltf::Material& material,
+        LLPointer<LLImageRaw>& base_color_img,
+        LLPointer<LLImageRaw>& normal_img,
+        LLPointer<LLImageRaw>& mr_img,
+        LLPointer<LLImageRaw>& emissive_img,
+        LLPointer<LLImageRaw>& occlusion_img);
+}
+

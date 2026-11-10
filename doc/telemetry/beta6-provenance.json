@@ -1,0 +1,29 @@
+{
+  "author": "SkyLine",
+  "owner_base": "403df1306324bd99b017a80204e66c87b91a185b",
+  "source_main": "0a927c688a78e650dc71c4f872a4239df2dfd009",
+  "source_base": "502c4e0ba76f9495d2279271362e9bb3389f5084",
+  "verified_patch_base": "45ee2f88c0754a34efd39023c0947b8f78e974fa",
+  "patch_sha256": "1a7a21909be78ffdc0ffb163a9b892ec01a6a1d4faf3a2346d06121c3290c672",
+  "application": "git apply --check and git apply, no conflicts/adaptations",
+  "server_files": {
+    "telemetry_server/README.md": "8f63449b9fe3f2aa57b4b5e282ec57d39ebe4c609e93a71bea4ca50e05646c18",
+    "telemetry_server/check_sources.py": "e404e82a9df634d008769d3eebf52001260a61c364a9970bb9637e973f0e3701",
+    "telemetry_server/generate_schema.py": "6d80b32a739c37991f561857341ba610fc77b6c7d5e416519a6e2bc2452f715e",
+    "telemetry_server/ingest.py": "2bdc670a9414699eec9d7813a129d5db3937199b41217194aab5a6741d4d5c3b",
+    "telemetry_server/test_ingest.py": "fc587fa1ae19ad8d354a8d3e66fbf348846b3cf97bf46e0d79f306ba4fd868bb"
+  },
+  "security_followup": {
+    "issue": "G4-01 durable revocation across interrupted queue removal",
+    "source_main_fix": "649ee251f37f778eeb6e90af25622e229196ab64",
+    "files": [
+      "indra/newview/sltelemetry.cpp",
+      "indra/newview/sltelemetryqueue.h",
+      "indra/newview/tests/sltelemetryqueue_test.cpp",
+      "indra/newview/app_settings/settings.xml",
+      "doc/telemetry/implementation.md"
+    ],
+    "wire_schema": "unchanged",
+    "server_files": "unchanged"
+  }
+}

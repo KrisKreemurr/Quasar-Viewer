@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- #1118 VR on-screen keyboard (the fallback to dictation). The keys are built in code
+     (llfloatervrkeyboard.cpp), which also sizes the floater. Chrome: it never takes the
+     keyboard focus from the text field it types into. -->
+<floater
+    name="vr_keyboard"
+    title="KEYBOARD"
+    single_instance="true"
+    can_minimize="false"
+    can_close="false"
+    can_resize="false"
+    can_tear_off="false"
+    can_dock="false"
+    save_rect="false"
+    chrome="true"
+    layout="topleft"
+    height="220"
+    width="500">
+</floater>

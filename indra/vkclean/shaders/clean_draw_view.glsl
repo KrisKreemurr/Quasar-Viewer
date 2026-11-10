@@ -1,0 +1,100 @@
+// vkclean -- the world draw's per-VIEW block (#238: push constants <= 128 B).
+//
+// Formerly the 240-byte draw push constant; now an entry of the draw-view ring (C++
+// VKDrawPush, std430 stride 256, draw set 0 binding 36), selected by the 16-byte push
+// below. `pc.u_*` reads are unchanged: `pc` names this draw's entry. The view index is
+// a push constant, so it is dynamically uniform (scalar / constant-cache loads).
+//
+// Slot reuse by pass (all producers in llcleanrenderervk.cpp, unchanged by #238):
+//   u_sun_color.w      1 = reflection-probe capture, 2 = planar-mirror capture
+//   u_ambient_color.w  1 = main-view rigged: hide the agent's own avatar (mouselook)
+//                      0.25 = main-view rigged: hide only its system-body head parts
+//   u_inv_view_proj    particles: world->view (billboard basis)
+//   u_water_fog        world FS: water fog colour / density; rigged in mirror / probe
+//                      captures: .xyz main eye; probe capture .w: the light list;
+//                      selection: outline colour; particles: .x blend pair, .y pool size
+//   u_sky_zenith.w     1 = rigged pass that draws the cluster LOD path's avatars itself (main
+//                      view opaque / mask, and the shadow / capture / pick passes whose
+//                      cluster rig list runs): drop the instances it owns (#747,
+//                      clean_draw_rigged.vert); 0 elsewhere (the F8 collapse mode is
+//                      g_draw_push.f8)
+#ifndef CLEAN_DRAW_VIEW_GLSL
+#define CLEAN_DRAW_VIEW_GLSL
+
+struct DrawView {
+    mat4 u_view_proj;      // offset 0   : world -> clip (VK NDC)
+    vec4 u_sun_dir;        // offset 64
+    vec4 u_sun_color;      // offset 80
+    vec4 u_ambient_color;  // offset 96
+    vec4 u_cam_time;       // offset 112 : .xyz camera world pos, .w time (s)
+    vec4 u_sky_horizon;    // offset 128 : reflection colour near the horizon
+    vec4 u_sky_zenith;     // offset 144 : reflection colour overhead
+    mat4 u_inv_view_proj;  // offset 160 : VK clip -> world (water refraction depth)
+    vec4 u_water_fog;      // offset 224
+    vec4 u_origin;         // offset 240 : CAMERA-RELATIVE ORIGIN (#555): u_view_proj maps
+                           // (world - u_origin.xyz) to clip in clean_draw.vert and
+                           // clean_particle.vert; 0 = a world-space u_view_proj
+};                         // 256 B (std430 array stride 256)
+
+#ifdef CLEAN_DRAW_VIEW_UBO
+// DEFERRED LIGHTING (#814; clean_deferred_light.comp defines this): the main view's ONE entry
+// as a UNIFORM BUFFER -- set 2 binding 10 of LLCleanRendererVK mDslDefer, type
+// UNIFORM_BUFFER_DYNAMIC over the same ring region (range 256 B), its dynamic offset = the
+// pushed entry x 256 at every bind (recordDeferredLighting). Same bytes as draw_views[view]
+// (std140 == std430 for DrawView: vec4 / mat4 members only, struct size 256), so every
+// pc.u_* read is unchanged -- but a constant-bank operand instead of a register-loaded
+// global read. The whole ring (1 MB: 2048 entries x 2 frame slots, absolute indices) can't
+// be a UBO (maxUniformBufferRange 64 KB on NVIDIA), so the per-draw graphics / particle
+// passes keep the SSBO below.
+// #1075 LAYERED STEREO: the N consecutive entries of a main-view pass (pushDrawViews), one per
+// view -- the binding's range is N entries (LLCleanRendererVK init: kViewCount = the session's
+// view count). A layered kernel reads [CLEAN_VIEW]; a single-view pipeline (kViewCount 1, every
+// desktop pipeline) has the one entry it always had.
+#include "clean_view.glsl"
+layout(std140, set = 2, binding = 10) uniform DrawViewMain { DrawView draw_view_main[kViewCount]; };
+#else
+layout(std430, set = 0, binding = 36) readonly buffer DrawViews { DrawView draw_views[]; };
+#endif
+
+// A compute consumer of the draw sets (the deferred lighting pass) declares its own
+// push block -- named g_draw_push, with the view index as member `view` -- first.
+#ifndef CLEAN_EXTERNAL_DRAW_PUSH
+layout(push_constant) uniform DrawPush {
+    uint view;   // absolute draw-view ring index
+    uint f8;     // F8 alpha collapse: 0 off, 1 the cull-FRONT draw, 2 the cull-BACK draw (drops water),
+                 // 3 water only (F2: the mirror water-cap draw over its alpha bucket)
+    uint pad0;   // main-view alpha-blend FS (pass 2): VISR_* visibility-reuse flags (clean_draw_common.glsl)
+    uint pad1;
+} g_draw_push;     // 16 B
+#endif
+
+// AVATAR ALPHA DEPTH (RenderVKAvatarAlphaDepthThreshold; clean_blend_depth_rule.glsl AVATAR DENSE
+// LAYER): pad0 bit 30 marks the avatar pre-pass draws into the avatar depth (LLCleanRendererVK
+// kPushAvDepthPre) -- clean_draw.vert / clean_draw_rigged.vert collapse every non-avatar instance,
+// clean_prepass_blend.frag tests the avatar threshold. Clear of BLEND_GBUF_PUSH (31), the VISR_* /
+// #1147 bits (0-12) and the cluster draws' view index.
+const uint AVD_PREPASS_PUSH = 0x40000000u;
+// AN AVATAR FACE, for the avatar alpha depth: a GPU-rigged mesh (bit 0) that is not a flexi chain
+// (bit 19: world flexi; a worn flexi chain is not told apart from it and stays world-like), or a worn
+// rigid attachment (bit 9). Never a HUD face (bit 3: its own pass).
+bool avatarDepthFace(uint flags)
+{
+    return (flags & 8u) == 0u && ((((flags & 1u) != 0u) && (flags & 524288u) == 0u) || (flags & 512u) != 0u);
+}
+
+// LAYERED STEREO (#1075; clean_view.glsl): a main-view pass of N views pushes N CONSECUTIVE
+// entries (LLCleanRendererVK::pushDrawViews: the base, eye 0 .. N-1) and its multiview raster
+// stages read entry base + CLEAN_VIEW. A single-view pipeline (every desktop pipeline, every
+// auxiliary view: cascades, projector tiles, probe faces, pick, HUD) has kViewCount 1, so the
+// index folds to g_draw_push.view exactly as before. Compute includers read the pushed entry
+// itself (the deferred lighting's UBO: its view's entry, [0] at one view).
+#include "clean_view.glsl"
+#ifdef CLEAN_DRAW_VIEW_UBO
+#define pc draw_view_main[CLEAN_VIEW]
+#elif defined(CLEAN_VIEW)
+#define pc draw_views[g_draw_push.view + CLEAN_VIEW]
+#else
+#define pc draw_views[g_draw_push.view]
+#endif
+
+#endif

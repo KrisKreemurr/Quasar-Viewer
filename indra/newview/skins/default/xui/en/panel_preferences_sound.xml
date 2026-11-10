@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="all"
+ height="438"
+ label="Sounds"
+ layout="topleft"
+ left="102"
+ name="Preference Media panel"
+ top="1"
+ width="517">
+    <panel.string
+     name="middle_mouse">
+     Middle Mouse
+    </panel.string>
+    <panel.string
+     name="button4_mouse">
+     Mouse Button 4
+    </panel.string>
+    <panel.string
+     name="button5_mouse">
+     Mouse Button 5
+    </panel.string>
+    <!-- Sound & Media subtabs (#1263): General, and UI Sounds for the notification and pie menu sounds -->
+    <tab_container
+        top_pad="0"
+        enabled="true"
+        follows="left|top"
+        height="430"
+        left_delta="0"
+        mouse_opaque="false"
+        name="sound_tab_container"
+        tab_position="top"
+        tab_stop="false"
+        tab_min_width="40"
+        width="517">
+        <panel
+            label="General"
+            name="sound_prefs_general"
+            filename="panel_preferences_sound_general.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="UI Sounds"
+            name="sound_prefs_ui"
+            filename="panel_preferences_sound_ui.xml"
+            layout="topleft"
+            follows="top|left" />
+    </tab_container>
+</panel>

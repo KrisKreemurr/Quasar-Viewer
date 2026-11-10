@@ -1,0 +1,107 @@
+<?xml version="1.0" ?>
+<!--
+  VR wrist panel layout (#1120). Read once by LLVRWrist (llvrwrist.cpp) on the first VR frame that
+  shows the panel; every key is optional (the built-in defaults are the values below).
+  Lengths in millimetres on the panel unless named _m (metres). Rects are top-left origin.
+  Sizing (research/VR_WRIST_2026-11-05.md): read at ~0.45 m, a 14 mm text line gives ~0.84 deg
+  x-height (~12 px at the Valve Index's ~14 px/deg); buttons 47 x 36 mm (~6 x 4.6 deg).
+  The panel's image is drawn at line_px / line_mm pixels per millimetre, line_px being the
+  font's own line height (so text is drawn 1:1, never scaled).
+-->
+<llsd>
+<map>
+  <key>version</key><integer>1</integer>
+  <key>size_mm</key><array><real>210</real><real>136</real></array>
+  <key>margin_mm</key><real>5</real>
+  <key>line_mm</key><real>14</real>
+  <key>font</key>
+  <map>
+    <key>name</key><string>SansSerif</string>
+    <key>size</key><string>VRWrist</string>
+  </map>
+  <!-- The quad in the left AIM pose's frame (OpenXR: +X right, +Y up out of the controller's
+       top, -Z forward): centre offset_m, facing +Y with text up along -Z, then tilted about its
+       own X toward the eyes by up to tilt_max_deg; lifted lift_m along its normal. -->
+  <key>mount</key>
+  <map>
+    <key>offset_m</key><array><real>0</real><real>0.035</real><real>0.12</real></array>
+    <key>lift_m</key><real>0.02</real>
+    <key>tilt_max_deg</key><real>35</real>
+  </map>
+  <!-- Shown while the mount's (untilted) normal points at the head: on above on_dot, off below
+       off_dot, the head within max_dist_m; on after show_delay_s, off after hide_delay_s. -->
+  <key>show</key>
+  <map>
+    <key>on_dot</key><real>0.55</real>
+    <key>off_dot</key><real>0.35</real>
+    <key>max_dist_m</key><real>0.85</real>
+    <key>show_delay_s</key><real>0.10</real>
+    <key>hide_delay_s</key><real>0.35</real>
+  </map>
+  <!-- Touch with the right controller's tip (its aim origin, tip_m along the aim ray): a press
+       when it comes within press_mm in front of the panel (or through it, up to through_mm
+       behind) over a button; released once it backs off past release_mm. hover_mm: the
+       fingertip shows on the panel from this distance. -->
+  <key>touch</key>
+  <map>
+    <key>tip_m</key><real>0.01</real>
+    <key>hover_mm</key><real>70</real>
+    <key>press_mm</key><real>8</real>
+    <key>release_mm</key><real>22</real>
+    <key>through_mm</key><real>60</real>
+  </map>
+  <key>header</key>
+  <map>
+    <key>rect_mm</key><array><real>5</real><real>5</real><real>200</real><real>14</real></array>
+  </map>
+  <!-- The feed: rows of row_mm (row_gap_mm apart) in rect_mm. A pending dialog takes the bottom
+       of it: its text row plus a row of buttons button_mm tall (at most max_buttons of its own
+       plus "Open on wall"). -->
+  <key>feed</key>
+  <map>
+    <key>rect_mm</key><array><real>5</real><real>21</real><real>200</real><real>68</real></array>
+    <key>row_mm</key><real>15</real>
+    <key>row_gap_mm</key><real>2</real>
+    <key>max_items</key><integer>12</integer>
+    <key>im</key><boolean>1</boolean>
+    <key>nearby</key><boolean>1</boolean>
+    <key>notices</key><boolean>1</boolean>
+    <key>dialog_button_mm</key><real>24</real>
+    <key>max_buttons</key><integer>3</integer>
+  </map>
+  <!-- Quick actions: one row in rect_mm, gap_mm apart. action: wall | say | dictate | recenter |
+       flycam | nearby | conversations | notifications. label: a strings.xml name (or the text
+       itself). say: speech to nearby chat (#1119), press to listen, press again to stop, previewed
+       here before it is said; dictate / nearby: the wall with nearby chat's input focused (hold the
+       right stick there to dictate into it). -->
+  <key>actions</key>
+  <map>
+    <key>rect_mm</key><array><real>5</real><real>95</real><real>200</real><real>36</real></array>
+    <key>gap_mm</key><real>3.5</real>
+    <key>items</key>
+    <array>
+      <map><key>action</key><string>wall</string><key>label</key><string>VRWristWall</string></map>
+      <map><key>action</key><string>say</string><key>label</key><string>VRWristDictate</string></map>
+      <map><key>action</key><string>recenter</string><key>label</key><string>VRWristRecenter</string></map>
+      <map><key>action</key><string>flycam</string><key>label</key><string>VRWristFlyCam</string></map>
+    </array>
+  </map>
+  <!-- Colours: sRGB 0..1, RGBA (alpha only matters for the cursor; the panel is opaque). -->
+  <key>colors</key>
+  <map>
+    <key>background</key><array><real>0.07</real><real>0.08</real><real>0.10</real><real>1</real></array>
+    <key>row</key><array><real>0.12</real><real>0.13</real><real>0.16</real><real>1</real></array>
+    <key>text</key><array><real>0.95</real><real>0.95</real><real>0.95</real><real>1</real></array>
+    <key>dim</key><array><real>0.62</real><real>0.65</real><real>0.70</real><real>1</real></array>
+    <key>button</key><array><real>0.20</real><real>0.23</real><real>0.29</real><real>1</real></array>
+    <key>hover</key><array><real>0.27</real><real>0.39</real><real>0.55</real><real>1</real></array>
+    <key>press</key><array><real>0.33</real><real>0.62</real><real>0.90</real><real>1</real></array>
+    <key>active</key><array><real>0.22</real><real>0.45</real><real>0.30</real><real>1</real></array>
+    <key>im</key><array><real>0.35</real><real>0.65</real><real>1.00</real><real>1</real></array>
+    <key>nearby</key><array><real>0.45</real><real>0.85</real><real>0.50</real><real>1</real></array>
+    <key>notice</key><array><real>0.95</real><real>0.75</real><real>0.30</real><real>1</real></array>
+    <key>dialog</key><array><real>1.00</real><real>0.50</real><real>0.30</real><real>1</real></array>
+    <key>cursor</key><array><real>0.35</real><real>0.85</real><real>1.00</real><real>1</real></array>
+  </map>
+</map>
+</llsd>

@@ -1,0 +1,120 @@
+#version 450
+// vkclean — dynamic exposure (LL luminanceF + exposureF). Averages the scene
+// luminance over LL's sample window (the centre 60% of the screen, nudged down to
+// favour ground over sky), maps it into [exp_min, exp_max] and eases the 1x1
+// exposure value toward it over time. The tonemap pass reads the result.
+//
+// LUMINANCE WEIGHTING (#28, LL luminanceF): non-sky pixels are scaled by
+// RenderDiffuseLuminanceScale (LL: objects but not the sky, "prevents underexposing when
+// looking at bright environments while still allowing for realistically bright skies");
+// the sky is the reversed-Z far plane (LL keys it off the G-buffer HDRI / skip-atmos flags,
+// so LL also leaves fullbright faces unscaled -- here they scale like other surfaces).
+// The glow LL adds (its emissive / glow buffer) is the HDR bloom here, weighted as the
+// tonemap composites it. 1024 bilinear taps (each 16x16 cell sampled 2x2) stand in for
+// LL's mip-8 average of a full-resolution luminance map: far less shimmer than one
+// point tap per cell on high-frequency scenes.
+//
+// NIGHT EYE (params4.x > 0: physical night, vkgfx/slnighteyevk.h; ported from GunMetal-DX
+// (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4). LL's curve reaches exp_max once the scene is a
+// quarter of the coefficient and stops there, so below that the screen darkens stop for stop with
+// the scene: a moonlit night ends up ~4 stops under the day, a moonless one black. Below that
+// point the eye gives back part of every stop (EV-style exposure compensation, as UE / HDRP; Kirk
+// & O'Brien keep low light at 25-50% of the display range): params4.x per stop down to the knee,
+// params4.z per stop past it, at most params4.w stops over exp_max. The night still darkens on
+// screen (by 1 - adaptation per stop), so the dimmer moon is never lifted back to day. Above the
+// quarter point the value is LL's, so day, dusk and shade look as before. Eased in stops (log2),
+// since the range is now many stops wide. params4.x = 0: LL's curve, unchanged.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// (#1075 LAYERED STEREO: the scene HDR has a layer per view -- one exposure for every eye,
+//  metered on layer 0 (design §2, exposure row). A 2D_ARRAY view at every view count: the set
+//  is the tonemap's.)
+layout(set = 0, binding = 0) uniform sampler2DArray uHdr;
+layout(set = 0, binding = 1, r32f) uniform image2D uExposure;
+layout(set = 1, binding = 0) uniform sampler2D uDepth;   // world depth (reversed-Z: sky = 0)
+layout(set = 1, binding = 1) uniform sampler2D uBloom;   // HDR bloom mip 0 (when params3.z > 0)
+
+layout(push_constant) uniform Push {
+    vec4 params;    // coefficient (max_L), exp_min, exp_max, speed_error
+    vec4 params2;   // speed_target, dt, reset (1 = snap), 0
+    vec4 params3;   // diffuse luminance scale, sky detect (1 = depth bound), bloom weight,
+                    // per-tap luminance cap at night (0 = none; the moon's HDR disc)
+    vec4 params4;   // night eye: adaptation (0 = off), knee (stops), deep adaptation, max lift (stops)
+} pc;
+
+shared float s_lum[256];
+
+void main()
+{
+    uint li = gl_LocalInvocationIndex;
+    float acc = 0.0;
+    for (uint k = 0u; k < 4u; ++k)
+    {
+        vec2 tc = (vec2(gl_LocalInvocationID.xy) + vec2(0.25 + 0.5 * float(k & 1u), 0.25 + 0.5 * float(k >> 1u))) / 16.0;
+        tc = tc * 0.6 + 0.2;
+        tc.y -= 0.1;
+        // Vulkan image row 0 is the TOP; LL's tc.y is bottom-up, so "down" = +y here.
+        tc.y = 1.0 - tc.y;
+        vec3 c = textureLod(uHdr, vec3(tc, 0.0), 0.0).rgb;
+        // Reversed-Z: the sky dome sits at ~1e-5 (clean_flarestate.frag); 2e-5 keeps
+        // surfaces out to ~2 km counted as surfaces (farther ones read as sky).
+        if (pc.params3.y > 0.5 && textureLod(uDepth, tc, 0.0).r > 2e-5)
+            c *= pc.params3.x;   // a surface, not the sky
+        if (pc.params3.z > 0.0)
+            c += textureLod(uBloom, tc, 0.0).rgb * pc.params3.z;
+        // NaN / Inf safety: one bad texel must not poison the 1x1 value every later frame
+        // eases from (max() with a NaN operand is implementation-defined).
+        float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        if (pc.params3.w > 0.0) lum = min(lum, pc.params3.w);   // (night: NaN still caught below)
+        acc += (isnan(lum) || isinf(lum)) ? 0.0 : clamp(lum, 0.0, 65504.0);
+    }
+    s_lum[li] = acc * 0.25;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u)
+    {
+        if (li < s) s_lum[li] += s_lum[li + s];
+        barrier();
+    }
+    if (li != 0u) return;
+
+    float L = s_lum[0] / 256.0;
+    const float L_avg = L;   // (night eye)
+    float max_L = max(pc.params.x, 1e-4);
+    L = clamp(L, 0.0, max_L) / max_L;
+    L = L * L;
+    float s = mix(pc.params.z, pc.params.y, L);
+    // Night eye: extra lift in the stops below a quarter of the coefficient.
+    const bool night_eye = pc.params4.x > 0.0;
+    const float night_cap = night_eye ? clamp(pc.params4.w, 0.0, 12.0) : 0.0;
+    if (night_eye)
+    {
+        const float x = max(log2(max_L * 0.25 / max(L_avg, 1e-8)), 0.0);   // stops below the night start
+        const float knee = max(pc.params4.y, 0.0);
+        const float lift = (x <= knee) ? pc.params4.x * x
+                                       : pc.params4.x * knee + pc.params4.z * (x - knee);
+        s *= exp2(min(lift, night_cap));
+    }
+    // The adapted value always stays inside [exp_min, exp_max] (or 1 when those are bad).
+    const float lo = min(pc.params.y, pc.params.z), hi = max(pc.params.y, pc.params.z) * exp2(night_cap);   // (+ the night lift)
+    const bool range_ok = !(isnan(lo) || isinf(lo) || isnan(hi) || isinf(hi)) && hi > 0.0;
+    float prev = imageLoad(uExposure, ivec2(0)).r;
+    // A non-finite / non-positive previous value can't be eased from: snap.
+    const bool prev_ok = !(isnan(prev) || isinf(prev)) && prev > 0.0;
+    if (pc.params2.z < 0.5 && prev_ok)
+    {
+        float speed = -log(max(pc.params.w, 1e-4)) / max(pc.params2.x, 1e-4);
+        float dt = pc.params2.y;
+        dt = (isnan(dt) || isinf(dt)) ? 0.0 : clamp(dt, 0.0, 1.0);
+        if (night_eye)   // (in stops)
+            s = exp2(mix(log2(prev), log2(max(s, 1e-4)), 1.0 - exp(-speed * dt)));
+        else
+            s = mix(prev, s, 1.0 - exp(-speed * dt));
+    }
+    // Bounded by the range AND the (finite) previous value, so a range change (sky
+    // switch, legacy parcel) still eases over speed_target instead of popping.
+    if (isnan(s) || isinf(s)) s = prev_ok ? prev : (range_ok ? hi : 1.0);
+    const float blo = range_ok ? (prev_ok ? min(lo, prev) : lo) : (prev_ok ? min(prev, 1.0) : 1.0);
+    const float bhi = range_ok ? (prev_ok ? max(hi, prev) : hi) : (prev_ok ? max(prev, 1.0) : 1.0);
+    s = clamp(s, max(blo, 1e-4), max(bhi, 1e-4));
+    imageStore(uExposure, ivec2(0), vec4(s));
+}

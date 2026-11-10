@@ -1,0 +1,112 @@
+#version 460
+// GLOW TEMPORAL at the RENDER resolution (perf-4k60 r2; LLCleanRendererVK::recordGlowTemporal): the per-face
+// glow target's own temporal resolve for the frames an upscaler (DLSS RR / SR, FSR) resolves the scene. The
+// full TAA (clean_taa.comp, glow resolve on) ran there only for its glow output -- the whole scene resolve at
+// the DISPLAY resolution (~0.5 ms at 4K) for a signal bloom blurs over many pixels next. Here: one invocation
+// per render pixel, the glow alone.
+//   - the CURRENT estimate: the 3x3 render samples under a Gaussian at the pixel's UNJITTERED centre (the
+//     samples show the scene at q + 0.5 - jitter), as clean_taa.comp's glow reconstruction at native scale;
+//   - the HISTORY: last frame's resolve at the reprojected spot (the dilated motion: the 3x3's closest
+//     depth; camera-only on sky / without the motion target), bilinear;
+//   - RECTIFICATION: the history clipped into the 3x3's YCoCg box (mean +- gamma sigma, compressed space):
+//     a moving emissive leaves no trail, a disocclusion pulls in at once;
+//   - BLEND: the fixed share (params.z, the TAA's native 1 - 0.9); the no-history mask (#605: media /
+//     animated faces) takes the current estimate only. An all-zero 3x3 writes 0 (no history read).
+// Out: rgb the resolved glow (linear, un-exposed: the TAA glow's units), a the current estimate's alpha.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uGlowCur;      // the glow target (render, texelFetch)
+layout(set = 0, binding = 1) uniform sampler2D uMotion;       // RG16F motion (render, texelFetch)
+layout(set = 0, binding = 2) uniform sampler2D uDepth;        // this frame's depth (render, texelFetch)
+layout(set = 0, binding = 3) uniform sampler2D uNoTemporal;   // #605 no-history mask (render, texelFetch)
+layout(set = 0, binding = 4) uniform sampler2D uGlowHist;     // last frame's resolve (render, LINEAR clamp)
+layout(rgba16f, set = 0, binding = 5) writeonly uniform image2D uGlowOut;
+
+layout(push_constant) uniform GlowTemporalPush {
+    mat4 reproj;    // this frame's UNJITTERED clip -> last frame's clip (camera only), as TaaParams.reproj
+    vec4 rscreen;   // render width, height, 1 / width, 1 / height
+    vec4 jitter;    // render px x, y; uv x, y
+    vec4 params;    // x history valid, y motion target valid, z this frame's share, w box width (sigma)
+} pc;
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 toYCoCg(vec3 c)
+{
+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+vec3 fromYCoCg(vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
+vec3 compress(vec3 c)   { return c / (1.0 + luma(c)); }
+vec3 decompress(vec3 t) { return t / max(1.0 - luma(t), 1e-4); }
+vec3 sanitize(vec3 c)   { return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(65000.0)); }
+vec3 clipBox(vec3 mn, vec3 mx, vec3 h)
+{
+    const vec3 c = 0.5 * (mx + mn);
+    const vec3 e = 0.5 * (mx - mn) + 1e-5;
+    const vec3 v = h - c;
+    const vec3 a = abs(v / e);
+    const float m = max(a.x, max(a.y, a.z));
+    return m > 1.0 ? c + v / m : h;
+}
+
+void main()
+{
+    const ivec2 size = ivec2(pc.rscreen.xy);
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    const vec2 pc0 = vec2(p) + 0.5;
+
+    vec4  gfilt = vec4(0.0);
+    float wsum = 0.0, gpeak = 0.0, dmin = -1.0;
+    vec3  m1 = vec3(0.0), m2 = vec3(0.0);
+    ivec2 qmin = p;
+    for (int j = 0; j < 9; ++j)
+    {
+        const ivec2 q = clamp(p + ivec2(j % 3 - 1, j / 3 - 1), ivec2(0), size - 1);
+        const vec4 g = texelFetch(uGlowCur, q, 0);
+        const vec3 gc = compress(sanitize(g.rgb));
+        gpeak = max(gpeak, max(gc.r, max(gc.g, gc.b)));
+        const vec2 dk = vec2(q) + 0.5 - pc.jitter.xy - pc0;
+        const float w = exp(-2.29 * dot(dk, dk));
+        gfilt += vec4(gc, clamp(g.a, 0.0, 1.0)) * w;
+        wsum += w;
+        const vec3 gy = toYCoCg(gc);
+        m1 += gy; m2 += gy * gy;
+        const float d = texelFetch(uDepth, q, 0).r;
+        if (d > dmin) { dmin = d; qmin = q; }   // closest: REVERSED-Z, near = 1
+    }
+    gfilt /= max(wsum, 1e-6);
+    if (!(gpeak > 0.0))
+    {
+        imageStore(uGlowOut, p, vec4(0.0, 0.0, 0.0, gfilt.a));
+        return;
+    }
+    vec3 gout = gfilt.rgb;
+    const bool notemp = texelFetch(uNoTemporal, qmin, 0).r > 0.5;
+    if (pc.params.x > 0.5 && !notemp)
+    {
+        // the dilated motion (the closest depth's), camera-only where there is no surface / motion target
+        const vec2 uv = pc0 * pc.rscreen.zw;
+        vec2 mv = vec2(0.0);
+        bool ok = true;
+        if (pc.params.y > 0.5 && dmin > 0.0)
+            mv = texelFetch(uMotion, qmin, 0).xy;
+        else
+        {
+            const vec2 uvq = (vec2(qmin) + 0.5) * pc.rscreen.zw - pc.jitter.zw;
+            const vec4 c = pc.reproj * vec4(uvq * 2.0 - 1.0, max(dmin, 0.0), 1.0);
+            if (c.w > 1e-6) mv = uvq - (c.xy / c.w * 0.5 + 0.5);
+            else ok = false;
+        }
+        const vec2 huv = uv - mv;
+        if (ok && all(greaterThanEqual(huv, vec2(0.0))) && all(lessThanEqual(huv, vec2(1.0))))
+        {
+            const vec3 mean  = m1 * (1.0 / 9.0);
+            const vec3 sigma = sqrt(max(m2 * (1.0 / 9.0) - mean * mean, vec3(0.0)));
+            const vec3 h = toYCoCg(compress(sanitize(textureLod(uGlowHist, huv, 0.0).rgb)));
+            const vec3 hc = fromYCoCg(clipBox(mean - pc.params.w * sigma, mean + pc.params.w * sigma, h));
+            gout = mix(max(hc, vec3(0.0)), gfilt.rgb, pc.params.z);
+        }
+    }
+    imageStore(uGlowOut, p, vec4(sanitize(decompress(gout)), gfilt.a));
+}

@@ -1,0 +1,89 @@
+#version 450
+// vkclean -- AVATAR LAYER HOLDOUT (#1328; vkgfx/llcleansnapmattevk.cpp). The transparent avatar
+// layer's alpha is the HDR scene's own A (coverage), carried by every pass after this one and
+// averaged with the colour (clean_snap_accum.comp); the world in front of an avatar cuts it out
+// as the camera sees it. Two variants:
+//
+// SNAP_WARM -- after the offscreen sequence's WARM-UP recording (the normal view, world and every
+// avatar, unjittered, no alpha-blend depth pre-pass): its OPAQUE depth, kept per pixel for the
+// recordings after it.
+//
+// default (HOLDOUT) -- in every avatar-only recording, after the opaque scene and the composites
+// over it (camera medium, volumetric fog, precipitation veil), before the first transparent:
+//  - THE WORLD OCCLUDER of the pixel: the warm-up's surface there, unless it is one of the layer's
+//    own avatars -- which shows as this recording's (avatar-only) opaque depth matching it within
+//    the tolerance somewhere in the 3x3 pixels around: the recordings are jittered by up to half
+//    a pixel against the warm-up, so an arm over the torso is found next door. No avatar ids: the
+//    layer's avatars drawn by the cluster path are matched like the others, the avatars it leaves
+//    out (drawn in the warm-up, not here) are world, and a translucent hair layer (no opaque depth
+//    in either) never stands in for the avatar under it. Written per pixel, biased farther by
+//    the tolerance, for clean_snap_holdout_depth.frag; 0 = none;
+//  - no avatar surface here (this recording's depth is the far plane: only avatars are drawn) ->
+//    RGBA 0: the background, and whatever lit or fogged it, is transparent;
+//  - an avatar surface behind the occluder -> RGBA 0: the world in front cuts it out;
+//  - an avatar surface in front -> its colour, A = 1. (A carried other meanings before here:
+//    the deferred lighting's medium noFade bit, consumed by clean_medium_apply.comp, which ran;
+//    the forward lit FS's material alpha on masked faces.)
+// The transparent layers drawn after this blend A "over" (ONE, ONE_MINUS_SRC_ALPHA: the alpha
+// pipelines), so the scene ends as premultiplied colour + coverage. Their own holdout is the
+// depth test: clean_snap_holdout_depth.frag merges the occluder into the depth first.
+//
+// Depths are compared as LINEAR view distances (the projection's z terms in the push block), so
+// the tolerance -- params.w, relative to the distance -- means the same in a perspective and an
+// orthographic view. Reversed-Z (llcleanrenderervk.cpp kReverseZ): depth 0 = the far plane, nearer
+// = greater. The bias keeps the jitter between a recording's samples and the warm-up's pixel
+// centres from cutting an avatar where it meets the world (feet on the floor).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;   // this recording's depth (texelFetch)
+#ifdef SNAP_WARM
+layout(std430, set = 0, binding = 1) writeonly buffer Warm { float warm[]; };
+#else
+layout(std430, set = 0, binding = 1) readonly buffer Warm { float warm[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Occluder { float occ[]; };
+layout(rgba16f, set = 0, binding = 3) uniform image2D uHdr;
+#endif
+
+layout(push_constant) uniform Push {
+    uvec4 params;   // x, y: size; z: 0; w: tolerance (float bits)
+    vec4  lin;      // inverse projection {[10], [14], [11], [15]}: view z = (x d + y) / (z d + w)
+    vec4  proj;     // projection {[10], [14], [11], [15]}: depth = (x z + y) / (z z + w)
+} pc;
+
+#ifndef SNAP_WARM
+float viewZ(float d) { return (pc.lin.x * d + pc.lin.y) / (pc.lin.z * d + pc.lin.w); }
+float depthAt(float z) { return (pc.proj.x * z + pc.proj.y) / (pc.proj.z * z + pc.proj.w); }
+#endif
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (uint(p.x) >= pc.params.x || uint(p.y) >= pc.params.y) return;
+    const uint i = uint(p.y) * pc.params.x + uint(p.x);
+#ifdef SNAP_WARM
+    warm[i] = texelFetch(uDepth, p, 0).r;
+#else
+    const float tol = uintBitsToFloat(pc.params.w);
+    const float d = texelFetch(uDepth, p, 0).r;
+    float o = 0.0;   // the biased occluder depth; 0 = none
+    const float w0 = warm[i];
+    if (w0 > 0.0)
+    {
+        const float z0 = viewZ(w0);
+        const float slack = abs(z0) * tol;
+        const ivec2 hi = ivec2(pc.params.xy) - 1;
+        bool layer_avatar = false;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const float dq = texelFetch(uDepth, clamp(p + ivec2(dx, dy), ivec2(0), hi), 0).r;
+                if (dq > 0.0 && abs(viewZ(dq) - z0) <= slack) layer_avatar = true;
+            }
+        if (!layer_avatar) o = depthAt(z0 * (1.0 + tol));
+    }
+    occ[i] = o;
+    const bool keep = d > 0.0 && d >= o;
+    imageStore(uHdr, p, keep ? vec4(imageLoad(uHdr, p).rgb, 1.0) : vec4(0.0));
+#endif
+}

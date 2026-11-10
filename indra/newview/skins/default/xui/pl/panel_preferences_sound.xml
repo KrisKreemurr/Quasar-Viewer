@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel label="Dźwięki" name="Preference Media panel">
+	<panel.string name="middle_mouse">
+		Środkowy przycisk myszy
+	</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="Ogólne" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

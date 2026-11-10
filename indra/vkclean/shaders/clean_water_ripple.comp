@@ -1,0 +1,85 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — WATER RIPPLE simulation (#1019; LLCleanWaterFxVK). One step of the damped 2D wave
+// equation on an N x N height field around the camera, plus this frame's contact impulses.
+//
+// TOROIDAL, WORLD-ANCHORED: world cell c (= floor(xy / texel)) lives at texel c mod N, so the
+// field never moves when the camera does -- the window [origin, origin + N) slides over it
+// and a texel whose cell just ENTERED the window (it was not in the previous step's window)
+// starts at rest. A neighbour outside either window reads 0 (a fixed edge), and a sponge
+// strip along the window edge absorbs what reaches it (no reflection back in).
+// The water FS samples the result bilinearly with REPEAT at uv = xy / (N texel)
+// (clean_water_fx.glsl waterFxRipple).
+//
+// Leapfrog with a variable step (the frame time, sub-stepped by the CPU to CFL <= 0.5):
+//   h' = h + (h - h_prev) * (dt / dt_prev) * damp + (c dt / dx)^2 * laplacian(h)
+// Texel = (h', h, dh/dx, dh/dy): the gradient is the CURRENT step's (one step behind h'),
+// ready for the FS's normal; the layers ping-pong (src -> dst).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba32f, set = 0, binding = 0) uniform image2DArray uField;
+// Contact impulses (CPU, this frame): xy world position, z radius (m), w amplitude (m; < 0
+// pushes the surface down). Applied on the frame's first sub-step only.
+layout(std430, set = 0, binding = 1) readonly buffer Impulses { vec4 imp[]; };
+
+layout(push_constant) uniform Push {
+    ivec4 win;      // xy this step's window origin (cells), zw the previous step's
+    uvec4 ctl;      // x N (power of two), y src layer, z impulse count, w 1 = clear every texel
+    vec4  step;     // x (c dt / dx)^2, y dt / dt_prev, z damping this step, w texel size (m)
+    vec4  sponge;   // x sponge width (cells), y the sponge's damping at the edge, z rest-level pull per step, w unused
+} pc;
+
+bool inWin(ivec2 cell, ivec2 o, int n) { return all(greaterThanEqual(cell, o)) && all(lessThan(cell, o + n)); }
+
+float heightAt(ivec2 cell, int n, uint src)
+{
+    // (outside this window or entered with this step: at rest)
+    if (!inWin(cell, pc.win.xy, n) || !inWin(cell, pc.win.zw, n)) return 0.0;
+    return imageLoad(uField, ivec3(cell & (n - 1), int(src))).x;
+}
+
+void main()
+{
+    const int n = int(pc.ctl.x);
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    if (t.x >= n || t.y >= n) return;
+    const uint src = pc.ctl.y, dst = 1u - pc.ctl.y;
+    if (pc.ctl.w != 0u)
+    {
+        imageStore(uField, ivec3(t, int(src)), vec4(0.0));
+        imageStore(uField, ivec3(t, int(dst)), vec4(0.0));
+        return;
+    }
+    // The cell of this texel in the current window (two's complement: & (n - 1) is mod n).
+    const ivec2 cell = pc.win.xy + ((t - pc.win.xy) & (n - 1));
+    vec4 c = vec4(0.0);
+    if (inWin(cell, pc.win.zw, n)) c = imageLoad(uField, ivec3(t, int(src)));
+    const float h = c.x, hp = c.y;
+    const float hl = heightAt(cell + ivec2(-1, 0), n, src), hr = heightAt(cell + ivec2(1, 0), n, src);
+    const float hd = heightAt(cell + ivec2(0, -1), n, src), hu = heightAt(cell + ivec2(0, 1), n, src);
+    const float lap = hl + hr + hd + hu - 4.0 * h;
+    float hn = h + (h - hp) * pc.step.y * pc.step.z + pc.step.x * lap;
+    hn -= pc.sponge.z * h;   // a weak pull back to the rest level (no drift under a long push)
+
+    // Sponge: extra damping over the last cells before the window edge.
+    const ivec2 e2 = min(cell - pc.win.xy, pc.win.xy + n - 1 - cell);
+    const float e = float(min(e2.x, e2.y));
+    if (e < pc.sponge.x) hn *= mix(pc.sponge.y, 1.0, e / pc.sponge.x);
+
+    // Contacts: a ZERO-MEAN dent of the impulse's radius -- (1 - x) e^-x, x = r^2 / R^2, whose
+    // integral over the plane is 0 -- so a leg pushing for minutes moves water aside instead
+    // of digging a pit (the ring spreads from the rim).
+    const vec2 wp = (vec2(cell) + 0.5) * pc.step.w;
+    for (uint i = 0u; i < pc.ctl.z; ++i)
+    {
+        const vec4 q = imp[i];
+        const vec2 d = wp - q.xy;
+        const float r2 = max(q.z * q.z, 1e-4);
+        const float x = dot(d, d) / r2;
+        if (x < 9.0) hn += q.w * (1.0 - x) * exp(-x);
+    }
+    hn = clamp(hn, -0.5, 0.5);   // (a pathological impulse can never blow the field up)
+
+    const float inv2dx = 0.5 / pc.step.w;
+    imageStore(uField, ivec3(t, int(dst)), vec4(hn, h, (hr - hl) * inv2dx, (hu - hd) * inv2dx));
+}

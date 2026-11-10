@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel label="Lyde" name="Preference Media panel">
+	<panel.string name="middle_mouse">
+		Midterste museknap
+	</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="Generelt" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

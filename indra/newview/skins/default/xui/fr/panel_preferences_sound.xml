@@ -1,0 +1,7 @@
+<?xml version="1.0" ?>
+<panel label="Sons" name="Preference Media panel">
+	<panel.string name="middle_mouse">Bouton central de la souris</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="Général" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater name="sl_telemetry" title="Usage statistics — What is sent" width="790" height="665" can_resize="true" min_width="650" min_height="600" layout="topleft" save_rect="true">
+ <text name="endpoint" left="15" top="32" width="760" height="45" word_wrap="true" layout="topleft">POST https://slipstreamviewer.org/api/telemetry/v1
+Content-Type: application/json; X-Slipstream-Version; X-Slipstream-Timestamp; X-Slipstream-Signature</text>
+ <text name="next_label" left="15" top="85" width="760" height="42" word_wrap="true" layout="topleft">Next report (literal JSON snapshot; refresh to update). When sharing is off, this is a one-shot preview with empty performance data. It is neither collected, saved nor sent.</text>
+ <text_editor name="next_report" left="15" top="132" width="760" height="190" layout="topleft" follows="left|right|top" read_only="true" word_wrap="false" max_length="16384" font="Monospace" />
+ <text name="last_label" left="15" top="335" width="760" height="20" layout="topleft">Last successfully sent (literal wire body, this run only):</text>
+ <text_editor name="last_report" left="15" top="362" width="760" height="170" layout="topleft" follows="left|right|top|bottom" read_only="true" word_wrap="false" max_length="16384" font="Monospace" />
+ <text name="queue_count" left="15" top="542" width="760" height="20" layout="topleft" follows="left|bottom">Reports waiting to send: 0</text>
+ <button name="refresh_report" label="Refresh preview" left="15" top="575" width="170" height="25" layout="topleft" follows="left|bottom" />
+ <button name="toggle_consent" label="Enable" left="200" top="575" width="170" height="25" layout="topleft" follows="left|bottom" />
+ <button name="delete_queue" label="Delete queued reports" left="385" top="575" width="200" height="25" layout="topleft" follows="left|bottom" />
+ <button name="field_guide" label="Field guide" left="600" top="575" width="170" height="25" layout="topleft" follows="left|bottom" />
+ <text name="privacy" left="15" top="615" width="755" height="35" word_wrap="true" layout="topleft" follows="left|bottom">Raw retention: 90 days. Similar hardware may correlate reports. A report already being sent when sharing is stopped may still arrive.</text>
+</floater>

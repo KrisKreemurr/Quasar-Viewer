@@ -1,0 +1,3324 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Sound & Media > UI Sounds (#198, #1263, #1342): one scrolling list, a heading per group of sounds. Each row: [on / off] sound UUID, Play, Reset. -->
+<panel
+ border="false"
+ height="408"
+ layout="topleft"
+ left="0"
+ name="preferences_sound_ui"
+ top="0"
+ width="517">
+  <scroll_container
+   follows="all"
+   height="408"
+   layout="topleft"
+   left="0"
+   name="ui_sounds_scroll"
+   reserve_scroll_corner="false"
+   top="0"
+   width="517">
+  <panel
+   follows="left|top"
+   height="1691"
+   layout="topleft"
+   left="0"
+   name="ui_sounds_scroll_panel"
+   top="0"
+   width="500">
+    <!-- #1263: the notification sounds; on / off per type is in Chat > Alerts -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="notification_sounds_heading" top="4" width="470">Notifications</text>
+    <panel
+     follows="left|top"
+     height="240"
+     layout="topleft"
+     left="0"
+     name="notification_sounds_panel"
+     top="22"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="203"
+       name="notification_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        Sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="203"
+       name="notification_sounds_onoff_hint"
+       text_color="LabelDisabledColor"
+       top_pad="0"
+       width="290">
+        On / off per type: Chat &gt; Alerts
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_im_label"
+       tool_tip="A new instant message, and the start of a new conversation"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Instant message
+      </text>
+      <line_editor
+       control_name="UISndNewIncomingIMSession"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_im_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_im_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndNewIncomingIMSession" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_im_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndNewIncomingIMSession" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_group_label"
+       tool_tip="A new message in a group chat"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Group chat
+      </text>
+      <line_editor
+       control_name="UISndNewIncomingGroupIMSession"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_group_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_group_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndNewIncomingGroupIMSession" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_group_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndNewIncomingGroupIMSession" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_conference_label"
+       tool_tip="A new message in a conference (ad-hoc group IM)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Conference
+      </text>
+      <line_editor
+       control_name="UISndNewIncomingConfIMSession"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_conference_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_conference_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndNewIncomingConfIMSession" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_conference_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndNewIncomingConfIMSession" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_nearby_label"
+       tool_tip="A new nearby chat message"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Nearby chat
+      </text>
+      <line_editor
+       control_name="UISndNearbyChat"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_nearby_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_nearby_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndNearbyChat" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_nearby_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndNearbyChat" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_object_label"
+       tool_tip="A message from an object (llOwnerSay, llInstantMessage)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Object messages
+      </text>
+      <line_editor
+       control_name="UISndObjectIM"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_object_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_object_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndObjectIM" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_object_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndObjectIM" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_mention_label"
+       tool_tip="A message that mentions you"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Mention of you
+      </text>
+      <line_editor
+       control_name="UISndChatMention"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_mention_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_mention_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndChatMention" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_mention_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndChatMention" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_call_label"
+       tool_tip="An incoming voice call"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Incoming call
+      </text>
+      <line_editor
+       control_name="UISndIncomingVoiceCall"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_call_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_call_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndIncomingVoiceCall" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_call_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndIncomingVoiceCall" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_teleport_label"
+       tool_tip="A teleport offer"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Teleport offer
+      </text>
+      <line_editor
+       control_name="UISndTeleportOffer"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_teleport_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_teleport_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndTeleportOffer" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_teleport_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndTeleportOffer" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_inventory_label"
+       tool_tip="An inventory offer"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Inventory offer
+      </text>
+      <line_editor
+       control_name="UISndInventoryOffer"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_delta="190"
+       max_length_bytes="36"
+       name="notif_sound_inventory_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-3"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_inventory_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndInventoryOffer" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_inventory_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndInventoryOffer" />
+      </button>
+    </panel>
+    <!-- #1263: friend and group sounds, each off until its box is ticked (PlayMode<sound>) -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="friend_group_sounds_heading" top="272" width="470">Friends and groups</text>
+    <panel
+     follows="left|top"
+     height="137"
+     layout="topleft"
+     left="0"
+     name="friend_group_sounds_panel"
+     top="290"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="friend_group_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_friend_online_label"
+       tool_tip="A friend comes online, when that notice is on (Notifications &gt; When my friends log in or out)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Friend online
+      </text>
+      <check_box
+       control_name="PlayModeUISndFriendOnline"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="notif_sound_friend_online_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndFriendOnline"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="notif_sound_friend_online_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_friend_online_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndFriendOnline" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_friend_online_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndFriendOnline" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_friend_offline_label"
+       tool_tip="A friend goes offline, when that notice is on (Notifications &gt; When my friends log in or out)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Friend offline
+      </text>
+      <check_box
+       control_name="PlayModeUISndFriendOffline"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="notif_sound_friend_offline_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndFriendOffline"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="notif_sound_friend_offline_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_friend_offline_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndFriendOffline" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_friend_offline_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndFriendOffline" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_friendship_label"
+       tool_tip="An offer of friendship"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Friendship offer
+      </text>
+      <check_box
+       control_name="PlayModeUISndFriendshipOffer"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="notif_sound_friendship_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndFriendshipOffer"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="notif_sound_friendship_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_friendship_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndFriendshipOffer" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_friendship_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndFriendshipOffer" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_group_invite_label"
+       tool_tip="An invitation to join a group"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Group invitation
+      </text>
+      <check_box
+       control_name="PlayModeUISndGroupInvitation"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="notif_sound_group_invite_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndGroupInvitation"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="notif_sound_group_invite_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_group_invite_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndGroupInvitation" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_group_invite_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndGroupInvitation" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="notif_sound_group_notice_label"
+       tool_tip="A group notice"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Group notice
+      </text>
+      <check_box
+       control_name="PlayModeUISndGroupNotice"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="notif_sound_group_notice_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndGroupNotice"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="notif_sound_group_notice_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="notif_sound_group_notice_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndGroupNotice" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="notif_sound_group_notice_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndGroupNotice" />
+      </button>
+    </panel>
+    <!-- #1263: the snapshot shutter (sound and camera animation); the region plays both, so people nearby notice them -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="snapshot_sounds_heading" top="437" width="470">Snapshots</text>
+    <panel
+     follows="left|top"
+     height="49"
+     layout="topleft"
+     left="0"
+     name="snapshot_sounds_panel"
+     top="455"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="snapshot_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (people nearby notice it)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="snapshot_sound_shutter_label"
+       tool_tip="Taking a snapshot: the shutter sound, and your avatar raises a camera for a moment. The region plays both, so people nearby notice them. With the box ticked and no sound set, only the animation plays."
+       top_pad="6"
+       width="165"
+       halign="right">
+        Shutter
+      </text>
+      <check_box
+       control_name="PlayModeUISndSnapshot"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="snapshot_sound_shutter_play"
+       tool_tip="Play the shutter sound and the camera animation when taking a snapshot"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndSnapshot"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="snapshot_sound_shutter_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="snapshot_sound_shutter_preview"
+       tool_tip="Play the sound now (only you hear this preview)"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndSnapshot" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="snapshot_sound_shutter_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndSnapshot" />
+      </button>
+    </panel>
+    <!-- #198: the pie menu sounds -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="pie_sounds_heading" top="514" width="470">Pie menu</text>
+    <panel
+     follows="left|top"
+     height="247"
+     layout="topleft"
+     left="0"
+     name="pie_sounds_panel"
+     top="532"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="pie_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_appear_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Pie menu opens
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuAppear"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_appear_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuAppear"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_appear_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_appear_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuAppear" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_appear_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuAppear" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_hide_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Pie menu closes
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuHide"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_hide_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuHide"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_hide_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_hide_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuHide" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_hide_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuHide" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice0_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 1 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight0"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice0_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight0"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice0_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice0_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight0" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice0_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight0" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice1_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 2 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight1"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice1_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight1"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice1_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice1_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight1" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice1_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight1" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice2_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 3 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight2"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice2_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight2"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice2_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice2_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight2" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice2_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight2" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice3_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 4 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight3"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice3_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight3"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice3_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice3_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight3" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice3_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight3" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice4_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 5 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight4"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice4_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight4"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice4_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice4_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight4" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice4_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight4" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice5_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 6 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight5"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice5_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight5"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice5_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice5_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight5" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice5_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight5" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice6_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 7 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight6"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice6_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight6"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice6_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice6_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight6" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice6_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight6" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="pie_sound_slice7_label"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Slice 8 highlighted
+      </text>
+      <check_box
+       control_name="PlayModeUISndPieMenuSliceHighlight7"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="pie_sound_slice7_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndPieMenuSliceHighlight7"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="pie_sound_slice7_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="pie_sound_slice7_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndPieMenuSliceHighlight7" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="pie_sound_slice7_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndPieMenuSliceHighlight7" />
+      </button>
+    </panel>
+    <!-- #1342: L$ balance changes over UISndMoneyChangeThreshold -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="money_sounds_heading" top="789" width="470">L$</text>
+    <panel
+     follows="left|top"
+     height="71"
+     layout="topleft"
+     left="0"
+     name="money_sounds_panel"
+     top="807"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="money_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_money_up_label"
+       tool_tip="Your L$ balance goes up (changes of L$50 or less are quiet)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        L$ received
+      </text>
+      <check_box
+       control_name="PlayModeUISndMoneyChangeUp"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_money_up_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndMoneyChangeUp"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_money_up_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_money_up_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndMoneyChangeUp" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_money_up_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndMoneyChangeUp" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_money_down_label"
+       tool_tip="Your L$ balance goes down (changes of L$50 or less are quiet)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        L$ paid
+      </text>
+      <check_box
+       control_name="PlayModeUISndMoneyChangeDown"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_money_down_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndMoneyChangeDown"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_money_down_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_money_down_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndMoneyChangeDown" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_money_down_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndMoneyChangeDown" />
+      </button>
+    </panel>
+    <!-- #1342: building, rezzing and taking objects; teleport uses the PlayTeleportSound switch from General -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="object_sounds_heading" top="888" width="470">Objects and teleport</text>
+    <panel
+     follows="left|top"
+     height="115"
+     layout="topleft"
+     left="0"
+     name="object_sounds_panel"
+     top="906"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="object_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_object_create_label"
+       tool_tip="You create an object with the build tools"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Object created
+      </text>
+      <check_box
+       control_name="PlayModeUISndObjectCreate"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_object_create_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndObjectCreate"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_object_create_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_object_create_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndObjectCreate" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_object_create_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndObjectCreate" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_object_rez_label"
+       tool_tip="You rez an object from inventory"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Object rezzed
+      </text>
+      <check_box
+       control_name="PlayModeUISndObjectRezIn"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_object_rez_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndObjectRezIn"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_object_rez_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_object_rez_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndObjectRezIn" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_object_rez_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndObjectRezIn" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_object_take_label"
+       tool_tip="You take, delete or return objects (no sound by default)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Object taken
+      </text>
+      <check_box
+       control_name="PlayModeUISndObjectRezOut"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_object_take_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndObjectRezOut"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_object_take_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_object_take_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndObjectRezOut" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_object_take_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndObjectRezOut" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_teleport_label"
+       tool_tip="A teleport starts (the same switch as General &gt; Play teleport sound)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Teleport
+      </text>
+      <check_box
+       control_name="PlayTeleportSound"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_teleport_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndTeleportOut"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_teleport_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_teleport_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndTeleportOut" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_teleport_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndTeleportOut" />
+      </button>
+    </panel>
+    <!-- #1342: windows, clicks, menus and refused input -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="input_sounds_heading" top="1031" width="470">Windows and input</text>
+    <panel
+     follows="left|top"
+     height="181"
+     layout="topleft"
+     left="0"
+     name="input_sounds_panel"
+     top="1049"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="input_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_window_open_label"
+       tool_tip="A window opens"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Window opens
+      </text>
+      <check_box
+       control_name="PlayModeUISndWindowOpen"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_window_open_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndWindowOpen"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_window_open_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_window_open_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndWindowOpen" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_window_open_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndWindowOpen" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_window_close_label"
+       tool_tip="A window closes"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Window closes
+      </text>
+      <check_box
+       control_name="PlayModeUISndWindowClose"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_window_close_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndWindowClose"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_window_close_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_window_close_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndWindowClose" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_window_close_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndWindowClose" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_click_label"
+       tool_tip="A click on a link in text and on some controls"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Click
+      </text>
+      <check_box
+       control_name="PlayModeUISndClick"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_click_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndClick"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_click_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_click_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndClick" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_click_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndClick" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_click_release_label"
+       tool_tip="Choosing a menu or pie menu item, and letting go of some controls"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Menu item chosen
+      </text>
+      <check_box
+       control_name="PlayModeUISndClickRelease"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_click_release_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndClickRelease"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_click_release_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_click_release_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndClickRelease" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_click_release_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndClickRelease" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_start_im_label"
+       tool_tip="You start an IM or a conference"
+       top_pad="6"
+       width="165"
+       halign="right">
+        IM started
+      </text>
+      <check_box
+       control_name="PlayModeUISndStartIM"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_start_im_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndStartIM"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_start_im_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_start_im_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndStartIM" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_start_im_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndStartIM" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_bad_key_label"
+       tool_tip="A control refuses a key or a value, or you can't fly here"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Key refused
+      </text>
+      <check_box
+       control_name="PlayModeUISndBadKeystroke"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_bad_key_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndBadKeystroke"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_bad_key_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_bad_key_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndBadKeystroke" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_bad_key_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndBadKeystroke" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_invalid_op_label"
+       tool_tip="Something can't be done, such as a click outside a window that needs an answer, rezzing where you can't, or an action RLV blocks"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Not allowed
+      </text>
+      <check_box
+       control_name="PlayModeUISndInvalidOp"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_invalid_op_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndInvalidOp"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_invalid_op_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_invalid_op_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndInvalidOp" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_invalid_op_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndInvalidOp" />
+      </button>
+    </panel>
+    <!-- #1342: alert windows, region restarts and pings; the ping uses the SLPingSound switch from Combat -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="alert_sounds_heading" top="1240" width="470">Alerts</text>
+    <panel
+     follows="left|top"
+     height="93"
+     layout="topleft"
+     left="0"
+     name="alert_sounds_panel"
+     top="1258"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="alert_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_alert_label"
+       tool_tip="A message window that needs an answer opens"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Alert
+      </text>
+      <check_box
+       control_name="PlayModeUISndAlert"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_alert_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndAlert"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_alert_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_alert_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndAlert" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_alert_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndAlert" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_restart_label"
+       tool_tip="The region you're in is going to restart"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Region restart
+      </text>
+      <check_box
+       control_name="PlayModeUISndRestart"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_restart_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRestart"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_restart_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_restart_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRestart" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_restart_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRestart" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_ping_label"
+       tool_tip="Someone's ping arrives (the same switch as Combat &gt; Sound when a ping arrives)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Ping
+      </text>
+      <check_box
+       control_name="SLPingSound"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_ping_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndChatPing"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_ping_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_ping_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndChatPing" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_ping_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndChatPing" />
+      </button>
+    </panel>
+    <!-- #1342: typing in nearby chat (the PlayTypingSound switch from General) and losing health -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="avatar_sounds_heading" top="1361" width="470">Avatars</text>
+    <panel
+     follows="left|top"
+     height="93"
+     layout="topleft"
+     left="0"
+     name="avatar_sounds_panel"
+     top="1379"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="avatar_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (empty or zeros: none)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_typing_label"
+       tool_tip="Someone, you too, types in nearby chat (the same switch as General &gt; Play typing sound)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Typing
+      </text>
+      <check_box
+       control_name="PlayTypingSound"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_typing_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndTyping"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_typing_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_typing_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndTyping" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_typing_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndTyping" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_hurt_female_label"
+       tool_tip="Your health drops by more than 10% where damage is on, with a female avatar shape"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Hurt (female)
+      </text>
+      <check_box
+       control_name="PlayModeUISndHealthReductionF"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_hurt_female_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndHealthReductionF"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_hurt_female_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_hurt_female_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndHealthReductionF" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_hurt_female_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndHealthReductionF" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_hurt_male_label"
+       tool_tip="Your health drops by more than 10% where damage is on, with a male avatar shape"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Hurt (male)
+      </text>
+      <check_box
+       control_name="PlayModeUISndHealthReductionM"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_hurt_male_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndHealthReductionM"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_hurt_male_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_hurt_male_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndHealthReductionM" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_hurt_male_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndHealthReductionM" />
+      </button>
+    </panel>
+    <!-- #1342: the radar alerts' sounds; the same switches as the radar's options menu, and the radar must report the alert -->
+    <text follows="left|top" font="SansSerifBold" height="18" layout="topleft" left="10"
+     name="radar_sounds_heading" top="1482" width="470">Radar</text>
+    <panel
+     follows="left|top"
+     height="181"
+     layout="topleft"
+     left="0"
+     name="radar_sounds_panel"
+     top="1500"
+     width="490">
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="183"
+       name="radar_sounds_hint"
+       text_color="LabelDisabledColor"
+       top="6"
+       width="290">
+        On / sound UUID (when the radar reports it)
+      </text>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_chat_enter_label"
+       tool_tip="Someone enters chat range, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Enters chat range
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarChatEnter"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_chat_enter_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarChatEnter"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_chat_enter_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_chat_enter_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarChatEnter" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_chat_enter_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarChatEnter" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_chat_leave_label"
+       tool_tip="Someone leaves chat range, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Leaves chat range
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarChatLeave"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_chat_leave_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarChatLeave"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_chat_leave_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_chat_leave_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarChatLeave" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_chat_leave_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarChatLeave" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_draw_enter_label"
+       tool_tip="Someone enters your draw distance, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Enters draw distance
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarDrawEnter"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_draw_enter_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarDrawEnter"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_draw_enter_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_draw_enter_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarDrawEnter" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_draw_enter_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarDrawEnter" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_draw_leave_label"
+       tool_tip="Someone leaves your draw distance, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Leaves draw distance
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarDrawLeave"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_draw_leave_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarDrawLeave"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_draw_leave_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_draw_leave_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarDrawLeave" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_draw_leave_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarDrawLeave" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_sim_enter_label"
+       tool_tip="Someone enters your region, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Enters the region
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarSimEnter"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_sim_enter_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarSimEnter"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_sim_enter_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_sim_enter_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarSimEnter" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_sim_enter_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarSimEnter" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_sim_leave_label"
+       tool_tip="Someone leaves your region, when the radar reports it (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Leaves the region
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarSimLeave"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_sim_leave_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarSimLeave"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_sim_leave_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_sim_leave_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarSimLeave" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_sim_leave_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarSimLeave" />
+      </button>
+      <text
+       follows="left|top"
+       height="15"
+       layout="topleft"
+       left="13"
+       name="ui_sound_radar_age_label"
+       tool_tip="An account younger than the radar's age alert arrives, when that alert is on (radar options menu)"
+       top_pad="6"
+       width="165"
+       halign="right">
+        Young account
+      </text>
+      <check_box
+       control_name="PlayModeUISndRadarAgeAlert"
+       follows="left|top"
+       height="16"
+       label=""
+       layout="topleft"
+       left_delta="170"
+       name="ui_sound_radar_age_play"
+       tool_tip="Play this sound"
+       top_delta="-1"
+       width="18" />
+      <line_editor
+       control_name="UISndRadarAgeAlert"
+       follows="left|top"
+       height="19"
+       layout="topleft"
+       left_pad="2"
+       max_length_bytes="36"
+       name="ui_sound_radar_age_uuid"
+       tool_tip="UUID of the sound asset to play"
+       top_delta="-2"
+       width="190" />
+      <button
+       follows="left|top"
+       height="19"
+       label="Play"
+       layout="topleft"
+       left_pad="4"
+       name="ui_sound_radar_age_preview"
+       tool_tip="Play the sound now"
+       top_delta="0"
+       width="40">
+        <button.commit_callback
+         function="Pref.PreviewUISound"
+         parameter="UISndRadarAgeAlert" />
+      </button>
+      <button
+       follows="left|top"
+       height="19"
+       label="Reset"
+       layout="topleft"
+       left_pad="2"
+       name="ui_sound_radar_age_reset"
+       tool_tip="Back to the default sound"
+       top_delta="0"
+       width="46">
+        <button.commit_callback
+         function="Pref.ResetControlDefault"
+         parameter="UISndRadarAgeAlert" />
+      </button>
+    </panel>
+  </panel>
+  </scroll_container>
+</panel>

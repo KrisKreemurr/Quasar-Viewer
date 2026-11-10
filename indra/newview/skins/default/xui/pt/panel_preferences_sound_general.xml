@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<panel name="preferences_sound_general">
+	<scroll_container name="sound_scroll">
+	<panel name="sound_scroll_panel">
+	<slider label="Volume principal" name="System Volume"/>
+	<check_box initial_value="true" name="mute_when_minimized"/>
+	<slider label="Botões" name="UI Volume"/>
+	<slider label="Ambiente" name="Wind Volume"/>
+	<slider label="Efeitos sonoros" name="SFX Volume"/>
+	<slider label="Streaming de música" name="Music Volume"/>
+	<check_box label="Ativado" name="enable_music"/>
+	<slider label="Mídia" name="Media Volume"/>
+	<check_box label="Ativado" name="enable_media"/>
+	<slider label="Bate-papo de voz" name="Voice Volume"/>
+	<check_box label="Ativado" name="enable_voice_check"/>
+	<check_box label="Tocar mídia anexada em outros avatares" name="media_show_on_others_btn" tool_tip="Desmarque esta opção para ocultar mídias anexadas em avatares por perto" value="true"/>
+	<check_box label="Tocar áudio de gestos" name="gesture_audio_play_btn" tool_tip="Selecione para ouvir o áudio de gestos" value="true"/>
+	<text name="Listen from">Ouvir a partir de:</text>
+	<check_box label="Mover os lábios do avatar quando estiver falando" name="enable_lip_sync"/>
+	<check_box label="Tecla liga/desliga da minha voz:" name="push_to_talk_toggle_check" tool_tip="Quando em modo de alternância, pressione e solte o botão UMA vez para ligar e desligar o microfone. Fora do modo de alternância, o microfone só transmite sua voz enquanto o botão estiver pressionado."/>
+	<button label="Controles de entrada/saída" name="device_settings_btn" width="180"/>
+	<panel label="Configuração dos dispositivo" name="device_settings_panel"/>
+	<combo_box name="media_auto_play_combo">
+		<item name="autoplay_enabled" label="Sim"/>
+		<item name="autoplay_ask" label="Perguntar"/>
+		<item name="autoplay_disabled" label="Não"/>
+	</combo_box>
+
+	</panel>
+	</scroll_container>
+</panel>

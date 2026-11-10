@@ -1,0 +1,44 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+// Overlay draw records from the current cut + welded skin map, never legacy slots.
+layout(local_size_x=64) in;
+#define CLUSTER_SET 0
+#define CL_DECLARE_POOL
+#define CL_DECLARE_INSTANCES
+#include "clean_cluster_common.glsl"
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+layout(buffer_reference, std430, buffer_reference_align=4) buffer Overlay { uint words[]; };
+layout(push_constant) uniform P { uint64_t address; uint view; uint count; uint cap; uint wire; } pc;
+const uint ROWS=8192u, COMMANDS=4u+ROWS*2u;
+void main()
+{
+    Overlay out_ = Overlay(pc.address);
+    uint e=gl_WorkGroupID.y*gl_NumWorkGroups.x*64u+gl_GlobalInvocationID.x;
+    bool keep=false;uint sel=0u,kind=3u,tris=0u,idx=0u;
+    if (pc.view<CL_MAX_VIEWS && e<cl_cnt[pc.view*CLC_VIEW_WORDS+CLC_SEL_CLAMPED])
+    {
+        sel=cl_views[pc.view].sel_base+e;
+        ClSelected cs=cl_sel[sel];ClInstance ci=cl_instances[cs.instance];
+        if ((ci.flags & (CLI_RIGGED|CLI1B_DRAW))==(CLI_RIGGED|CLI1B_DRAW)
+            && !clAvatarPolicyOff(ci.flags) && clSkinnedCluster(sel)!=CL_NONE
+            && ((cl_views[pc.view].flags & CLV_AVATARS_ONLY)==0u || !clAvatarOffMain(ci.flags))
+            && ((cl_views[pc.view].flags & CLV_HIDE_SELF)==0u || (ci.flags & CLI_SELF)==0u))
+        {
+            uint lo=0u,hi=min(pc.count,ROWS);
+            for(uint step=0u;step<14u && lo<hi;++step){uint m=lo+(hi-lo)/2u;if(out_.words[4u+2u*m]<ci.render_instance)lo=m+1u;else hi=m;}
+            if(lo<min(pc.count,ROWS) && out_.words[4u+2u*lo]==ci.render_instance)kind=min(out_.words[5u+2u*lo],2u);
+            keep=kind<3u || pc.wire!=0u;
+            if(keep){uint slot=clRefSlot(cs.cluster_ref);ClRecord rec=clLoadRecord(slot,clRefIndex(cs.cluster_ref));tris=clRecTriCount(rec);idx=clFirstIndexByte(slot,rec);keep=tris>0u;}
+        }
+    }
+    uvec4 mask=subgroupBallot(keep);uint n=subgroupBallotBitCount(mask),base=0u;
+    if(n!=0u && subgroupElect())base=atomicAdd(out_.words[0],n);
+    base=subgroupBroadcastFirst(base)+subgroupBallotExclusiveBitCount(mask);
+    if(keep && base<pc.cap){uint w=COMMANDS+base*5u;out_.words[w]=tris*3u;out_.words[w+1u]=1u;out_.words[w+2u]=idx;out_.words[w+3u]=sel|(kind<<30u);out_.words[w+4u]=0u;}
+}

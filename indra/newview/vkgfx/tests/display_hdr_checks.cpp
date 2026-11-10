@@ -1,0 +1,70 @@
+// CPU-only display negotiation, luminance and budget contract checks.
+#include "../vk_display_hdr.h"
+#include <cassert>
+#include <limits>
+int main() {
+    using namespace vkdisplay;
+    const VkSurfaceFormatKHR sdr{VK_FORMAT_B8G8R8A8_UNORM,VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+    const VkSurfaceFormatKHR hdr{VK_FORMAT_A2B10G10R10_UNORM_PACK32,VK_COLOR_SPACE_HDR10_ST2084_EXT};
+    const VkSurfaceFormatKHR scrgb{VK_FORMAT_R16G16B16A16_SFLOAT,VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT};
+    const VkSurfaceFormatKHR offered[]{sdr,scrgb,hdr};
+    Capability cap{Platform::Windows,true,true};
+    Request request;
+    auto status=choose(request,cap,offered,sdr,false);
+    assert(status.displayCapable && !status.requested && status.encoding==Encoding::Sdr && status.reason==Reason::Disabled);
+    request.enabled=true;
+    status=choose(request,cap,offered,sdr,false);
+    assert(status.displayCapable && status.reason==Reason::PipelineUnavailable && status.actual.format==sdr.format);
+    status=choose(request,cap,offered,sdr,true);
+    assert(status.encoding==Encoding::Hdr10 && status.actual.colorSpace==hdr.colorSpace);
+    status=choose(request,cap,std::span(offered,2),sdr,true);
+    assert(status.encoding==Encoding::ScRgb);
+    cap.osHdrEnabled=false;
+    assert(choose(request,cap,offered,sdr,true).reason==Reason::OsHdrDisabled);
+    cap.platform=Platform::Wayland;
+    assert(choose(request,cap,offered,sdr,true).encoding==Encoding::Hdr10);
+    cap.platform=Platform::X11;
+    assert(choose(request,cap,offered,sdr,true).reason==Reason::X11Unsupported);
+    cap.platform=Platform::Wayland;cap.colourSpaceExtension=false;
+    assert(choose(request,cap,offered,sdr,true).reason==Reason::ColourSpaceExtensionUnavailable);
+    cap.colourSpaceExtension=true;
+    cap.displayAvailable=false;
+    assert(choose(request,cap,offered,sdr,true).reason==Reason::DisplayUnavailable);
+    cap.displayAvailable=true;cap.displayId=7;
+    assert(choose(request,cap,offered,sdr,true).displayId==7);
+    VkSurfaceFormatKHR overflow[257]{};
+    assert(choose(request,cap,overflow,sdr,true).reason==Reason::SurfaceQueryFailed);
+    const VkSurfaceFormatKHR mismatched[]{{VK_FORMAT_B8G8R8A8_UNORM,VK_COLOR_SPACE_HDR10_ST2084_EXT}};
+    assert(!choose(request,cap,mismatched,sdr,true).displayCapable);
+    assert(imageBudget(7680,4320,1,7680ull*4320*8,256ull<<20));
+    assert(!imageBudget(7680,4320,2,7680ull*4320*8,256ull<<20));
+    assert(!imageBudget(UINT32_MAX,UINT32_MAX,1,UINT64_MAX,UINT64_MAX));
+    assert(!imageBudget(3840,2160,3,3840ull*2160*8,128ull<<20));
+    const auto midGrey=toneScene({.18f,.18f,.18f},request);
+    assert(std::abs(midGrey.red-36.54f)<1e-5f && std::abs(midGrey.green-36.54f)<1e-5f);
+    const auto diffuse=toneScene({1,1,1},request);
+    assert(diffuse.red==203.f && diffuse.green==203.f && diffuse.blue==203.f);
+    const auto bright=toneScene({100,50,10},request);
+    assert(bright.red>diffuse.red && bright.red<=1000.f && std::abs(bright.green/bright.red-.5f)<1e-5f);
+    assert(std::abs(mapScenePeak(.18f,6.f,5.f)-.18f)<1e-6f);
+    assert(mapScenePeak(1.f,6.f,5.f)==1.f);
+    const float highlight=mapScenePeak(10.f,6.f,5.f);
+    assert(highlight>1.f && highlight<5.f);
+    assert(mapScenePeak(10000.f,6.f,5.f)<=5.f);
+    assert(std::abs(pqFromNits(100.f)-.5080784f)<1e-5f);
+    assert(std::abs(pqFromNits(10000.f)-1.f)<1e-5f);
+    assert(sdrSnapshotLinear(203.f,203.f)==1.f);
+    assert(std::abs(sdrSnapshotLinear(101.5f,203.f)-.5f)<1e-6f);
+    assert(sdrSnapshotLinear(1000.f,203.f)==1.f);
+    assert(sdrSnapshotLinear(std::numeric_limits<float>::quiet_NaN(),203.f)==0.f);
+    assert(encode({80,80,80},Encoding::ScRgb).red==1.f);
+    auto pq=encode({200,200,200},Encoding::Hdr10);
+    assert(std::abs(pq.red-pq.green)<1e-5f && std::abs(pq.green-pq.blue)<1e-5f);
+    Request bad{true,std::numeric_limits<float>::quiet_NaN(),1};
+    bad=sanitized(bad);assert(bad.paperWhiteNits==80 && bad.peakNits==80);
+    const auto highWhite=sanitized({true,455.f,1000.f});
+    assert(highWhite.paperWhiteNits==455.f && sdrSnapshotLinear(455.f,455.f)==1.f);
+    const auto limitedWhite=sanitized({true,455.f,409.f});
+    assert(limitedWhite.paperWhiteNits==409.f && limitedWhite.peakNits==409.f);
+    assert(toneScene({std::numeric_limits<float>::infinity(),-1,0},request).red==0);
+}

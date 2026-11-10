@@ -1,0 +1,179 @@
+/**
+ * @file llcleansnapshotvk.h
+ * @brief LIVE SNAPSHOTS (#873): snapshots taken from the main render path instead of an
+ *        offscreen re-render.
+ *
+ * WHY. The offscreen snapshot renderer (LLVulkanContext::renderOffscreen -> recordWorld with
+ * mOffscreen) kept diverging from the live view: RT reflections refuse offscreen, split
+ * lighting is on-screen only, the weather / snow differed, and a big shot re-created a whole
+ * render-target set at the shot size behind vkDeviceWaitIdle. A snapshot taken from the live
+ * frame is what the user sees, for every current and future effect, and needs only the
+ * output image (plus an accumulation buffer for upscaled shots) -- never a second set of
+ * render targets.
+ *
+ * WHAT. One shot at a time, armed on the main thread (LLVulkanContext::beginLiveSnapshot),
+ * recorded by the renderer at its capture point of the next live frame(s), read back after
+ * that frame's fence (no vkDeviceWaitIdle):
+ *  - MODE_RESAMPLE (shots at or below the window size, or upscaled without antialiasing):
+ *    the swap image at the capture point (1 world only -- post-tonemap, before the selection
+ *    outline, HUD and UI; 2 world + HUD; 3 the whole frame with UI) is copied into a buffer
+ *    and resampled by a separable Lanczos-3 in linear light (sRGB decoded / re-encoded) to
+ *    the shot size, cropped to the shot's aspect. One live frame: no hitch, no history reset.
+ *  - MODE_DEPTH: the live depth buffer (render size, point 1), linearised with the frame's
+ *    own inverse projection, point-sampled to the shot size, [near, far] -> 8-bit grey.
+ *  - MODE_ACCUM (shots above the window size): `frames` live frames, each rendered with a
+ *    distinct sub-pixel projection jitter (Halton(2,3) index jitterIndex(); the renderer
+ *    skips the TAA / FSR resolve for them so the raw jittered samples reach the swap image),
+ *    are splatted into a shot-size running mean (half-float RGB + weight, 8 B / px) with a
+ *    Gaussian in output pixels -- super-resolution of a still scene. Content that moves
+ *    (motion vectors, when the scene is not frozen) is not accumulated; the resolve takes the
+ *    last frame there. The live view keeps presenting while it runs.
+ *    #1434: the samples must be WINDOW-resolution renders. Under DLSS / FSR / a render scale
+ *    the live frame renders smaller and, with the resolve skipped, reaches the swap image
+ *    through a linear upsample blit -- every sample was already a bilinear magnification, and
+ *    a 2x shot at DLSS Performance held ~1/4 of its detail per axis. So the shot's frames
+ *    render at the window size (nativeRender, decided against free VRAM by the caller), after
+ *    `warmup` unaccumulated frames that let the re-created render-size targets (AO, RT mask,
+ *    GI reservoirs, denoiser and SSR histories) settle.
+ * Every pass is a compute dispatch (clean_snap_live.comp); only the final packed RGB image
+ * (LLImageRaw layout: 3 B / px, rows bottom-up) is host-visible.
+ *
+ * MEMORY. Device-local: the source copy (window size x 4 B; depth: render size x 4 B), the
+ * horizontal pass's rows (shot width x the crop's rows x 8 B) or the accumulator (shot size
+ * x 8 B), the motion copy (render size x 8 B, unfrozen accumulation only). Host-visible: the
+ * output (shot size x 3 B). All allocated soft (VKMEM_TARGET / VKMEM_READBACK) at arm time --
+ * a failure returns false with the reason so the caller falls back (a smaller shot, then the
+ * offscreen path) -- and freed as soon as the shot is read (snapshot-only VRAM).
+ * Shots are accumulated at their full size (#1434: no CPU scale for the rest of the way; the
+ * frame count keeps about 4 samples per output pixel up to the 64-frame cap).
+ */
+#ifndef LL_LLCLEANSNAPSHOTVK_H
+#define LL_LLCLEANSNAPSHOTVK_H
+
+#include "vk_device.h"
+#include "vk_descpool.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+class LLCleanSnapshotVK
+{
+public:
+    enum Mode : uint32_t { MODE_RESAMPLE = 0, MODE_DEPTH = 1, MODE_ACCUM = 2 };
+
+    struct Request
+    {
+        uint32_t point = 1;              // capture point: 1 world, 2 world + HUD, 3 full frame with UI
+        Mode     mode = MODE_RESAMPLE;
+        uint32_t outW = 0, outH = 0;     // the shot (output) size
+        float    crop[4] = {0.f, 0.f, 1.f, 1.f};   // normalised source rectangle x0, y0, w, h
+        uint32_t frames = 1;             // MODE_ACCUM: jittered live frames (<= 64)
+        bool     motionReject = false;   // MODE_ACCUM: drop moving pixels by motion vectors
+        bool     dither = true;          // MODE_ACCUM: TPDF-dither the resolved 8-bit output once (#932)
+        float    sharpen = 0.f;          // MODE_ACCUM: CAS strength 0..1 on the resolved mean (#1093); 0 = off
+        bool     adaptiveSigma = true;   // MODE_ACCUM: reconstruction width from the samples per pixel (#1093)
+        float    mipBias = 0.f;          // MODE_ACCUM: texture LOD bias offset while the shot renders (#1093)
+        bool     nativeRender = false;   // MODE_ACCUM: the shot's frames render at the window size (#1434)
+        uint32_t warmup = 0;             // MODE_ACCUM: frames rendered but not accumulated first (#1434)
+        float    depthRange[2] = {0.1f, 128.f};    // MODE_DEPTH: metres mapped to 0 .. 255
+        bool     hdrRgbeOutput = false;  // MODE_RESAMPLE only; FP16 linear-nits source -> RGBE
+        bool     pairedHdr = false;      // color: paired SDR/RGBE from the same copied frame(s)
+    };
+
+    // What the renderer hands over at a capture point.
+    struct Source
+    {
+        uint32_t point = 0;
+        // The swap image, COLOR_ATTACHMENT_OPTIMAL (restored after the copy).
+        VkImage  swapImage = VK_NULL_HANDLE;
+        VkFormat swapFormat = VK_FORMAT_UNDEFINED;
+        uint64_t outputGeneration = 0, committedGeneration = 0;
+        float paperWhiteNits = 203.f, peakNits = 1000.f;
+        uint32_t width = 0, height = 0;
+        // The world depth, DEPTH_ATTACHMENT_OPTIMAL (point 1 only; restored after the copy).
+        VkImage  depthImage = VK_NULL_HANDLE;
+        VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+        uint32_t depthW = 0, depthH = 0;
+        // Motion/depth/class (RGBA16F, SHADER_READ_ONLY_OPTIMAL; restored); null = none.
+        VkImage  motionImage = VK_NULL_HANDLE;
+        uint32_t motionW = 0, motionH = 0;
+        float    jitterPx[2] = {0.f, 0.f};   // this frame's projection jitter, display px (x right, y down)
+        float    invProj[4] = {0.f, 0.f, 0.f, 1.f};   // inverse projection {[10], [14], [11], [15]}
+    };
+
+    // Formats the RGB pass can unpack (8-bit RGBA / BGRA, UNORM or SRGB storage).
+    static bool sourceFormatSupported(VkFormat f);
+
+    // Main thread. Allocates the shot's buffers (soft); srcW x srcH: the swap image (colour
+    // modes; the depth source is sized at its first record). False (with `why`) when the
+    // pipelines or the memory are not available: nothing is armed.
+    bool arm(VkDeviceContext* ctx, const Request& r, uint32_t srcW, uint32_t srcH, std::string& why);
+    bool armed() const { return mState == ST_ARMED; }
+    // MODE_ACCUM frames still to render: the renderer jitters this frame with
+    // Halton(jitterIndex()) over jitterPhases() and skips the TAA / FSR resolve.
+    bool jitterActive() const { return mState == ST_ARMED && mReq.mode == MODE_ACCUM; }
+    uint32_t jitterIndex() const { return mFrame + 1u; }
+    uint32_t jitterPhases() const { return mReq.frames; }
+    float    mipBiasOffset() const { return mReq.mipBias; }   // #1093: added to the material LOD bias
+    // #1434: the shot's frames (warm-up included) render at the window size -- no DLSS / FSR /
+    // render-scale extent, whose frames reach the swap image through a linear upsample blit.
+    bool     nativeRenderActive() const { return jitterActive() && mReq.nativeRender; }
+    uint32_t point() const { return mReq.point; }
+    // The renderer, at each capture point of a live (on-screen) frame.
+    void record(VkCommandBuffer cmd, const Source& s);
+    // The context, after the frame's submission (its in-flight fence).
+    void frameSubmitted(VkFence fence);
+    // The renderer: the frame was dropped (#697) -- its recording never ran.
+    void frameDropped();
+    // Every frame recorded and submitted (read() can wait), or failed.
+    bool finished() const { return mState == ST_SUBMITTED || mState == ST_FAILED; }
+    bool failed() const { return mState == ST_FAILED; }
+    const std::string& failReason() const { return mWhy; }
+    // Waits for the last frame's fence, returns RGB (3 B/px) or RGBE (4 B/px), rows bottom-up,
+    // and frees the shot's buffers. False on failure (freed as well).
+    bool read(std::vector<uint8_t>& rgb, uint32_t& w, uint32_t& h, std::vector<uint8_t>* pairedHdr = nullptr);
+    // Abandon an armed / unread shot (waits for the device when frames are in flight).
+    void cancel();
+    void destroy();
+    // This shot's allocations (bytes), for the log / the VRAM comparison.
+    uint64_t deviceBytes() const;
+    uint64_t hostBytes() const { return mOut.size + mOutHdr.size; }
+
+private:
+    enum State : uint32_t { ST_IDLE = 0, ST_ARMED, ST_RECORDED, ST_SUBMITTED, ST_FAILED };
+    bool ensurePipelines(VkDevice dev);
+    bool ensureSource(VkDeviceSize bytes);
+    bool ensureMotion(VkDeviceSize bytes);
+    void writeSet();
+    void freeBuffers();
+    void fail(const std::string& why);
+
+    VkDeviceContext* mCtx = nullptr;
+    State     mState = ST_IDLE;
+    Request   mReq;
+    std::string mWhy;
+    uint32_t  mSrcW = 0, mSrcH = 0;     // the source the shot was armed for (colour modes)
+    uint32_t  mFrame = 0;               // frames recorded so far
+    uint32_t  mWarmLeft = 0;            // MODE_ACCUM warm-up frames still to skip (#1434)
+    uint64_t  mCaptureGeneration = 0;
+    float     mCaptureWhite = 0.f, mCapturePeak = 0.f;
+    bool      mMotionNow = false;       // the accumulation reads motion vectors (first frame decides)
+    bool      mSetDirty = true;
+    bool      mPendingInFlight = false; // recorded frames not yet known complete
+    VkFence   mFence = VK_NULL_HANDLE;  // the last recorded frame's in-flight fence
+    uint32_t  mWorkRow0 = 0, mWorkRows = 0;   // MODE_RESAMPLE: source rows the H pass covers
+    double    mArmTime = 0.0;
+
+    GpuBuffer mSrc{}, mWork{}, mWorkHdr{}, mOut{}, mOutHdr{}, mMotion{};
+
+    VkDescriptorSetLayout mDsl = VK_NULL_HANDLE;
+    VkDescPool            mPool;
+    VkDescriptorSet       mSet = VK_NULL_HANDLE;
+    VkDescriptorSet       mSetHdr = VK_NULL_HANDLE;
+    VkPipelineLayout      mLayout = VK_NULL_HANDLE;
+    VkPipeline            mPipe[7] = {};   // H, V, DEPTH, ACC, RESOLVE, HDR V and HDR resolve
+    bool                  mPipeFailed = false;
+};
+
+#endif // LL_LLCLEANSNAPSHOTVK_H

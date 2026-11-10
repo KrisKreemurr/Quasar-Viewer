@@ -1,0 +1,112 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): the 2D WEATHER MAP, from the region's EEP sky.
+//
+// RGB retains the periodic EEP detail tile; A is a camera-window world field.
+// Both are rebuilt in the same fixed 512^2 dispatch and sampled with separate UVs.
+// Large-scale coverage uses world fBm/domain warp and a rotated EEP sample;
+// repeating this local-detail tile no longer repeats the complete cloud field.
+//
+// The coverage is the 2D dome's own (clean_clouds.glsl cloudsF, LL's alpha1) on the same
+// inputs, so a region's sky keeps its character -- where the dome showed cloud, the shell
+// grows cloud:
+//   raw = (noise(u + pos_density1.xy) - 0.5) + (noise(16 u + pos_density2.xy) - 0.5) * density2
+//       + 2 (cloud_coverage - 0.25)
+//   coverage = saturate(raw x 3 x density1)
+// (EEP "Cloud Coverage" = LL cloud_shadow = ssr.atmos[2].w; density1 / 2 = pos_density.z;
+// LL sharpens x 10 for a flat layer, the volume's own shaping does part of that here.)
+// Cloud type (stratus 0 .. towering cumulus 1): heavier where the coverage is dense, varied by
+// a second noise channel and the EEP cloud variance. Local density: the detail layer, plus
+// overcast skies thickening.
+// Writes r = local coverage, g = type, b = local density, a = world coverage.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 2, binding = 0, rgba8) uniform writeonly image2D uWeather;
+
+#ifdef WEATHER_MIP
+// Fixed 2x2 box reduction of the already nonlinear weather channels. The source
+// view exposes exactly the previous level; the destination exactly the next one.
+layout(set = 2, binding = 2) uniform sampler2D uWeatherPrev;
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, imageSize(uWeather)))) return;
+    const ivec2 src = px * 2;
+    const vec4 sum = texelFetch(uWeatherPrev, src, 0)
+                   + texelFetch(uWeatherPrev, src + ivec2(1, 0), 0)
+                   + texelFetch(uWeatherPrev, src + ivec2(0, 1), 0)
+                   + texelFetch(uWeatherPrev, src + ivec2(1, 1), 0);
+    imageStore(uWeather, px, sum * 0.25);
+}
+#else
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (the EEP cloud noise)
+#define VC_SET 2
+#define VC_BINDING 1
+#include "clean_vol_cloud_ubo.glsl"
+
+vec4 wxNoise(vec2 uv,float lod)
+{
+    const int ia = int(ssr.clouds[3].x), ib = int(ssr.clouds[3].y);
+    if (ia < 0) return vec4(0.5);
+    const vec4 a = textureLod(uTextures[nonuniformEXT(uint(ia))], uv, lod);
+    if (ib == ia || ib < 0 || ssr.clouds[2].w <= 0.0) return a;
+    const vec4 b = textureLod(uTextures[nonuniformEXT(uint(ib))], uv, lod);
+    return mix(a, b, ssr.clouds[2].w);
+}
+
+// Explicit footprint: this compute producer has no screen derivatives. In
+// particular the 16x EEP layer must be filtered BEFORE the nonlinear coverage bake.
+float wxSourceLod(float span, vec2 size)
+{
+    const int ia = int(ssr.clouds[3].x), ib = int(ssr.clouds[3].y);
+    vec2 extent = vec2(1.0);
+    if (ia >= 0) extent = vec2(textureSize(uTextures[nonuniformEXT(uint(ia))], 0));
+    if (ib >= 0 && ib != ia && ssr.clouds[2].w > 0.0)
+        extent = max(extent, vec2(textureSize(uTextures[nonuniformEXT(uint(ib))], 0)));
+    const vec2 footprint = extent * span / size;
+    return log2(max(max(footprint.x, footprint.y), 1.0));
+}
+
+#include "clean_vol_cloud_field.glsl"
+
+float wxCoverage(vec2 u,vec2 size)
+{
+    const vec2 p=vc.weather_noise.xy+u*vc.weather_map.w*vc.weather_noise.z;
+    const vec2 warp=vec2(wxValue(p*.7+vec2(17.3,41.7)),wxValue(p*.7+vec2(-63.1,9.2)))-0.5;
+    const vec2 q=p+warp*.75;
+    const float fbm=(wxValue(q)+.5*wxValue(q*2.03+7.1)+.25*wxValue(q*4.13-13.7))/1.75;
+    const vec2 detail=u*(vc.weather_map.w*vc.shape0.y);
+    const vec2 rotated=mat2(.8,.6,-.6,.8)*(detail*1.41421356237)+vc.weather_eep.zw;
+    const float lod = wxSourceLod(vc.weather_map.w * vc.shape0.y * 1.41421356237, size);
+    return clamp(.7*fbm+.3*wxNoise(rotated,lod).x,0.0,1.0);
+}
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = imageSize(uWeather);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+    const vec2 u = (vec2(px) + 0.5) / vec2(sz);
+
+    const vec3 pd1 = ssr.clouds[1].xyz;     // scrolled (wind) large layer + density1
+    const float variance = ssr.clouds[1].w;
+    const vec3 pd2 = ssr.clouds[2].xyz;     // detail layer + density2
+    // #783 M2: the weather's cloud cover (ssr.weather[11].z, zero without weather) only ever
+    // adds to the region's -- the weather never thins a region's own sky.
+    const float coverage_eep = max(ssr.atmos[2].w, ssr.weather[11].z);
+
+    const vec4 n1 = wxNoise(u + fract(pd1.xy), wxSourceLod(1.0, vec2(sz)));
+    const vec4 n2 = wxNoise(u * 16.0 + fract(pd2.xy), wxSourceLod(16.0, vec2(sz)));
+    const float cloud_density = 2.0 * (coverage_eep - 0.25);
+    const float raw = (n1.x - 0.5) + (n2.x - 0.5) * pd2.z + cloud_density;
+    const float cov = clamp(raw * 3.0 * max(pd1.z, 0.05), 0.0, 1.0);
+    const float type = clamp(0.15 + 0.75 * smoothstep(0.2, 1.0, cov) * (0.6 + 0.4 * n1.y)
+                             + 0.3 * variance * (n2.y - 0.3), 0.0, 1.0);
+    const float dens = clamp(0.55 + 0.45 * n2.x + 0.3 * max(coverage_eep - 0.5, 0.0), 0.0, 1.0);
+    imageStore(uWeather, px, vec4(sqrt(cov), type, dens, wxCoverage(u,vec2(sz))));
+}
+
+#endif // WEATHER_MIP

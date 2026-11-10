@@ -1,0 +1,939 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ name="area_search"
+ help_topic="fs_area_search"
+ title="Area Search for Objects"
+ legacy_header_height="18"
+ min_width="640"
+ min_height="380"
+ width="820"
+ height="460"
+ save_rect="true"
+ single_instance="true"
+ reuse_instance="false"
+ can_resize="true"
+ can_minimize="true"
+ can_close="true"
+ can_drag_on_left="false">
+    <floater.string name="invalid_regex">Not a valid regular expression; the previous search still applies.</floater.string>
+    <floater.string name="parcel_loading">...</floater.string>
+    <floater.string name="unnamed_parcel">(unnamed parcel)</floater.string>
+    <floater.string name="parcel_name">[NAME]   [AREA] m²</floater.string>
+    <floater.string name="parcel_used">[USED] of [CAPACITY] LI</floater.string>
+    <floater.string name="parcel_used_tip">Land impact used on this parcel, of what it allows (as About Land shows it).</floater.string>
+    <floater.string name="parcel_pool">Region pool: [USED] of [MAX]</floater.string>
+    <floater.string name="region_name_loading">[REGION]</floater.string>
+    <floater.string name="region_name_one">[REGION]   1 parcel</floater.string>
+    <floater.string name="region_name">[REGION]   [PARCELS] parcels</floater.string>
+    <floater.string name="region_used_tip">Land impact used in this region, all its parcels together, of the region's limit.</floater.string>
+    <floater.string name="nearby_name">Within [RADIUS] m</floater.string>
+    <floater.string name="nearby_used">[USED] LI</floater.string>
+    <floater.string name="nearby_used_tip">Land impact of the objects in range whose cost has arrived. A radius has no limit to compare it with.</floater.string>
+    <floater.string name="owner_chip">Only objects owned by [NAME]</floater.string>
+    <floater.string name="pinned_default">Parcel from About Land</floater.string>
+    <layout_stack
+     name="area_search_stack"
+     follows="all"
+     layout="topleft"
+     left="4"
+     top="20"
+     right="-4"
+     bottom="-4"
+     orientation="horizontal">
+        <layout_panel
+         name="filters_layout"
+         auto_resize="false"
+         user_resize="false"
+         width="214">
+            <scroll_container
+             name="filters_scroll"
+             follows="all"
+             layout="topleft"
+             left="0"
+             top="0"
+             width="214"
+             height="436"
+             reserve_scroll_corner="false">
+              <panel
+               name="filters_panel"
+               follows="left|top"
+               layout="topleft"
+               left="0"
+               top="0"
+               width="198"
+               height="611">
+                <text
+                 follows="left|top"
+                 font="SansSerifBold"
+                 height="16"
+                 layout="topleft"
+                 left="4"
+                 name="scope_label"
+                 top="4"
+                 width="190">
+                    Look in
+                </text>
+                <radio_group
+                 follows="left|top"
+                 height="77"
+                 layout="topleft"
+                 left="8"
+                 name="scope_radio"
+                 top="22"
+                 width="180">
+                    <radio_item
+                     label="This parcel"
+                     layout="topleft"
+                     name="parcel"
+                     value="parcel"
+                     top="0"
+                     height="18"
+                     tool_tip="The parcel you are standing on. Follows you as you walk." />
+                    <radio_item
+                     label="Region"
+                     layout="topleft"
+                     name="region"
+                     value="region"
+                     top_pad="1"
+                     height="18" />
+                    <radio_item
+                     label="Nearby"
+                     layout="topleft"
+                     name="nearby"
+                     value="nearby"
+                     top_pad="1"
+                     height="18"
+                     tool_tip="Within the distance on the right, neighbouring regions included." />
+                    <radio_item
+                     enabled="false"
+                     label="Parcel from About Land"
+                     layout="topleft"
+                     name="pinned"
+                     value="pinned"
+                     top_pad="1"
+                     height="18"
+                     tool_tip="A parcel picked in About Land > Objects with List objects. Stays put while you walk." />
+                </radio_group>
+                <spinner
+                 decimal_digits="0"
+                 follows="left|top"
+                 height="18"
+                 increment="8"
+                 label_width="0"
+                 layout="topleft"
+                 left="96"
+                 max_val="4096"
+                 min_val="1"
+                 name="nearby_radius"
+                 tool_tip="How far from you Nearby looks, in metres."
+                 top="60"
+                 width="64" />
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="164"
+                 name="nearby_radius_unit"
+                 top="62"
+                 width="20">
+                    m
+                </text>
+                <text
+                 follows="left|top"
+                 font="SansSerifBold"
+                 height="16"
+                 layout="topleft"
+                 left="4"
+                 name="search_label"
+                 top="105"
+                 width="190">
+                    Search
+                </text>
+                <line_editor
+                 follows="left|top"
+                 height="20"
+                 label="Name, owner, description..."
+                 layout="topleft"
+                 left="4"
+                 max_length_bytes="255"
+                 name="search_text"
+                 top="123"
+                 width="186" />
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="4"
+                 name="search_field"
+                 tool_tip="Which text to search."
+                 top="147"
+                 width="120">
+                    <combo_box.item label="All fields" name="all" value="0"/>
+                    <combo_box.item label="Name" name="name" value="1"/>
+                    <combo_box.item label="Description" name="description" value="2"/>
+                    <combo_box.item label="Owner" name="owner" value="3"/>
+                    <combo_box.item label="Group" name="group" value="4"/>
+                    <combo_box.item label="Creator" name="creator" value="5"/>
+                    <combo_box.item label="Last owner" name="last_owner" value="6"/>
+                </combo_box>
+                <check_box
+                 follows="left|top"
+                 height="16"
+                 label="Regular expression"
+                 layout="topleft"
+                 left="4"
+                 name="search_regex"
+                 tool_tip="Match the whole field against a regular expression (case-insensitive)."
+                 top="171"
+                 width="180" />
+                <button
+                 follows="left|top"
+                 height="20"
+                 is_toggle="true"
+                 label="More fields"
+                 layout="topleft"
+                 left="4"
+                 name="more_fields_btn"
+                 tool_tip="Also require text in specific fields, e.g. name and creator. Every box here and the search box above must match."
+                 top="191"
+                 width="186" />
+                <panel
+                 follows="left|top"
+                 height="132"
+                 layout="topleft"
+                 left="0"
+                 name="more_fields_panel"
+                 top="215"
+                 visible="false"
+                 width="198">
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_name_label"
+                     top="4"
+                     width="64">
+                        Name
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_name"
+                     tool_tip="The name must contain this."
+                     top="1"
+                     width="118" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_description_label"
+                     top="26"
+                     width="64">
+                        Description
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_description"
+                     tool_tip="The description must contain this."
+                     top="23"
+                     width="118" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_owner_label"
+                     top="48"
+                     width="64">
+                        Owner
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_owner"
+                     tool_tip="The owner must contain this."
+                     top="45"
+                     width="118" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_group_label"
+                     top="70"
+                     width="64">
+                        Group
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_group"
+                     tool_tip="The group must contain this."
+                     top="67"
+                     width="118" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_creator_label"
+                     top="92"
+                     width="64">
+                        Creator
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_creator"
+                     tool_tip="The creator must contain this."
+                     top="89"
+                     width="118" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="field_last_owner_label"
+                     top="114"
+                     width="64">
+                        Last owner
+                    </text>
+                    <line_editor
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="72"
+                     max_length_bytes="255"
+                     name="field_last_owner"
+                     tool_tip="The last owner must contain this."
+                     top="111"
+                     width="118" />
+                </panel>
+                <text
+                 follows="left|top"
+                 font="SansSerifBold"
+                 height="16"
+                 layout="topleft"
+                 left="4"
+                 name="show_label"
+                 top="219"
+                 width="190">
+                    Show
+                </text>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_temporary_label"
+                 top="240"
+                 width="94">
+                    Temporary
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_temporary"
+                 tool_tip="Temporary objects. They do not count against the parcel."
+                 top="237"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_attachment_label"
+                 top="262"
+                 width="94">
+                    Attachments
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_attachment"
+                 tool_tip="Objects worn by avatars."
+                 top="259"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_physical_label"
+                 top="284"
+                 width="94">
+                    Physical
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_physical"
+                 tool_tip="Objects that move under physics."
+                 top="281"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_phantom_label"
+                 top="306"
+                 width="94">
+                    Phantom
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_phantom"
+                 tool_tip="Objects others can walk through."
+                 top="303"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_locked_label"
+                 top="328"
+                 width="94">
+                    Locked
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_locked"
+                 tool_tip="Objects their owner has locked against moving."
+                 top="325"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_scripted_label"
+                 top="350"
+                 width="94">
+                    Scripted
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_scripted"
+                 tool_tip="Objects with a running script."
+                 top="347"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_shared_media_label"
+                 top="372"
+                 width="94">
+                    Shared media
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_shared_media"
+                 tool_tip="Objects showing media on a face."
+                 top="369"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <text
+                 follows="left|top"
+                 height="16"
+                 layout="topleft"
+                 left="8"
+                 name="tri_for_sale_label"
+                 top="394"
+                 width="94">
+                    For sale
+                </text>
+                <combo_box
+                 follows="left|top"
+                 height="20"
+                 layout="topleft"
+                 left="102"
+                 name="tri_for_sale"
+                 tool_tip="Objects for sale. With Only, the price range under More filters applies."
+                 top="391"
+                 width="88">
+                    <combo_box.item label="Any" name="any" value="0"/>
+                    <combo_box.item label="Only" name="only" value="1"/>
+                    <combo_box.item label="Hide" name="hide" value="2"/>
+                </combo_box>
+                <button
+                 follows="left|top"
+                 height="20"
+                 is_toggle="true"
+                 label="More filters"
+                 layout="topleft"
+                 left="4"
+                 name="more_filters_btn"
+                 tool_tip="Permissions, probes, child prims, price and click action."
+                 top="417"
+                 width="186" />
+                <panel
+                 follows="left|top"
+                 height="166"
+                 layout="topleft"
+                 left="0"
+                 name="more_filters_panel"
+                 top="443"
+                 visible="false"
+                 width="198">
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="tri_copy_label"
+                     top="3"
+                     width="94">
+                        Copy
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="tri_copy"
+                     tool_tip="Objects their owner can copy."
+                     top="0"
+                     width="88">
+                        <combo_box.item label="Any" name="any" value="0"/>
+                        <combo_box.item label="Only" name="only" value="1"/>
+                        <combo_box.item label="Hide" name="hide" value="2"/>
+                    </combo_box>
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="tri_modify_label"
+                     top="25"
+                     width="94">
+                        Modify
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="tri_modify"
+                     tool_tip="Objects their owner can modify."
+                     top="22"
+                     width="88">
+                        <combo_box.item label="Any" name="any" value="0"/>
+                        <combo_box.item label="Only" name="only" value="1"/>
+                        <combo_box.item label="Hide" name="hide" value="2"/>
+                    </combo_box>
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="tri_transfer_label"
+                     top="47"
+                     width="94">
+                        Transfer
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="tri_transfer"
+                     tool_tip="Objects their owner can give away."
+                     top="44"
+                     width="88">
+                        <combo_box.item label="Any" name="any" value="0"/>
+                        <combo_box.item label="Only" name="only" value="1"/>
+                        <combo_box.item label="Hide" name="hide" value="2"/>
+                    </combo_box>
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="tri_reflection_probe_label"
+                     top="69"
+                     width="94">
+                        Reflection probes
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="tri_reflection_probe"
+                     tool_tip="Reflection probe objects."
+                     top="66"
+                     width="88">
+                        <combo_box.item label="Any" name="any" value="0"/>
+                        <combo_box.item label="Only" name="only" value="1"/>
+                        <combo_box.item label="Hide" name="hide" value="2"/>
+                    </combo_box>
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="tri_child_prim_label"
+                     top="91"
+                     width="94">
+                        Child prims
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="tri_child_prim"
+                     tool_tip="The parts of linked objects, besides the root."
+                     top="88"
+                     width="88">
+                        <combo_box.item label="Any" name="any" value="0"/>
+                        <combo_box.item label="Only" name="only" value="1"/>
+                        <combo_box.item label="Hide" name="hide" value="2"/>
+                    </combo_box>
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="price_label"
+                     top="115"
+                     width="40">
+                        Price
+                    </text>
+                    <spinner
+                     decimal_digits="0"
+                     follows="left|top"
+                     height="18"
+                     increment="10"
+                     label_width="0"
+                     layout="topleft"
+                     left="50"
+                     max_val="999999"
+                     min_val="0"
+                     name="price_min"
+                     tool_tip="Lowest sale price, when For sale is Only."
+                     top="113"
+                     width="66" />
+                    <spinner
+                     decimal_digits="0"
+                     follows="left|top"
+                     height="18"
+                     increment="10"
+                     label_width="0"
+                     layout="topleft"
+                     left="122"
+                     max_val="999999"
+                     min_val="0"
+                     name="price_max"
+                     tool_tip="Highest sale price, when For sale is Only."
+                     top="113"
+                     width="68" />
+                    <text
+                     follows="left|top"
+                     height="16"
+                     layout="topleft"
+                     left="8"
+                     name="click_action_label"
+                     top="141"
+                     width="94">
+                        Click action
+                    </text>
+                    <combo_box
+                     follows="left|top"
+                     height="20"
+                     layout="topleft"
+                     left="102"
+                     name="click_action"
+                     tool_tip="What a click on the object does."
+                     top="138"
+                     width="88">
+                        <combo_box.item label="Any" name="click_none" value="0"/>
+                        <combo_box.item label="Has one" name="click_any" value="1"/>
+                        <combo_box.item label="Touch" name="click_touch" value="2"/>
+                        <combo_box.item label="Sit" name="click_sit" value="3"/>
+                        <combo_box.item label="Buy" name="click_buy" value="4"/>
+                        <combo_box.item label="Pay" name="click_pay" value="5"/>
+                        <combo_box.item label="Open" name="click_open" value="6"/>
+                        <combo_box.item label="Play" name="click_play" value="7"/>
+                        <combo_box.item label="Open media" name="click_open_media" value="8"/>
+                        <combo_box.item label="Zoom" name="click_zoom" value="9"/>
+                    </combo_box>
+                </panel>
+              </panel>
+            </scroll_container>
+        </layout_panel>
+        <layout_panel
+         name="list_layout"
+         auto_resize="true"
+         user_resize="false"
+         width="590">
+            <panel
+             name="area_search_list_panel"
+             follows="all"
+             layout="topleft"
+             left="0"
+             top="0"
+             width="590"
+             height="436">
+                <panel.string name="counter_blank"></panel.string>
+                <panel.string name="counter_format">[LISTED] objects · [PENDING] still loading</panel.string>
+                <layout_stack
+                 name="list_stack"
+                 follows="all"
+                 layout="topleft"
+                 left="0"
+                 top="0"
+                 width="590"
+                 height="436"
+                 orientation="vertical">
+                    <layout_panel
+                     name="parcel_summary_panel"
+                     auto_resize="false"
+                     user_resize="false"
+                     height="52">
+                        <text
+                         follows="left|top|right"
+                         font="SansSerifBold"
+                         height="16"
+                         layout="topleft"
+                         left="4"
+                         name="parcel_name"
+                         top="2"
+                         use_ellipses="true"
+                         width="250" />
+                        <text
+                         follows="top|right"
+                         halign="right"
+                         height="16"
+                         layout="topleft"
+                         left="-336"
+                         name="parcel_pool"
+                         tool_tip="This owner's parcels in the region share one land impact limit."
+                         top="2"
+                         visible="false"
+                         width="176" />
+                        <text
+                         follows="top|right"
+                         font="SansSerifBold"
+                         halign="right"
+                         height="16"
+                         layout="topleft"
+                         left="-156"
+                         name="parcel_used"
+                         top="2"
+                         width="152" />
+                        <sl_parcel_owner_bar
+                         follows="left|top|right"
+                         height="28"
+                         layout="topleft"
+                         left="4"
+                         name="owner_bar"
+                         tool_tip="Land impact by owner. Click an owner to list only their objects; click again for everyone's."
+                         top="22"
+                         width="582" />
+                    </layout_panel>
+                    <layout_panel
+                     name="owner_chip_panel"
+                     auto_resize="false"
+                     user_resize="false"
+                     height="24"
+                     visible="false">
+                        <text
+                         follows="left|top|right"
+                         height="16"
+                         layout="topleft"
+                         left="4"
+                         name="owner_chip_text"
+                         top="5"
+                         use_ellipses="true"
+                         width="440" />
+                        <button
+                         follows="top|right"
+                         height="20"
+                         label="Show all owners"
+                         layout="topleft"
+                         left="-136"
+                         name="owner_chip_clear"
+                         tool_tip="List every owner's objects again."
+                         top="2"
+                         width="132" />
+                    </layout_panel>
+                    <layout_panel
+                     name="result_layout"
+                     auto_resize="true"
+                     user_resize="false"
+                     height="384">
+                        <scroll_list
+                         name="result_list"
+                         follows="all"
+                         layout="topleft"
+                         left="0"
+                         top="0"
+                         width="590"
+                         height="384"
+                         column_padding="0"
+                         draw_heading="true"
+                         multi_select="true"
+                         search_column="1">
+                            <scroll_list.columns
+                             name="distance"
+                             label="Dist"
+                             width="50" tool_tip="Distance from you to the object."/>
+                            <scroll_list.columns
+                             name="name"
+                             label="Name"
+                             width="180"/>
+                            <scroll_list.columns
+                             name="description"
+                             label="Description"
+                             width="160"/>
+                            <scroll_list.columns
+                             name="price"
+                             label="Price"
+                             width="50" tool_tip="If the object is for sale, what you would pay for it."/>
+                            <scroll_list.columns
+                             name="land_impact"
+                             label="LI"
+                             width="40" tool_tip="Land impact: what the object counts against the parcel."/>
+                            <scroll_list.columns
+                             name="prim_count"
+                             label="Prims"
+                             width="45" tool_tip="How many prims the object is made of."/>
+                            <scroll_list.columns
+                             name="owner"
+                             label="Owner"
+                             width="140"/>
+                            <scroll_list.columns
+                             name="group"
+                             label="Group"
+                             width="130" tool_tip="The group the object is set to."/>
+                            <scroll_list.columns
+                             name="creator"
+                             label="Creator"
+                             width="140"/>
+                            <scroll_list.columns
+                             name="last_owner"
+                             label="Last Owner"
+                             width="140" tool_tip="Who owned it last."/>
+                        </scroll_list>
+                    </layout_panel>
+                    <layout_panel
+                     name="footer_layout"
+                     auto_resize="false"
+                     user_resize="false"
+                     height="26">
+                        <text
+                         follows="left|bottom"
+                         height="16"
+                         layout="topleft"
+                         left="4"
+                         name="counter"
+                         top="6"
+                         width="300" />
+                        <check_box
+                         follows="right|bottom"
+                         height="16"
+                         label="Beacons"
+                         layout="topleft"
+                         left="-226"
+                         name="beacons"
+                         tool_tip="Show a beacon on each listed object."
+                         top="5"
+                         width="80" />
+                        <button
+                         follows="right|bottom"
+                         height="20"
+                         label="Refresh"
+                         layout="topleft"
+                         left="-136"
+                         name="Refresh"
+                         tool_tip="Look for objects again from scratch."
+                         top="3"
+                         width="80" />
+                        <menu_button
+                         follows="right|bottom"
+                         height="18"
+                         image_disabled="OptionsMenu_Disabled"
+                         image_selected="OptionsMenu_Press"
+                         image_unselected="OptionsMenu_Off"
+                         layout="topleft"
+                         left="-26"
+                         menu_filename="menu_area_search_gear.xml"
+                         menu_position="topright"
+                         name="gear_btn"
+                         tool_tip="What a double-click does"
+                         top="4"
+                         width="18" />
+                    </layout_panel>
+                </layout_stack>
+            </panel>
+        </layout_panel>
+    </layout_stack>
+</floater>

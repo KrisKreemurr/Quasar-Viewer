@@ -1,0 +1,29 @@
+RmlUi 6.3 local modification (#703)
+
+Upstream: https://github.com/mikke89/RmlUi/releases/tag/6.3
+License: MIT, unchanged. Preserve the upstream copyright and license notices.
+Official source archive SHA256:
+d977298bb6147610e5984d5db85ddf284020d655a8713913f6982074f1dbdede
+
+rmlui-6.3-checked-font-scratch.patch changes only the internal
+GlobalStackAllocator allocation/deallocation pair in Source/Core/Memory.h to
+std::allocator<T>. Its three users are scratch byte arrays in FontEffectBlur
+and FontEffectGlow. This avoids passing an unchecked malloc null pointer to
+DynamicArray placement construction. Size overflow and allocation failure
+follow the standard allocator exception contract. The default glyph path and
+GPU layer/backdrop filters are unchanged. The former stack allocator remains
+compiled, but these call sites no longer enter it.
+
+PatchRmlUiFontAllocator.cmake verifies the exact original/patched header and
+patch digests. It patches only the fetched build copy, not a system library.
+The build host requires the ordinary patch program (Linux and Windows cross
+builds both run on Linux).
+
+Temporary runtime policy, approved by the owner while Classic UI exists:
+on a RmlUi initialization/runtime bad_alloc, disable RmlUi for the process,
+log once, make no further RmlUi calls, and retain its potentially partial CPU
+state plus one small render-interface shell. Retire and free the entire Vulkan
+state using actual provider GPU completion. Never retry initialization or
+invoke Shutdown on poisoned state. Classic UI continues; the proof overlay
+stops. This is NOT the policy for a RmlUi-only viewer: before 2.0, failures must
+degrade individual resources/effects/documents and allow later recovery.

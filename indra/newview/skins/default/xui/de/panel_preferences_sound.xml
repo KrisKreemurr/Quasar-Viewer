@@ -1,0 +1,7 @@
+<?xml version="1.0" ?>
+<panel label="Sounds" name="Preference Media panel">
+	<panel.string name="middle_mouse">Mittlere Maustaste</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="Allgemein" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

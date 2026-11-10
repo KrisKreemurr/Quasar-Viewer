@@ -1,0 +1,42 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+// vkclean -- ALPHA-BLEND COVER LISTS, CLEAR (#1147; clean_alpha_k.glsl has the layout,
+// LLCleanAlphaKVK dispatches it before the list pass). One workgroup per 8 x 8 tile: a tile
+// the previous lists touched (its dirty word, set by clean_alpha_kvis.frag) has every entry of
+// its 64 pixels zeroed and the word reset; an untouched tile costs one load. So the clear's
+// bandwidth follows the blended area, not the screen. (The allocation fill zeroes everything.)
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform Push {
+    uvec2 entries;   // the entries' device address (lo, hi); the tile words follow them
+    uint  width;     // render extent (pixels)
+    uint  height;
+    uint  k;         // entries per pixel and water side
+} pc;
+
+layout(buffer_reference, std430, buffer_reference_align = 8) writeonly buffer AkEntries { uvec2 e[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer AkTiles { uint t[]; };
+
+shared uint s_dirty;
+
+void main()
+{
+    uvec2 ta = pc.entries;
+    uint carry;
+    ta.x = uaddCarry(ta.x, pc.width * pc.height * 2u * pc.k * 8u, carry);
+    ta.y += carry;
+    AkTiles tiles = AkTiles(ta);
+    const uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (gl_LocalInvocationIndex == 0u) s_dirty = tiles.t[tile];
+    barrier();
+    if (s_dirty == 0u) return;   // (uniform per workgroup)
+    const uvec2 pix = gl_GlobalInvocationID.xy;
+    if (pix.x < pc.width && pix.y < pc.height)
+    {
+        AkEntries L = AkEntries(pc.entries);
+        const uint base = (pix.y * pc.width + pix.x) * 2u * pc.k;
+        for (uint i = 0u; i < 2u * pc.k; ++i) L.e[base + i] = uvec2(0u);
+    }
+    if (gl_LocalInvocationIndex == 0u) tiles.t[tile] = 0u;
+}

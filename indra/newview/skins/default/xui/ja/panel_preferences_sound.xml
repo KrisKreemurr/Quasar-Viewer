@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel label="サウンド" name="Preference Media panel">
+	<panel.string name="middle_mouse">
+		中央のボタン
+	</panel.string>
+	<panel.string name="button4_mouse">
+		４ボタン
+	</panel.string>
+	<panel.string name="button5_mouse">
+		５ボタン
+	</panel.string>
+	<tab_container name="sound_tab_container">
+		<panel label="一般" name="sound_prefs_general"/>
+	</tab_container>
+</panel>

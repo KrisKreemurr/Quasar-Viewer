@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- REGISTER PROBE for the wave surface (#1020; scripts/perf/regprobe "SeaVS" / "SeaFS").
+// Not a viewer kernel (regen_world_spv.py does not build it): the sea state's per-vertex and
+// per-fragment work as a compute kernel, so pipestats can report the registers the water VS / FS
+// spend on it (the graphics stages themselves are not measurable there).
+//   -DSEA_PROBE_VS   clean_water_waves.vert's worst vertex: the point + the two geomorph neighbours
+//   (default)        clean_water.frag's sea lookup: one surface with the footprint filter
+layout(local_size_x = 64) in;
+#include "clean_frame_info.glsl"
+#include "clean_sea_state.glsl"
+layout(std430, set = 0, binding = 68) writeonly buffer SeaProbeOut { vec4 sea_probe_out[]; };
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    const vec2 xy = vec2(float(id & 1023u), float(id >> 10)) * 0.37 + ssr.cam_origin.xy;
+    const vec2 cam = ssr.cam_origin.xy;
+#ifdef SEA_PROBE_VS
+    const SeaSurf a = seaSurface(xy, length(xy - cam), 0.0);
+    vec3 P = vec3(xy + a.disp.xy, a.disp.z);
+    vec3 n = a.n;
+    if ((id & 3u) != 0u)
+    {
+        const vec2 e = vec2(0.5, 0.0);
+        const SeaSurf b = seaSurface(xy + e, length(xy + e - cam), 0.0);
+        const SeaSurf c = seaSurface(xy - e, length(xy - e - cam), 0.0);
+        P = mix(P, 0.5 * (vec3(xy + e + b.disp.xy, b.disp.z) + vec3(xy - e + c.disp.xy, c.disp.z)), 0.5);
+        n = normalize(n + b.n + c.n);
+    }
+    sea_probe_out[id] = vec4(P + n, 1.0);
+#else
+    const SeaSurf a = seaSurface(xy, -1.0, 0.01 * length(xy - cam));
+    sea_probe_out[id] = vec4(a.slope, a.crest + a.breaking, a.swash + a.depth);
+#endif
+}

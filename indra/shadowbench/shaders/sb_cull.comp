@@ -1,0 +1,66 @@
+#version 460
+// shadowbench -- the shadow caster cull of one cascade view, reduced to what clean_cull.comp's
+// shadow passes decide (hud_pass 3): the cascade box (6 planes), the caster planes
+// (casterOk: every plane the caster must be inside, then the sub-texel size test on the
+// UNPADDED extent), the #567 static / dynamic split, and the five shadow buckets (opaque,
+// mask, alpha-blend, double-sided opaque, double-sided mask) as indexed indirect commands
+// with GPU counts. One object = one draw (firstInstance = the object = its instance row).
+layout(local_size_x = 64) in;
+
+struct SbObj
+{
+    vec4 bmin;          // world AABB (agent space); w unused
+    vec4 bmax;
+    uint first_index;
+    uint index_count;
+    int  vertex_offset;
+    uint bucket_dyn;    // bits 0-7 bucket 0..4, bit 8 dynamic caster
+};
+layout(std430, set = 0, binding = 0) readonly buffer Objs { SbObj objs[]; };
+struct SbCmd { uint index_count; uint instance_count; uint first_index; int vertex_offset; uint first_instance; };
+layout(std430, set = 0, binding = 1) writeonly buffer Cmds { SbCmd cmds[]; };   // 5 buckets x cap
+layout(std430, set = 0, binding = 2) buffer Counters { uint counters[]; };      // per view: 8 words (5 used)
+struct SbView
+{
+    vec4 planes[6];     // cascade box (world, inside >= 0)
+    vec4 caster[12];    // caster planes ((0,0,0,1) = unused)
+    uint n_caster;
+    uint split;         // 0 every caster, 1 static only, 2 dynamic only
+    float min_size;     // texel x RenderVKShadowMinCasterTexels (0 = off)
+    uint cmd_base;      // first command slot of this view (bucket b at cmd_base + b * cap)
+};
+layout(std430, set = 0, binding = 3) readonly buffer Views { SbView views[]; };
+layout(push_constant) uniform SbCullPush { uint view; uint count; uint cap; uint counter_base; } pc;
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    const SbObj o = objs[i];
+    const SbView v = views[pc.view];
+    const bool dyn = (o.bucket_dyn & 256u) != 0u;
+    if ((v.split == 1u && dyn) || (v.split == 2u && !dyn)) return;
+    // clean_cull.comp tests the world AABB padded 1 m each side
+    const vec3 wmin = o.bmin.xyz - vec3(1.0), wmax = o.bmax.xyz + vec3(1.0);
+    for (uint k = 0u; k < 6u; ++k)
+    {
+        const vec4 p = v.planes[k];
+        const vec3 q = vec3(p.x >= 0.0 ? wmax.x : wmin.x, p.y >= 0.0 ? wmax.y : wmin.y, p.z >= 0.0 ? wmax.z : wmin.z);
+        if (dot(p.xyz, q) + p.w < 0.0) return;
+    }
+    for (uint k = 0u; k < v.n_caster; ++k)
+    {
+        const vec4 p = v.caster[k];
+        const vec3 q = vec3(p.x >= 0.0 ? wmax.x : wmin.x, p.y >= 0.0 ? wmax.y : wmin.y, p.z >= 0.0 ? wmax.z : wmin.z);
+        if (dot(p.xyz, q) + p.w < 0.0) return;
+    }
+    const vec3 e = o.bmax.xyz - o.bmin.xyz;
+    if (max(e.x, max(e.y, e.z)) < v.min_size) return;
+    const uint b = o.bucket_dyn & 0xFFu;
+    const uint slot = atomicAdd(counters[pc.counter_base + b], 1u);
+    if (slot >= pc.cap) return;
+    SbCmd c;
+    c.index_count = o.index_count; c.instance_count = 1u; c.first_index = o.first_index;
+    c.vertex_offset = o.vertex_offset; c.first_instance = i;
+    cmds[v.cmd_base + b * pc.cap + slot] = c;
+}

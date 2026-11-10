@@ -1,0 +1,95 @@
+#version 460
+// vqbench (#1039): the synthetic scene's DEFERRED G-BUFFER, ray-cast from the camera through THE SAME TLAS the
+// lighting kernels trace (so every receiver lies on the geometry its shadow / GI rays leave), alpha-mask cut-outs
+// tested against the same texture, alpha-blend excluded (forward-drawn in the viewer). Writes the layout of
+// clean_gbuffer.glsl gbufferPack (PBR model): G0 albedo (linear: the bench stores RGBA16F, the viewer an sRGB
+// target that samples linear), G1 oct N / oct Ng, G2 rough, metal, glow 0, model byte; G3 emissive 0; depth the
+// reverse-Z NDC depth of vp_rel (deferPosition's inverse).
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT uTLAS;
+layout(std430, set = 0, binding = 1) readonly buffer Inst { uint inst[]; };     // 8 words per instance
+layout(std430, set = 0, binding = 2) readonly buffer Verts { float verts[]; };  // 8 floats per vertex
+layout(std430, set = 0, binding = 3) readonly buffer Idx { uint idx[]; };
+layout(set = 0, binding = 4) uniform sampler2D uTex[4];
+layout(std430, set = 0, binding = 5) readonly buffer Mats { vec4 mats[]; };     // RtMaterial: 6 vec4
+layout(std430, set = 0, binding = 6) readonly buffer Cam { mat4 vp_rel; mat4 inv_vp_rel; vec4 eye; vec4 ext; };
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2DArray oG0;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2DArray oG1;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2DArray oG2;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2DArray oG3;
+layout(set = 0, binding = 11, r32f) uniform writeonly image2DArray oDepth;
+
+vec2 gbOctWrap(vec2 v) { return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0); }
+vec2 gbOctEncode(vec3 n)   // (clean_gbuffer.glsl)
+{
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    return n.z >= 0.0 ? n.xy : gbOctWrap(n.xy);
+}
+vec3 vtx(uint v, uint k) { return vec3(verts[v * 8u + k], verts[v * 8u + k + 1u], verts[v * 8u + k + 2u]); }
+vec2 vuv(uint v) { return vec2(verts[v * 8u + 6u], verts[v * 8u + 7u]); }
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(ext.xy);
+    if (any(greaterThanEqual(px, D))) return;
+    const vec2 ndc = (vec2(px) + 0.5) / vec2(D) * 2.0 - 1.0;
+    const vec4 h = inv_vp_rel * vec4(ndc, 0.5, 1.0);
+    const vec3 dir = normalize(h.xyz / h.w);
+    rayQueryEXT q;
+    // opaque + alpha mask (+ small); not blend / water (RT_MASK_PRIMARY)
+    rayQueryInitializeEXT(q, uTLAS, gl_RayFlagsNoneEXT, 0xDBu, eye.xyz, 0.05, dir, 1000.0);
+    while (rayQueryProceedEXT(q))
+    {
+        const uint id = rayQueryGetIntersectionInstanceCustomIndexEXT(q, false);
+        const uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, false);
+        const vec2 b = rayQueryGetIntersectionBarycentricsEXT(q, false);
+        const uint first = inst[id * 8u], base = inst[id * 8u + 1u], mat = inst[id * 8u + 2u], tex = inst[id * 8u + 4u];
+        float a = mats[mat * 6u + 2u].a;
+        if (tex != 0xFFFFFFFFu)
+        {
+            const uint i0 = idx[first + prim * 3u], i1 = idx[first + prim * 3u + 1u], i2 = idx[first + prim * 3u + 2u];
+            const vec2 uv = vuv(i0) * (1.0 - b.x - b.y) + vuv(i1) * b.x + vuv(i2) * b.y;
+            a *= textureLod(uTex[nonuniformEXT(tex)], uv, 0.0).a;
+        }
+        const float cutoff = uintBitsToFloat(floatBitsToUint(mats[mat * 6u + 5u].z));
+        if (a >= max(cutoff, 0.0)) rayQueryConfirmIntersectionEXT(q);
+    }
+    const ivec3 o = ivec3(px, 0);
+    if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT)
+    {
+        imageStore(oG0, o, vec4(0.0)); imageStore(oG1, o, vec4(0.0)); imageStore(oG2, o, vec4(0.0));
+        imageStore(oG3, o, vec4(0.0)); imageStore(oDepth, o, vec4(0.0));   // (reverse-Z far: the sky)
+        return;
+    }
+    const uint id = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+    const uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
+    const vec2 b = rayQueryGetIntersectionBarycentricsEXT(q, true);
+    const float t = rayQueryGetIntersectionTEXT(q, true);
+    const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(q, true);
+    const uint first = inst[id * 8u], mat = inst[id * 8u + 2u], tex = inst[id * 8u + 4u];
+    const uint i0 = idx[first + prim * 3u], i1 = idx[first + prim * 3u + 1u], i2 = idx[first + prim * 3u + 2u];
+    const vec3 p0 = vtx(i0, 0u), p1 = vtx(i1, 0u), p2 = vtx(i2, 0u);
+    const mat3 nm = transpose(inverse(mat3(o2w)));
+    vec3 Ng = normalize(nm * cross(p1 - p0, p2 - p0));
+    vec3 N = normalize(nm * (vtx(i0, 3u) * (1.0 - b.x - b.y) + vtx(i1, 3u) * b.x + vtx(i2, 3u) * b.y));
+    if (dot(Ng, dir) > 0.0) Ng = -Ng;
+    if (dot(N, Ng) < 0.0) N = -N;
+    vec3 albedo = mats[mat * 6u + 2u].rgb;
+    if (tex != 0xFFFFFFFFu)
+    {
+        const vec2 uv = vuv(i0) * (1.0 - b.x - b.y) + vuv(i1) * b.x + vuv(i2) * b.y;
+        albedo *= textureLod(uTex[nonuniformEXT(tex)], uv, 0.0).rgb;
+    }
+    const float metal = mats[mat * 6u + 5u].x, rough = mats[mat * 6u + 5u].y;
+    const vec3 Prel = dir * t;   // eye-relative
+    const vec4 c = vp_rel * vec4(Prel, 1.0);
+    imageStore(oG0, o, vec4(albedo, 1.0));
+    imageStore(oG1, o, vec4(gbOctEncode(N), gbOctEncode(Ng)));
+    imageStore(oG2, o, vec4(rough, metal, 0.0, 1.0 / 255.0));   // model byte: SURF_PBR
+    imageStore(oG3, o, vec4(0.0));
+    imageStore(oDepth, o, vec4(c.z / c.w));
+}
