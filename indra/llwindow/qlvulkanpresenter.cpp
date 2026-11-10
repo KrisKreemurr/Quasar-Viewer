@@ -8491,6 +8491,8 @@ struct QLVulkanPresenter::Impl
     {
         VkDeviceSize    at = 0;
         std::vector<U8> bytes;
+        U64             stamp = 0;       // an engine block's stamp as written (GpBlock::stamp), 0 unknown
+        const void*     src   = nullptr; // and where its bytes were
     };
     std::unordered_map<U64, GpWritten> mGpBlocksDone;
     std::vector<U8>                    mGpBlockScratch;
@@ -10132,12 +10134,15 @@ struct QLVulkanPresenter::Impl
             {
                 const VkDeviceSize bytes = llmax((VkDeviceSize)r.size, (VkDeviceSize)16);
                 // Filled here first (the host buffer is write-combined: never read back), then written only where no
-                // block of this pass holds the same bytes.
-                mGpBlockScratch.assign((size_t)bytes, 0);
-                U8* dst = mGpBlockScratch.data();
+                // block of this pass holds the same bytes. An engine block whose stamp says its bytes are those
+                // written for it already is neither copied nor compared (the probes' block is some 48 KB).
                 U64 key = 0;
+                const QLVulkanPresenter::GpBlock* block = nullptr;
+                U8* dst = nullptr;
                 if (r.default_block)
                 {
+                    mGpBlockScratch.assign((size_t)bytes, 0);
+                    dst = mGpBlockScratch.data();
                     key = 0x8000000000000000ull | (U64)(U32)d.program;
                     gpFillDefaults(p, d, dst);
                 }
@@ -10155,7 +10160,6 @@ struct QLVulkanPresenter::Impl
                     }
                     key = p.block_key[ri];
                     // The block found where it was last (the engine's names are the same strings every draw), or by name.
-                    const QLVulkanPresenter::GpBlock* block = nullptr;
                     const S32 last = p.block_of[ri];
                     if (last >= 0 && (U32)last < d.block_count && d.blocks[last].name && r.name == d.blocks[last].name)
                     {
@@ -10175,12 +10179,24 @@ struct QLVulkanPresenter::Impl
                         gpWhy(p.name + ": the block " + r.name + " is not bound");
                         return false;
                     }
-                    memcpy(dst, block->data, llmin((size_t)r.size, block->bytes));
                 }
                 GpWritten& written = mGpBlocksDone[key];
-                if (!written.bytes.empty() && written.bytes == mGpBlockScratch)
+                const bool stamped_same = block && block->stamp && written.stamp == block->stamp &&
+                                          written.src == block->data && written.bytes.size() == (size_t)bytes;
+                if (block && !stamped_same)
+                {
+                    mGpBlockScratch.assign((size_t)bytes, 0);
+                    dst = mGpBlockScratch.data();
+                    memcpy(dst, block->data, llmin((size_t)r.size, block->bytes));
+                }
+                if (stamped_same || (!written.bytes.empty() && written.bytes == mGpBlockScratch))
                 {
                     ++mGpBlocksReused;
+                    if (block)
+                    {
+                        written.stamp = block->stamp;
+                        written.src   = block->data;
+                    }
                 }
                 else
                 {
@@ -10195,6 +10211,8 @@ struct QLVulkanPresenter::Impl
                     memcpy(mGpMapped + at, dst, (size_t)bytes);
                     written.at    = at;
                     written.bytes = mGpBlockScratch;
+                    written.stamp = block ? block->stamp : 0;
+                    written.src   = block ? block->data : nullptr;
                     ++mGpBlocksWritten;
                 }
                 b.buffer     = { mGpHost, written.at, bytes };

@@ -25,6 +25,7 @@
 #include "linden_common.h"
 
 #include "aluniformbuffer.h"
+#include "qlglwork.h"
 
 #include "alframefences.h"
 #include "algpubuffer.h"
@@ -767,7 +768,9 @@ namespace
         size_t mBytes = 0;
         bool   mShadow = false;
         const U8* mScratch = nullptr;  // a scratch ring slice's bytes (scratchBindRange), in place of mBuffer's
+        U64    mStamp = 0;  // new whenever what the point holds may have changed (qlUniformBindingStamp); 0 unknown
     };
+    U64 sQLStampNext = 0;
     // The scratch ring's bytes where it is not mapped (its orphaning fallback), kept as written (sQLMirror).
     std::vector<U8> sQLScratchShadow;
     constexpr U32 QL_BINDINGS = 32;
@@ -776,6 +779,23 @@ namespace
 
 bool ALUniformBuffer::sQLMirror = false;
 
+// The points `buffer` is bound at, given new stamps: its bytes changed.
+static void ql_touch(const ALUniformBuffer* buffer)
+{
+    for (QLBinding& b : sQLBindings)
+    {
+        if (b.mBuffer == buffer)
+        {
+            b.mStamp = ++sQLStampNext;
+        }
+    }
+}
+
+unsigned long long qlUniformBindingStamp(unsigned binding)
+{
+    return binding < QL_BINDINGS ? sQLBindings[binding].mStamp : 0;
+}
+
 void ALUniformBuffer::qlNoteBound(U32 binding, size_t offset, size_t bytes, bool shadow) const
 {
     if (!sQLMirror || binding >= QL_BINDINGS)
@@ -783,6 +803,7 @@ void ALUniformBuffer::qlNoteBound(U32 binding, size_t offset, size_t bytes, bool
         return;
     }
     sQLBindings[binding] = { this, offset, bytes, shadow };
+    sQLBindings[binding].mStamp = ++sQLStampNext;
 }
 
 void ALUniformBuffer::qlForget() const
@@ -892,6 +913,7 @@ void ALUniformBuffer::update(const void* data, size_t bytes, EUsage usage)
     if (sQLMirror)
     {
         mQLCopy.assign((const U8*)data, (const U8*)data + bytes);
+        ql_touch(this);
     }
 }
 
@@ -945,6 +967,10 @@ void ALUniformBuffer::initShadowed(size_t bytes)
 void ALUniformBuffer::endWrite(size_t offset, size_t bytes)
 {
     llassert(offset + bytes <= mShadow.size());
+    if (sQLMirror)
+    {
+        ql_touch(this);
+    }
     if (sUpdateMode == UPDATE_DIRECT && mSliceRing == mName)
     {
         // Sub-update is only coherent when mName already holds the full block AND the
@@ -1560,6 +1586,7 @@ void ALUniformBuffer::scratchBindRange(U32 binding, S64 offset, size_t bytes)
             sQLBindings[binding] = QLBinding();
             sQLBindings[binding].mScratch = base + offset;
             sQLBindings[binding].mBytes   = bytes;
+            sQLBindings[binding].mStamp   = ++sQLStampNext;
         }
     }
     sScratchBoundBinding = binding;

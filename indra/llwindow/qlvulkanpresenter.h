@@ -405,6 +405,7 @@ public:
         const char* name = nullptr;
         const void* data = nullptr;
         size_t      bytes = 0;
+        unsigned long long stamp = 0;  // the same stamp as a block written before: the same bytes (0 unknown)
     };
     struct GpTexture
     {

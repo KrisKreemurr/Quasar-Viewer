@@ -13062,7 +13062,7 @@ namespace
             size_t bytes = 0;
             if (ALUniformBuffer::qlBound(b, data, bytes))
             {
-                blocks.push_back({ LLGLSLShader::UNIFORM_BLOCK_NAMES[b], data, bytes });
+                blocks.push_back({ LLGLSLShader::UNIFORM_BLOCK_NAMES[b], data, bytes, qlUniformBindingStamp(b) });
             }
         }
 

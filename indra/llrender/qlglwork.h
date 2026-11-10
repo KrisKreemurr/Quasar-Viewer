@@ -43,6 +43,10 @@ extern bool (*gQLVulkanDrawInstanced)(unsigned mode, unsigned first, unsigned co
 // Why LLImageGL::qlVulkanCopyOf last gave no copy (for the status line); set by llimagegl.cpp.
 extern const char* gQLCopyWhy;
 
+// What the engine's uniform-buffer point `binding` holds (ALUniformBuffer::qlBound) stamped: the same stamp, the same
+// bytes; new whenever they may have changed; 0 unknown (aluniformbuffer.cpp).
+unsigned long long qlUniformBindingStamp(unsigned binding);
+
 inline void qlBeforeGLWork()
 {
     if (gQLBeforeGLWork)
