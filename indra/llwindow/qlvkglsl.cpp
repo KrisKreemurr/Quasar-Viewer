@@ -265,6 +265,76 @@ namespace
             consumer[v.location_word] = location;
         }
     }
+
+    // ---- One binding a resource, whichever stage reads it ---------------------------------------------------------
+    // Auto-mapped bindings are given stage by stage, so a block both stages read (the loose uniforms' default block
+    // above all) can sit at one binding in the vertex stage and another in the fragment stage, where a descriptor set
+    // has one. Every stage's resources are numbered again here, by name (a block by its type's name), the same in all.
+    struct BoundVar
+    {
+        std::string key;
+        size_t      binding_word = 0;
+        size_t      set_word = 0;
+    };
+
+    std::vector<BoundVar> boundVars(const std::vector<uint32_t>& spv)
+    {
+        std::unordered_map<uint32_t, std::string> names;
+        std::unordered_map<uint32_t, uint32_t>    pointee, array_element;
+        std::unordered_map<uint32_t, bool>        is_struct;
+        std::unordered_map<uint32_t, size_t>      binding_at, set_at;
+        std::vector<std::pair<uint32_t, uint32_t>> variables;  // id, pointer type
+        for (size_t w = 5; w < spv.size();)
+        {
+            const uint32_t op = spv[w] & 0xFFFF;
+            const uint32_t n  = spv[w] >> 16;
+            if (n == 0 || w + n > spv.size())
+            {
+                break;
+            }
+            switch (op)
+            {
+                case 5: names[spv[w + 1]] = spvString(spv, w + 2, w + n); break;
+                case 71:
+                    if (n >= 4 && spv[w + 2] == 33) binding_at[spv[w + 1]] = w + 3;  // Binding
+                    if (n >= 4 && spv[w + 2] == 34) set_at[spv[w + 1]] = w + 3;      // DescriptorSet
+                    break;
+                case 30: is_struct[spv[w + 1]] = true; break;                         // OpTypeStruct
+                case 28: case 29: if (n >= 3) array_element[spv[w + 1]] = spv[w + 2]; break;  // arrays
+                case 32: if (n >= 4) pointee[spv[w + 1]] = spv[w + 3]; break;
+                case 59:
+                    if (n >= 4 && (spv[w + 3] == 0 || spv[w + 3] == 2 || spv[w + 3] == 12))  // UniformConstant,
+                    {                                                                       // Uniform, StorageBuffer
+                        variables.push_back({ spv[w + 2], spv[w + 1] });
+                    }
+                    break;
+                default: break;
+            }
+            w += n;
+        }
+        std::vector<BoundVar> out;
+        for (const auto& [id, pointer] : variables)
+        {
+            const auto at = binding_at.find(id);
+            if (at == binding_at.end())
+            {
+                continue;
+            }
+            uint32_t type = pointee.count(pointer) ? pointee[pointer] : 0;
+            while (array_element.count(type))
+            {
+                type = array_element[type];
+            }
+            BoundVar v;
+            v.key          = is_struct.count(type) && names.count(type) && !names[type].empty()
+                                 ? "block:" + names[type]
+                                 : (names.count(id) ? names[id] : std::string());
+            v.binding_word = at->second;
+            v.set_word     = set_at.count(id) ? set_at[id] : 0;
+            out.push_back(v);
+        }
+        return out;
+    }
 }
 
 void initialize()
@@ -391,6 +461,42 @@ bool compile(const std::vector<Source>& sources, Program& out)
         }
     }
 
+    // One binding a resource across the stages, by name.
+    std::unordered_map<std::string, uint32_t> bindings;
+    for (uint32_t st = 0; st < STAGE_COUNT; ++st)
+    {
+        if (out.spirv[st].empty())
+        {
+            continue;
+        }
+        for (const BoundVar& v : boundVars(out.spirv[st]))
+        {
+            if (v.key.empty())
+            {
+                out.log += "a resource with no name to bind it by";
+                return false;
+            }
+            const auto found = bindings.find(v.key);
+            const uint32_t binding = found != bindings.end() ? found->second : (uint32_t)bindings.size();
+            bindings.emplace(v.key, binding);
+            out.spirv[st][v.binding_word] = binding;
+            if (v.set_word)
+            {
+                out.spirv[st][v.set_word] = 0;
+            }
+        }
+    }
+    const auto bindingOf = [&bindings](const std::string& key, uint32_t& binding)
+    {
+        const auto found = bindings.find(key);
+        if (found == bindings.end())
+        {
+            return false;
+        }
+        binding = found->second;
+        return true;
+    };
+
     // Blocks: the default one, the engine's, and buffer blocks.
     int default_block_index = -1;
     for (int i = 0; i < program.getNumUniformBlocks(); ++i)
@@ -399,7 +505,11 @@ bool compile(const std::vector<Source>& sources, Program& out)
         Resource r;
         r.name    = b.name;
         r.kind    = RES_UNIFORM_BLOCK;
-        r.binding = b.getBinding() < 0 ? 0 : (uint32_t)b.getBinding();
+        if (!bindingOf("block:" + r.name, r.binding))
+        {
+            out.log += "no binding found for the block " + r.name;
+            return false;
+        }
         r.size    = b.size < 0 ? 0 : (uint32_t)b.size;
         r.stages  = stageBits(b.stages);
         r.default_block = b.name == "gl_DefaultUniformBlock";
@@ -417,7 +527,11 @@ bool compile(const std::vector<Source>& sources, Program& out)
         Resource r;
         r.name    = b.name;
         r.kind    = RES_STORAGE_BLOCK;
-        r.binding = b.getBinding() < 0 ? 0 : (uint32_t)b.getBinding();
+        if (!bindingOf("block:" + r.name, r.binding))
+        {
+            out.log += "no binding found for the block " + r.name;
+            return false;
+        }
         r.size    = b.size < 0 ? 0 : (uint32_t)b.size;
         r.stages  = stageBits(b.stages);
         out.resources.push_back(r);
@@ -434,7 +548,11 @@ bool compile(const std::vector<Source>& sources, Program& out)
             r.name    = stripIndex(u.name);
             r.kind    = isImageType(gl_type) ? RES_STORAGE_IMAGE : isTexelBufferType(gl_type) ? RES_TEXEL_BUFFER
                                                                                           : RES_SAMPLER;
-            r.binding = u.getBinding() < 0 ? 0 : (uint32_t)u.getBinding();
+            if (!bindingOf(r.name, r.binding))
+            {
+                out.log += "no binding found for " + r.name;
+                return false;
+            }
             r.count   = u.size > 0 ? (uint32_t)u.size : 1;
             r.gl_type = (uint32_t)u.glDefineType;
             r.stages  = stageBits(u.stages);
