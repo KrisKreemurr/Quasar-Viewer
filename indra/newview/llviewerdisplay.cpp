@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llviewerdisplay.h"
+#include <algorithm>
 #include <chrono>
 
 #include "alfarplane.h"
