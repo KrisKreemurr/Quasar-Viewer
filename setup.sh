@@ -39,7 +39,7 @@ git reset --hard FETCH_HEAD
 # (downloaded libraries and compiled files that still match are kept)
 VER=$(cat indra/newview/VIEWER_VERSION.txt)
 if [ -f build-windows-x86_64/.quasar-version ] && [ "$(cat build-windows-x86_64/.quasar-version)" != "$VER" ]; then
-  rm -rf build-windows-x86_64/CMakeCache.txt build-windows-x86_64/CMakeFiles
+  rm -rf build-windows-x86_64/CMakeCache.txt build-windows-x86_64/CMakeFiles build-windows-x86_64/vk
 fi
 mkdir -p build-windows-x86_64 && echo "$VER" > build-windows-x86_64/.quasar-version
 # WSL gets half the PC's memory, and Slipstream's biggest files need several GB each to
