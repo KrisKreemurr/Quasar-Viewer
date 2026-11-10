@@ -4496,6 +4496,30 @@ struct QLVulkanPresenter::Impl
     };
 
     static inline bool sShSignalObjects = true;
+    // QuasarVulkanHandOverTargetsOnly: a hand-over names the render targets and GL's own textures it hands over, not
+    // the fetched textures (GL uploaded them into their shared blocks when they loaded, and writes none of them while
+    // Vulkan draws): with crowds of avatars those were hundreds a hand-over, which the signal's time grew with.
+    static inline bool sHandOverTargetsOnly = true;
+    std::vector<GLuint> mHandOverNames;
+    const std::vector<GLuint>& handOverNames(const std::vector<GLuint>& names)
+    {
+        if (!sHandOverTargetsOnly)
+        {
+            return names;
+        }
+        mHandOverNames.clear();
+        std::lock_guard<std::mutex> lock(mExtMutex);
+        for (GLuint name : names)
+        {
+            const auto found = mExtTextures.find(name);
+            if (found != mExtTextures.end() && found->second.block >= 0)
+            {
+                continue;  // a fetched texture in a shared block
+            }
+            mHandOverNames.push_back(name);
+        }
+        return mHandOverNames;
+    }
     bool        mShTried = false;
     bool        mShReady = false;
     std::string mShNote = "off (QuasarVulkanShadows)";
@@ -8235,11 +8259,14 @@ struct QLVulkanPresenter::Impl
         // What GL hands over: the arena, the attachments, and every texture drawn with (once each); and the shadows'.
         std::vector<GLuint> textures(target.names, target.names + target.colors + 1);
         textures.insert(textures.end(), mGbPassTextures.begin(), mGbPassTextures.end());
-        for (GLuint name : gp_names)
         {
-            if (std::find(textures.begin(), textures.end(), name) == textures.end())
+            std::unordered_set<GLuint> named(textures.begin(), textures.end());
+            for (GLuint name : gp_names)
             {
-                textures.push_back(name);
+                if (named.insert(name).second)
+                {
+                    textures.push_back(name);
+                }
             }
         }
         const std::vector<VkImage>& texture_images = mGbPassImages;
@@ -8249,6 +8276,7 @@ struct QLVulkanPresenter::Impl
             gl_buffers.insert(gl_buffers.end(), sh.gl_buffers.begin(), sh.gl_buffers.end());
             textures.insert(textures.end(), sh.gl_textures.begin(), sh.gl_textures.end());
         }
+        textures = handOverNames(textures);
         const std::vector<GLenum> layouts(textures.size(), GL_LAYOUT_GENERAL_EXT);
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl signal");
@@ -11018,7 +11046,8 @@ struct QLVulkanPresenter::Impl
         gpFinishCommands();
         GpSlot& slot = mGpSlots[mGpSlot];
 
-        const std::vector<GLenum> layouts(mGpNames.size(), GL_LAYOUT_GENERAL_EXT);
+        const std::vector<GLuint> handed = handOverNames(mGpNames);
+        const std::vector<GLenum> layouts(handed.size(), GL_LAYOUT_GENERAL_EXT);
         std::vector<GLuint> gl_buffers;
         if (mGpUsedArena)
         {
@@ -11028,7 +11057,7 @@ struct QLVulkanPresenter::Impl
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl signal");
             // QuasarVulkanShadowSignalObjects off (the experiment): naming nothing.
             gl.SignalSemaphoreEXT(mGpGLDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
-                                  sShSignalObjects ? (GLuint)mGpNames.size() : 0, mGpNames.data(), layouts.data());
+                                  sShSignalObjects ? (GLuint)handed.size() : 0, handed.data(), layouts.data());
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl flush");
@@ -11063,8 +11092,7 @@ struct QLVulkanPresenter::Impl
             if (vkQueueSubmit(mQueue, 1, &hand_back, VK_NULL_HANDLE) == VK_SUCCESS)
             {
                 gl.WaitSemaphoreEXT(mGpVKDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
-                                    sShSignalObjects ? (GLuint)mGpNames.size() : 0,
-                                    mGpNames.data(), layouts.data());
+                                    sShSignalObjects ? (GLuint)handed.size() : 0, handed.data(), layouts.data());
             }
             mGpReady = false;
             mGpNote  = llformat("stopped: a pass could not be submitted (VkResult %d)", (S32)result);
@@ -11075,8 +11103,7 @@ struct QLVulkanPresenter::Impl
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl wait");
             gl.WaitSemaphoreEXT(mGpVKDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
-                                    sShSignalObjects ? (GLuint)mGpNames.size() : 0,
-                                mGpNames.data(), layouts.data());
+                                sShSignalObjects ? (GLuint)handed.size() : 0, handed.data(), layouts.data());
         }
         ++mGpPassesNow;
         return true;
@@ -12874,6 +12901,11 @@ void QLVulkanPresenter::shadowMergeNext()
 void QLVulkanPresenter::shadowSignalObjects(bool name_them)
 {
     Impl::sShSignalObjects = name_them;
+}
+
+void QLVulkanPresenter::handOverTargetsOnly(bool targets_only)
+{
+    Impl::sHandOverTargetsOnly = targets_only;
 }
 
 // static

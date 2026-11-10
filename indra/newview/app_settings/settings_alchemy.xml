@@ -2982,6 +2982,17 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarVulkanHandOverTargetsOnly</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: GL's signal and wait at each hand-over to Vulkan name the render targets and GL's own textures they hand over, not the fetched textures (uploaded when they loaded, never written while Vulkan draws). With crowds those were hundreds a hand-over. Off names every texture, as before. Applies at once; watch for textures that look stale or wrong.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanShadowSignalObjects</key>
         <map>
             <key>Comment</key>
