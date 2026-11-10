@@ -13214,6 +13214,7 @@ namespace
     {
         LLGLSLShader::sQLSilent = false;
         LLGLSLShader::qlReplayStale();
+        ALTextureSlot::qlResyncAll();
     }
 
     // The run open, or a new one begun.

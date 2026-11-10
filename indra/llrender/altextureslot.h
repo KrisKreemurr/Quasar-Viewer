@@ -209,6 +209,13 @@ public:
 
     U32 getCurrSampler(void) const { return mCurrSampler; }
 
+    // Quasar (QuasarVulkanSilentGL): while LLGLSLShader::sQLSilent, bindFast records its texture and sampler here alone
+    // (what Vulkan reads) and leaves GL's unit as it was; any other call on the slot, and qlResyncAll as a Vulkan run
+    // goes, gives GL what the slot records first, so every cache here stays true of GL.
+    void qlResync();
+    static void qlResyncAll();
+    static U32 sQLStaleSlots;
+
 protected:
     friend class LLRender;
 
@@ -218,6 +225,7 @@ protected:
     // The sampler object currently bound to this slot, so a redundant selection can be
     // skipped. Reset by clearSamplers() when the objects behind the names are dropped.
     U32                 mCurrSampler = 0;
+    bool                mQLStale = false;  // GL's unit still holds what it did before a silent bindFast
 
     // Make this the active GL texture unit, so the classic glBindTexture calls below land on
     // it. Internal only: it is a consequence of not using glBindTextureUnit, not something a

@@ -418,7 +418,9 @@ bool LLRender::init(bool needs_vertex_buffer)
         slot.mCurrTexture = 0;
         slot.mCurrTexType = ALTextureSlot::TT_NONE;
         slot.mCurrSampler = 0;
+        slot.mQLStale     = false;
     }
+    ALTextureSlot::sQLStaleSlots = 0;
     mCurrTextureUnitIndex = 0;
 
     // The same for the image units and the indirect and storage buffer bindings, which a fresh context holds at 0.

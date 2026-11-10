@@ -38,6 +38,8 @@
 #include "llrender.h"
 #include "llrendertarget.h"
 #include "lltexture.h"
+#include "llglslshader.h"
+#include "llframetimer.h"  // on_main_thread
 
 static const GLenum sGLTextureType[] =
 {
@@ -70,8 +72,38 @@ U32 ALTextureSlot::getInternalType(eTextureType type)
     return sGLTextureType[type];
 }
 
+U32 ALTextureSlot::sQLStaleSlots = 0;
+
+void ALTextureSlot::qlResync()
+{
+    if (!mQLStale)
+    {
+        return;
+    }
+    mQLStale = false;
+    --sQLStaleSlots;
+    if (mIndex < 0)
+    {
+        return;
+    }
+    glActiveTexture(GL_TEXTURE0 + mIndex);
+    gGL.mCurrTextureUnitIndex = mIndex;
+    glBindTexture(mCurrTexType != TT_NONE ? sGLTextureType[mCurrTexType] : GL_TEXTURE_2D, mCurrTexture);
+    glBindSampler(mIndex, mCurrSampler);
+}
+
+// static
+void ALTextureSlot::qlResyncAll()
+{
+    for (U32 i = 0; sQLStaleSlots && i < AL_NUM_TEXTURE_SLOTS; ++i)
+    {
+        gGL.getTextureSlot((S32)i)->qlResync();
+    }
+}
+
 void ALTextureSlot::refreshState(void)
 {
+    qlResync();
     // We set dirty to true so that the slot knows to ignore caching
     // and we reset the cached slot state
 
@@ -97,6 +129,7 @@ void ALTextureSlot::refreshState(void)
 
 void ALTextureSlot::bindSampler(U32 sampler)
 {
+    qlResync();
     if (mIndex < 0)
     {
         return;
@@ -132,6 +165,7 @@ void ALTextureSlot::bindSampler(U32 sampler)
 
 void ALTextureSlot::activate(void)
 {
+    qlResync();
     if (mIndex < 0) return;
 
     if ((S32)gGL.mCurrTextureUnitIndex != mIndex || gGL.mDirty)
@@ -144,6 +178,7 @@ void ALTextureSlot::activate(void)
 
 void ALTextureSlot::setTarget(eTextureType type)
 {
+    qlResync();
     if (mIndex < 0) return;
 
     if ( (mCurrTexType != type || gGL.mDirty) && (type != TT_NONE) )
@@ -180,6 +215,20 @@ void ALTextureSlot::bindFastImpl(LLTexture* texture, LLImageGL* gl_tex, U32 samp
 {
     ++sTextureBinds;
     texture->setActive();
+    // Quasar: recorded for Vulkan alone (qlResync gives GL it later), where the texture has a name to record.
+    if (LLGLSLShader::sQLSilent && mIndex >= 0 && gl_tex->getTexName() && on_main_thread())
+    {
+        mCurrTexture = gl_tex->getTexName();
+        mCurrSampler = sampler;
+        mCurrTexType = gl_tex->getTarget();
+        if (!mQLStale)
+        {
+            mQLStale = true;
+            ++sQLStaleSlots;
+        }
+        return;
+    }
+    qlResync();
     glActiveTexture(GL_TEXTURE0 + mIndex);
     gGL.mCurrTextureUnitIndex = mIndex;
     mCurrTexture = gl_tex->getTexName();
@@ -245,6 +294,7 @@ bool ALTextureSlot::bindSampled(LLImageGL* texture, ALSampler key, bool forceBin
 // between them, splitting the draw batch for a sampler about to change again.
 bool ALTextureSlot::bindImpl(LLTexture* texture, bool forceBind, ALSampler key)
 {
+    qlResync();
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
     stop_glerror();
     if (mIndex >= 0)
@@ -306,6 +356,7 @@ bool ALTextureSlot::bindImpl(LLTexture* texture, bool forceBind, ALSampler key)
 
 bool ALTextureSlot::bind(LLImageGL* texture, bool for_rendering, bool forceBind, S32 usename)
 {
+    qlResync();
     stop_glerror();
     if (mIndex < 0) return false;
 
@@ -367,6 +418,7 @@ bool ALTextureSlot::bind(LLImageGL* texture, bool for_rendering, bool forceBind,
 
 bool ALTextureSlot::bind(LLCubeMap* cubeMap, ALSampler key)
 {
+    qlResync();
     if (mIndex < 0) return false;
 
     gGL.flush();
@@ -406,6 +458,7 @@ bool ALTextureSlot::bind(LLCubeMap* cubeMap, ALSampler key)
 // LLRenderTarget is unavailible on the mapserver since it uses FBOs.
 bool ALTextureSlot::bind(LLRenderTarget* renderTarget, bool bindDepth, U32 sampler)
 {
+    qlResync();
     if (mIndex < 0) return false;
 
     gGL.flush();
@@ -433,6 +486,7 @@ bool ALTextureSlot::bind(LLRenderTarget* renderTarget, bool bindDepth, U32 sampl
 
 bool ALTextureSlot::bindManual(eTextureType type, U32 texture, U32 sampler)
 {
+    qlResync();
     if (mIndex < 0)
     {
         return false;
@@ -463,6 +517,7 @@ bool ALTextureSlot::bindManual(eTextureType type, U32 texture, U32 sampler)
 
 void ALTextureSlot::unbind()
 {
+    qlResync();
     stop_glerror();
 
     if (mIndex < 0) return;
@@ -511,6 +566,7 @@ void ALTextureSlot::unbind()
 
 void ALTextureSlot::unbindFast()
 {
+    qlResync();
     activate();
 
     if (mCurrTexType != TT_NONE)
