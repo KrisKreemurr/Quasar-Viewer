@@ -5920,7 +5920,9 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 
             cur_type = poolp->getType();
 
-            if (occlude && cur_type >= LLDrawPool::POOL_GRASS)
+            // Quasar: not in the scene's Vulkan stage, whose runs it would split (its queries are GL's): after the pools,
+            // below, against all the G-buffer's depth.
+            if (occlude && cur_type >= LLDrawPool::POOL_GRASS && !ql_vulkan_stage_active())
             {
                 llassert(!gCubeSnapshot); // never do occlusion culling on cube snapshots
                 occlude = false;
@@ -6141,6 +6143,18 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
             {
                 bump_pool->renderDeferredList(true, lost.bump_rigged);
             }
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        }
+
+        // Quasar: the occlusion queries the scene's stage left (above), GL's, once everything is in the G-buffer.
+        if (occlude)
+        {
+            llassert(!gCubeSnapshot);
+            occlude = false;
+            gGLLastMatrix = NULL;
+            gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+            doOcclusion(camera);
             gGLLastMatrix = NULL;
             gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
         }
