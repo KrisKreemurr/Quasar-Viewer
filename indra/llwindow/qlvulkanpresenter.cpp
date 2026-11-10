@@ -8252,8 +8252,12 @@ struct QLVulkanPresenter::Impl
         const std::vector<GLenum> layouts(textures.size(), GL_LAYOUT_GENERAL_EXT);
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl signal");
-            gl.SignalSemaphoreEXT(mGbGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)textures.size(),
-                                  textures.data(), layouts.data());
+            // QuasarVulkanShadowSignalObjects off (the experiment): the G-buffer's names nothing either.
+            gl.SignalSemaphoreEXT(mGbGLDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
+                                  sShSignalObjects ? (GLuint)textures.size() : 0, textures.data(), layouts.data());
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl flush");
             gl.Flush();
         }
         LL_PROFILE_ZONE_NAMED_COLOR("vulkan probe draws - vk record", 0x40A0FF);
@@ -8471,8 +8475,8 @@ struct QLVulkanPresenter::Impl
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - gl wait");
-            gl.WaitSemaphoreEXT(mGbVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)textures.size(),
-                                textures.data(), layouts.data());
+            gl.WaitSemaphoreEXT(mGbVKDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
+                                sShSignalObjects ? (GLuint)textures.size() : 0, textures.data(), layouts.data());
         }
         if (merged)
         {
@@ -11022,8 +11026,12 @@ struct QLVulkanPresenter::Impl
         }
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl signal");
-            gl.SignalSemaphoreEXT(mGpGLDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
-                                  mGpNames.data(), layouts.data());
+            // QuasarVulkanShadowSignalObjects off (the experiment): naming nothing.
+            gl.SignalSemaphoreEXT(mGpGLDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
+                                  sShSignalObjects ? (GLuint)mGpNames.size() : 0, mGpNames.data(), layouts.data());
+        }
+        {
+            LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl flush");
             gl.Flush();
         }
         vkResetFences(mDevice, 1, &slot.fence);
@@ -11054,7 +11062,8 @@ struct QLVulkanPresenter::Impl
             hand_back.pSignalSemaphores    = &mGpVKDoneVK;
             if (vkQueueSubmit(mQueue, 1, &hand_back, VK_NULL_HANDLE) == VK_SUCCESS)
             {
-                gl.WaitSemaphoreEXT(mGpVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
+                gl.WaitSemaphoreEXT(mGpVKDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
+                                    sShSignalObjects ? (GLuint)mGpNames.size() : 0,
                                     mGpNames.data(), layouts.data());
             }
             mGpReady = false;
@@ -11065,7 +11074,8 @@ struct QLVulkanPresenter::Impl
         slot.submitted = true;
         {
             LL_PROFILE_ZONE_NAMED("vulkan gl programs - gl wait");
-            gl.WaitSemaphoreEXT(mGpVKDoneGL, (GLuint)gl_buffers.size(), gl_buffers.data(), (GLuint)mGpNames.size(),
+            gl.WaitSemaphoreEXT(mGpVKDoneGL, sShSignalObjects ? (GLuint)gl_buffers.size() : 0, gl_buffers.data(),
+                                    sShSignalObjects ? (GLuint)mGpNames.size() : 0,
                                 mGpNames.data(), layouts.data());
         }
         ++mGpPassesNow;

@@ -2985,7 +2985,7 @@
         <key>QuasarVulkanShadowSignalObjects</key>
         <map>
             <key>Comment</key>
-            <string>Quasar (experiment): whether GL's semaphore signal and wait around each Vulkan shadow map name the buffers and image they hand over. Off names nothing, to see whether naming them is what makes the signal wait for NVIDIA's driver thread (Tracy: vulkan shadow - gl signal). Watch for wrong or missing shadows when off.</string>
+            <string>Quasar (experiment): whether GL's semaphore signals and waits around Vulkan's work (shadow maps, the G-buffer's draws, the runs of GL's programs) name the buffers and images they hand over. Off names nothing, to see whether naming them is what makes the signal wait for NVIDIA's driver thread (Tracy: vulkan shadow - gl signal). Watch for wrong or missing shadows when off.</string>
             <key>Persist</key>
             <integer>0</integer>
             <key>Type</key>
