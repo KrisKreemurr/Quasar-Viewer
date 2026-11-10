@@ -800,13 +800,15 @@ void LLPipeline::markRenderInputsDirty(ALRenderInputRequests::Change change)
 
 static bool ql_vulkan_transient_wanted(ALRenderResourcePlan::Id id);
 
+static void ql_vulkan_stage_gl_why(const char* why);  // Quasar: a hand-over, counted with why
+
 void LLPipeline::applyRenderInputs()
 {
     // A frame starts here, with every transient target the last one acquired back in the pool. Debug GL poisons each
     // as it is released, and names each for whoever acquires it. Nothing is trimmed until the user is logged in: the
     // login's frames draw no world, and the world's first frame takes what the reconcile readied for it rather than
     // building it mid-pass.
-    ql_vulkan_stage_gl();  // Quasar: nothing of last frame's Vulkan run left open into this one
+    ql_vulkan_stage_gl_why("the frame's start (render inputs)");  // Quasar: nothing of last frame's Vulkan run left open into this one
     mTransientTargets.setValidation(gDebugGL);
     mTransientTargets.holdTrimming(LLStartUp::getStartupState() < STATE_STARTED);
     mTransientTargets.beginFrame();
@@ -13275,13 +13277,41 @@ namespace
 
     // What Vulkan recorded, handed to the GPU before GL's next work: a clear still to be made recorded first (or GL's,
     // after it, where Vulkan cannot make it).
+    // Why runs were handed over, this frame and the last (the stages' line): each hand-over costs the main thread GL's
+    // signal, which waits for NVIDIA's driver thread.
+    const char* sQLHandOverWhy = nullptr;
+    std::vector<std::pair<std::string, U32>> sQLHandOversNow, sQLHandOversLast;
+    U32 sQLHandOverFrame = 0;
+    void ql_hand_over_counted(const char* why)
+    {
+        if (sQLHandOverFrame != LLFrameTimer::getFrameCount())
+        {
+            sQLHandOverFrame = LLFrameTimer::getFrameCount();
+            sQLHandOversLast.swap(sQLHandOversNow);
+            sQLHandOversNow.clear();
+        }
+        const char* name = why ? why : "unnamed";
+        for (auto& [reason, count] : sQLHandOversNow)
+        {
+            if (reason == name)
+            {
+                ++count;
+                return;
+            }
+        }
+        sQLHandOversNow.emplace_back(name, 1);
+    }
+
     void ql_run_hand_over()
     {
         ql_silent_end();  // GL has every uniform before anything of its own
+        const char* why = sQLHandOverWhy;
+        sQLHandOverWhy  = nullptr;
         if (!sQLRunOpen || sQLHandingOver)
         {
             return;
         }
+        ql_hand_over_counted(why);
         sQLHandingOver = true;
         LLRenderTarget* gl_clear = nullptr;
         const LLColor4  color    = sQLPendingColor;
@@ -13320,10 +13350,17 @@ namespace
     }
 
     // llrender's call before GL's work on the GPU (qlglwork.h): the run handed over first, unless the work is the run's.
-    void ql_run_before_gl_work()
+    void ql_run_before_gl_work(const char* what)
     {
         if (sQLRunOpen && !sQLHandingOver && !sQLRecording && on_main_thread())
         {
+            static std::unordered_map<const char*, std::string> names;  // "GL work: <function>", made once each
+            std::string& name = names[what];
+            if (name.empty())
+            {
+                name = std::string("GL work in ") + (what ? what : "?");
+            }
+            sQLHandOverWhy = name.c_str();
             ql_run_hand_over();
         }
     }
@@ -13503,6 +13540,7 @@ void LLPipeline::renderDeferredLighting()
                     return;
                 }
                 open = false;
+                sQLHandOverWhy = "the lighting's draw GL kept, or its end";
                 ql_run_hand_over();
 #endif
             }
@@ -14870,7 +14908,7 @@ static bool sQLVulkanShadowLost = false;
 
 static void ql_vulkan_shadow_flush()
 {
-    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
+    ql_vulkan_stage_gl_why("the shadow maps' flush");  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
 #if QL_VULKAN_SHADOWS
     if (!QLVulkanPresenter::shadowFlush())
     {
@@ -15048,7 +15086,7 @@ static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& nam
 
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 {
-    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
+    ql_vulkan_stage_gl_why("the G-buffer's draws begun");  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
     sQLProbeDrawsOpen = false;
     LLDrawPoolTerrain::qlBeginPass(main_view);
     gQLVulkanSimpleLeftovers = nullptr;
@@ -15666,7 +15704,7 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     const bool carry = sQLProbeDrawsOpen && ql_run_carriable();
     if (!carry)
     {
-        ql_vulkan_stage_gl();
+        ql_vulkan_stage_gl_why("the G-buffer's draws ended");
     }
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
@@ -15858,6 +15896,7 @@ namespace
             ++stats.now_vk;
             return true;
         }
+        sQLHandOverWhy = "a draw GL kept";
         ql_run_hand_over();  // and any clear still to be made, GL's after it
         ++stats.now_gl;
 #if QL_VULKAN_SHADOWS
@@ -15881,6 +15920,7 @@ bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens)
                        !gCubeSnapshot;
     if (!ql_lighting_wanted() || !sQLStage.counted)
     {
+        sQLHandOverWhy = "a stage of another view";
         ql_run_hand_over();  // another view's draws are GL's, after what Vulkan recorded
         return false;
     }
@@ -15903,6 +15943,20 @@ bool ql_vulkan_stage_begin(const char* name)
 // goes first.
 void ql_vulkan_stage_gl()
 {
+#if QL_VULKAN_SHADOWS
+    if (!sQLHandOverWhy)
+    {
+        sQLHandOverWhy = "a stage's end";
+    }
+#endif
+    ql_run_hand_over();
+}
+// The same, with why (for the count).
+static void ql_vulkan_stage_gl_why([[maybe_unused]] const char* why)
+{
+#if QL_VULKAN_SHADOWS
+    sQLHandOverWhy = why;
+#endif
     ql_run_hand_over();
 }
 
@@ -16159,6 +16213,16 @@ std::string ql_vulkan_stages_info()
 #if QL_VULKAN_SHADOWS
     info = llformat("draws' CPU time %.1f ms (%.1f us a draw, %u draws) | ", (double)sQLDrawNanosLast / 1e6,
                     sQLDrawsLast ? (double)sQLDrawNanosLast / 1e3 / sQLDrawsLast : 0.0, sQLDrawsLast);
+    {
+        U32 total = 0;
+        std::string reasons;
+        for (const auto& [reason, count] : sQLHandOversLast)
+        {
+            total += count;
+            reasons += llformat("%s%s x%u", reasons.empty() ? "" : ", ", reason.c_str(), count);
+        }
+        info += llformat("hand-overs last frame %u (%s) | ", total, reasons.c_str());
+    }
 #endif
     for (const auto& [name, stats] : sQLStageStats)
     {
@@ -16392,7 +16456,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         return false;
     }
     // Under reverse-Z GL's clip space already holds depth from 0 to 1 (glClipControl) and the test is GREATER.
-    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan first
+    ql_vulkan_stage_gl_why("a shadow pass begun");  // Quasar: an open run of GL's draws in Vulkan first
     if (!QLVulkanPresenter::shadowBegin(target->getWidth(), target->getHeight(), depth_clamp, LLRender::sReverseZ,
                                         !LLRender::sReverseZ))
     {
@@ -16808,7 +16872,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
     }
 
     gGL.flush();
-    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan first
+    ql_vulkan_stage_gl_why("a shadow pass ended");  // Quasar: an open run of GL's draws in Vulkan first
     if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
     {
         leftovers.clear();

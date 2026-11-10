@@ -45,7 +45,7 @@
 #include <algorithm>
 #include "qlglwork.h"
 
-void (*gQLBeforeGLWork)() = nullptr;
+void (*gQLBeforeGLWork)(const char*) = nullptr;
 bool (*gQLVulkanDrawInstanced)(unsigned, unsigned, unsigned, unsigned, unsigned) = nullptr;
 
 #if GL_ARB_debug_output

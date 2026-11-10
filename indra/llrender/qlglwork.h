@@ -27,7 +27,8 @@
 // needs it: whatever GL draws, clears, copies, blits, reads back or dispatches must come after what Vulkan recorded
 // before it. Each place llrender does such work calls qlBeforeGLWork() first; the viewer sets the hook (null: nothing
 // to hand over). Binds, uniforms and uploads do not call it: they are what Vulkan's draws read, and run before them.
-extern void (*gQLBeforeGLWork)();
+// The hook is told the function that calls it (for the viewer's count of what hands its runs over).
+extern void (*gQLBeforeGLWork)(const char* what);
 
 // And a GL draw of an indexed vertex buffer (LLVertexBuffer::drawRange, drawRangeFast) offered to Vulkan first, with
 // the buffer, the mode (LLRender's) and the range: true where Vulkan recorded it, and GL draws nothing.
@@ -47,10 +48,10 @@ extern const char* gQLCopyWhy;
 // bytes; new whenever they may have changed; 0 unknown (aluniformbuffer.cpp).
 unsigned long long qlUniformBindingStamp(unsigned binding);
 
-inline void qlBeforeGLWork()
+inline void qlBeforeGLWork(const char* what = __builtin_FUNCTION())
 {
     if (gQLBeforeGLWork)
     {
-        gQLBeforeGLWork();
+        gQLBeforeGLWork(what);
     }
 }
