@@ -12942,7 +12942,13 @@ namespace
             U32                                      link = U32_MAX;
             std::vector<QLVulkanPresenter::GpRegion> regions;
             std::vector<std::string>                 texture_names;
+            // The mirror's words and kinds as the last draw had them, and their stamp (the presenter keeps the block it
+            // wrote for a stamp, filled once).
+            std::vector<U32>                         words;
+            std::vector<U8>                          kinds;
+            U64                                      version = 0;
         };
+        static U64 defaults_version_next = 0;
         static std::unordered_map<const LLGLSLShader*, QLProgramNames> names_by_program;
         static std::vector<QLVulkanPresenter::GpTexture> textures;
         static std::vector<QLVulkanPresenter::GpBlock>   blocks;
@@ -12977,10 +12983,30 @@ namespace
         }
         std::vector<QLVulkanPresenter::GpRegion>& regions = names.regions;
         const std::vector<std::string>& texture_names = names.texture_names;
+        bool kinds_same = names.kinds.size() == regions.size() * 2;
+        names.kinds.resize(regions.size() * 2);
         for (size_t i = 0; i < regions.size(); ++i)
         {
             regions[i].kind      = shader_regions[i].mKind;
             regions[i].transpose = shader_regions[i].mTranspose;
+            const U8 kind = (U8)regions[i].kind, transpose = regions[i].transpose ? 1 : 0;
+            kinds_same = kinds_same && names.kinds[i * 2] == kind && names.kinds[i * 2 + 1] == transpose;
+            names.kinds[i * 2]     = kind;
+            names.kinds[i * 2 + 1] = transpose;
+        }
+        {
+            size_t word_count = 0;
+            for (const LLGLSLShader::QLRegion& r : shader_regions)
+            {
+                word_count = llmax(word_count, (size_t)r.mWords + (size_t)r.mElements * r.mComponents);
+            }
+            const bool words_same = names.version && kinds_same && names.words.size() == word_count &&
+                                    (!word_count || memcmp(names.words.data(), words, word_count * sizeof(U32)) == 0);
+            if (!words_same)
+            {
+                names.words.assign(words, words + word_count);
+                names.version = ++defaults_version_next;
+            }
         }
         // Each sampler's texture and sampling, from the unit GL gave it at link.
         size_t named = 0;
@@ -13071,6 +13097,7 @@ namespace
         d.regions       = regions.data();
         d.region_count  = (U32)regions.size();
         d.words         = words;
+        d.defaults_version = names.version;
         d.blocks        = blocks.data();
         d.block_count   = (U32)blocks.size();
         d.textures      = textures.data();

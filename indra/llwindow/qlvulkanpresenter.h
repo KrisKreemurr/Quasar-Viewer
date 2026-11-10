@@ -437,6 +437,8 @@ public:
         const GpTexture*  textures = nullptr;
         unsigned          texture_count = 0;
         unsigned          white_texture = 0;
+        // The default block's values stamped: the same stamp as a draw before, the same values (0 unknown).
+        unsigned long long defaults_version = 0;
         // Its target, as GL's framebuffer has it: colour attachments' and depth's GL names (each in Vulkan's memory),
         // cleared to clear_color first where clear is set (colour only).
         unsigned          colors[4] = {};

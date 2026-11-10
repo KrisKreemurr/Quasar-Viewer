@@ -8557,6 +8557,19 @@ struct QLVulkanPresenter::Impl
         std::vector<S32>      texture_of;
         std::vector<S32>      block_of;
         std::vector<U64>      block_key;
+        // Each sampler element's last resolution (by resource * 16 + element): kept while its texture, its sampler's
+        // description and every view Vulkan made stand (mGpViewGeneration).
+        struct Element
+        {
+            U32                texture = 0;
+            U64                desc = 0;
+            U64                generation = ~0ull;
+            VkImageView        view = VK_NULL_HANDLE;
+            VkImage            image = VK_NULL_HANDLE;
+            VkSampler          sampler = VK_NULL_HANDLE;
+            VkImageAspectFlags aspect = 0;
+        };
+        std::vector<Element>  elements;
     };
     std::vector<GpProgram> mGpPrograms;
     std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
@@ -8639,6 +8652,7 @@ struct QLVulkanPresenter::Impl
     // By name, aspect and format (gpViewKey): every draw looks up each texture it samples, among thousands.
     std::unordered_map<U64, GpView> mGpViews;
     std::unordered_map<VkImage, U32> mGpViewImages;  // the images some view is of, and how many
+    U64 mGpViewGeneration = 0;  // new whenever a view goes or is made again: what programs' elements keep is stale
     static U64 gpViewKey(GLuint name, VkImageAspectFlags aspect, VkFormat format)
     {
         return (U64)name | ((U64)(aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? 1 : 0) << 32) | ((U64)(U32)format << 33);
@@ -8680,8 +8694,28 @@ struct QLVulkanPresenter::Impl
     std::vector<GpAcquired> mGpAcquired;
     std::unordered_map<VkImage, size_t> mGpAcquiredAt;  // each image's place in mGpAcquired
     std::unordered_set<GLuint> mGpNamed;                // mGpNames, to look up
-    std::set<VkImage>    mGpWritten;   // written since the last barrier
-    std::set<VkImage>    mGpRead;      // sampled since the last barrier
+    std::unordered_set<VkImage> mGpWritten;   // written since the last barrier
+    std::unordered_set<VkImage> mGpRead;      // sampled since the last barrier
+    // What the open render pass has bound already, so a draw binding the same again records nothing for it.
+    VkPipeline       mGpBoundPipeline = VK_NULL_HANDLE;
+    VkDescriptorSet  mGpBoundSet = VK_NULL_HANDLE;
+    std::vector<U32> mGpBoundOffsets;
+    VkViewport       mGpBoundViewport = {};
+    float            mGpBoundBounds[2] = { -1.f, -1.f };
+    U64              mGpBoundStreams = 0;      // the vertex streams' layout bound (0 none)
+    VkBuffer         mGpBoundIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceSize     mGpBoundIndexStart = 0;
+    void gpForgetBinds()
+    {
+        mGpBoundPipeline = VK_NULL_HANDLE;
+        mGpBoundSet      = VK_NULL_HANDLE;
+        mGpBoundOffsets.clear();
+        mGpBoundViewport = {};
+        mGpBoundBounds[0] = mGpBoundBounds[1] = -1.f;
+        mGpBoundStreams  = 0;
+        mGpBoundIndexBuffer = VK_NULL_HANDLE;
+        mGpBoundIndexStart  = 0;
+    }
     U32                  mGpDrawsNow = 0, mGpDrawsLast = 0, mGpPassesNow = 0, mGpPassesLast = 0;
     U32                  mGpKeptNow = 0, mGpKeptLast = 0;
 
@@ -8865,6 +8899,7 @@ struct QLVulkanPresenter::Impl
         }
         mGpViews.clear();
         mGpViewImages.clear();
+        ++mGpViewGeneration;
         for (VkImageView view : mGpRetired)
         {
             if (view) vkDestroyImageView(mDevice, view, nullptr);
@@ -9755,6 +9790,7 @@ struct QLVulkanPresenter::Impl
                 }
                 gpViewImageDrop(v.image);
                 gpViewImageAdd(image);
+                ++mGpViewGeneration;
                 // The name has another image now (GL made it again): the old view goes once nothing reads it (the
                 // pass being recorded may: it goes as the next pass begins, every slot done).
                 mGpRetired.push_back(v.view);
@@ -9965,6 +10001,7 @@ struct QLVulkanPresenter::Impl
                 ++it;
             }
             mGpViewImages.erase(image);
+            ++mGpViewGeneration;
         }
     }
 
@@ -10040,6 +10077,7 @@ struct QLVulkanPresenter::Impl
         mGpNamed.clear();
         mGpWritten.clear();
         mGpRead.clear();
+        gpForgetBinds();
         return true;
     }
 
@@ -10050,6 +10088,7 @@ struct QLVulkanPresenter::Impl
             vkCmdEndRenderPass(mGpSlots[mGpSlot].cmd);
             mGpOpenTarget = -1;
         }
+        gpForgetBinds();
     }
 
     // Everything written so far visible to everything after: between a draw that writes an image and one that reads it
@@ -10241,12 +10280,21 @@ struct QLVulkanPresenter::Impl
                 U64 key = 0;
                 const QLVulkanPresenter::GpBlock* block = nullptr;
                 U8* dst = nullptr;
+                bool defaults_same = false;
                 if (r.default_block)
                 {
-                    mGpBlockScratch.assign((size_t)bytes, 0);
-                    dst = mGpBlockScratch.data();
                     key = 0x8000000000000000ull | (U64)(U32)d.program;
-                    gpFillDefaults(p, d, dst);
+                    // The values' stamp as written for this program already: neither filled nor compared again.
+                    const auto done = mGpBlocksDone.find(key);
+                    defaults_same = d.defaults_version && done != mGpBlocksDone.end() &&
+                                    done->second.stamp == d.defaults_version && !done->second.src &&
+                                    done->second.bytes.size() == (size_t)bytes;
+                    if (!defaults_same)
+                    {
+                        mGpBlockScratch.assign((size_t)bytes, 0);
+                        dst = mGpBlockScratch.data();
+                        gpFillDefaults(p, d, dst);
+                    }
                 }
                 else
                 {
@@ -10283,8 +10331,9 @@ struct QLVulkanPresenter::Impl
                     }
                 }
                 GpWritten& written = mGpBlocksDone[key];
-                const bool stamped_same = block && block->stamp && written.stamp == block->stamp &&
-                                          written.src == block->data && written.bytes.size() == (size_t)bytes;
+                const bool stamped_same = defaults_same ||
+                                          (block && block->stamp && written.stamp == block->stamp &&
+                                           written.src == block->data && written.bytes.size() == (size_t)bytes);
                 if (block && !stamped_same)
                 {
                     mGpBlockScratch.assign((size_t)bytes, 0);
@@ -10298,6 +10347,11 @@ struct QLVulkanPresenter::Impl
                     {
                         written.stamp = block->stamp;
                         written.src   = block->data;
+                    }
+                    else if (!defaults_same)
+                    {
+                        written.stamp = d.defaults_version;
+                        written.src   = nullptr;
                     }
                 }
                 else
@@ -10313,7 +10367,7 @@ struct QLVulkanPresenter::Impl
                     memcpy(mGpMapped + at, dst, (size_t)bytes);
                     written.at    = at;
                     written.bytes = mGpBlockScratch;
-                    written.stamp = block ? block->stamp : 0;
+                    written.stamp = block ? block->stamp : d.defaults_version;
                     written.src   = block ? block->data : nullptr;
                     ++mGpBlocksWritten;
                 }
@@ -10363,6 +10417,26 @@ struct QLVulkanPresenter::Impl
                     if (!tex)
                     {
                         tex = &unread;
+                    }
+                    // As this element resolved last, where nothing it rests on has changed.
+                    const U64 desc = ((U64)tex->min_filter * 31 + tex->mag_filter) * 1000003ull ^
+                                     ((U64)tex->wrap_s * 131 + tex->wrap_t * 7 + tex->wrap_r) * 7919ull ^
+                                     ((U64)tex->compare_func << 20) ^ ((U64)(tex->anisotropy * 16.f) << 40) ^
+                                     ((U64)(tex->srgb_decode ? 1 : 0) << 62) ^
+                                     ((U64)(tex->texture == d.white_texture ? 1 : 0) << 63);
+                    if (p.elements.size() != p.refl.resources.size() * 16)
+                    {
+                        p.elements.assign(p.refl.resources.size() * 16, GpProgram::Element());
+                    }
+                    GpProgram::Element& kept = p.elements[ri * 16 + e];
+                    if (kept.generation == mGpViewGeneration && kept.texture == tex->texture && kept.desc == desc &&
+                        kept.view && kept.sampler)
+                    {
+                        b.images[e]    = { kept.sampler, kept.view, VK_IMAGE_LAYOUT_GENERAL };
+                        b.names[e]     = kept.image ? tex->texture : 0;
+                        b.vk_images[e] = kept.image;
+                        b.aspects[e]   = kept.aspect;
+                        continue;
                     }
                     VkImageView view = VK_NULL_HANDLE;
                     VkImage image = VK_NULL_HANDLE;
@@ -10454,6 +10528,7 @@ struct QLVulkanPresenter::Impl
                     b.aspects[e]   = is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT |
                                                                      (has_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
                                               : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT;
+                    kept = { tex->texture, desc, mGpViewGeneration, view, image, sampler, b.aspects[e] };
                 }
             }
             else
@@ -10685,6 +10760,7 @@ struct QLVulkanPresenter::Impl
             pass_begin.pClearValues    = clears;
             vkCmdBeginRenderPass(cmd, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
             mGpOpenTarget = target_index;
+            gpForgetBinds();
             const VkRect2D scissor = { { 0, 0 }, { t.width, t.height } };
             vkCmdSetScissor(cmd, 0, 1, &scissor);
         }
@@ -10697,15 +10773,35 @@ struct QLVulkanPresenter::Impl
                 viewport = { (float)d.viewport[0], (float)d.viewport[1], (float)d.viewport[2], (float)d.viewport[3],
                              0.f, 1.f };
             }
-            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            if (memcmp(&viewport, &mGpBoundViewport, sizeof(viewport)) != 0)
+            {
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                mGpBoundViewport = viewport;
+            }
         }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        if (d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth)
+        if (pipeline != mGpBoundPipeline)
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            mGpBoundPipeline = pipeline;
+            // A pipeline of another layout disturbs the set bound; the dynamic state stays (Vulkan keeps it).
+            mGpBoundSet = VK_NULL_HANDLE;
+        }
+        if (d.bounds_max > d.bounds_min && mHasDepthBounds && t.depth &&
+            (mGpBoundBounds[0] != d.bounds_min || mGpBoundBounds[1] != d.bounds_max))
         {
             vkCmdSetDepthBounds(cmd, d.bounds_min, d.bounds_max);
+            mGpBoundBounds[0] = d.bounds_min;
+            mGpBoundBounds[1] = d.bounds_max;
         }
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set,
-                                p.dynamic_blocks ? offset_count : 0, p.dynamic_blocks ? offsets : nullptr);
+        const U32 bound_offsets = p.dynamic_blocks ? offset_count : 0;
+        if (set != mGpBoundSet || mGpBoundOffsets.size() != bound_offsets ||
+            (bound_offsets && memcmp(mGpBoundOffsets.data(), offsets, bound_offsets * sizeof(U32)) != 0))
+        {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set, bound_offsets,
+                                    bound_offsets ? offsets : nullptr);
+            mGpBoundSet = set;
+            mGpBoundOffsets.assign(offsets, offsets + bound_offsets);
+        }
         if (mesh)
         {
             VkBuffer buffers[GP_STREAMS];
@@ -10718,11 +10814,23 @@ struct QLVulkanPresenter::Impl
                                                                                        : p.inputs[i].stream;
                 starts[i] = gpStreamStart(stream);
             }
-            if (!p.inputs.empty())
+            // The streams' layout: which stream each input reads (the arena's buffer and starts follow from it).
+            U64 streams = (0x9E3779B97F4A7C15ull ^ (U64)p.inputs.size()) * 31 ^ (U64)(uintptr_t)mGbArena.buffer;
+            for (size_t i = 0; i < p.inputs.size(); ++i)
+            {
+                streams = (streams ^ (U64)starts[i]) * 1099511628211ull;
+            }
+            if (!p.inputs.empty() && streams != mGpBoundStreams)
             {
                 vkCmdBindVertexBuffers(cmd, 0, (U32)p.inputs.size(), buffers, starts);
+                mGpBoundStreams = streams;
             }
-            vkCmdBindIndexBuffer(cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
+            if (mGpBoundIndexBuffer != mGbArena.buffer || mGpBoundIndexStart != mGbArena.indexStart())
+            {
+                vkCmdBindIndexBuffer(cmd, mGbArena.buffer, mGbArena.indexStart(), VK_INDEX_TYPE_UINT16);
+                mGpBoundIndexBuffer = mGbArena.buffer;
+                mGpBoundIndexStart  = mGbArena.indexStart();
+            }
             vkCmdDrawIndexed(cmd, d.mesh.index_count, llmax(d.instances, 1u), base_index + d.mesh.first_index,
                              (S32)base_vertex, 0);
         }
@@ -10731,6 +10839,7 @@ struct QLVulkanPresenter::Impl
             if (vertices_at != GP_NONE)
             {
                 vkCmdBindVertexBuffers(cmd, 0, 1, &mGpHost, &vertices_at);
+                mGpBoundStreams = 0;  // binding 0 is the host's now
             }
             vkCmdDraw(cmd, p.position >= 0 ? llmax(d.vertex_count, 3u) : d.vertex_count, llmax(d.instances, 1u), 0, 0);
         }
