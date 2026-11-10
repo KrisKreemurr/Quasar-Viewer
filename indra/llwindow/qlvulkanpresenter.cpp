@@ -10015,8 +10015,28 @@ struct QLVulkanPresenter::Impl
         return drawn;
     }
 
+    // A draw's resources: a block's buffer, or a sampler's n elements.
+    struct GpBound
+    {
+        const ql_glsl::Resource* r;
+        U32                      n;
+        VkDescriptorBufferInfo   buffer;
+        VkDescriptorBufferInfo   dyn_buffer;  // a dynamic block's: its offset given at the bind
+        VkDescriptorImageInfo    images[16];
+        GLuint                   names[16];
+        VkImage                  vk_images[16];
+        VkImageAspectFlags       aspects[16];
+    };
+    std::vector<GpBound>                     mGpBound;
+    std::vector<VkWriteDescriptorSet>        mGpWrites;
+    std::vector<std::pair<U32, U32>>         mGpDynOffsets;
+    // A drawn draw's CPU time by part (checks, target and pipeline; its resources; its set; its recording), this frame
+    // and the last.
+    U64 mGpPhaseNow[4] = {}, mGpPhaseLast[4] = {};
+
     bool gpDrawTimed(const QLVulkanPresenter::GpDraw& d)
     {
+        const auto t_start = std::chrono::steady_clock::now();
         if (!mGpInPass)
         {
             return false;
@@ -10086,17 +10106,10 @@ struct QLVulkanPresenter::Impl
         }
 
         // Every resource found before anything is recorded: a draw that cannot be made leaves the pass as it was.
-        struct Bound
-        {
-            const ql_glsl::Resource* r;
-            VkDescriptorBufferInfo   buffer;
-            VkDescriptorBufferInfo   dyn_buffer;  // a dynamic block's: its offset given at the bind
-            VkDescriptorImageInfo    images[16];
-            GLuint                   names[16];
-            VkImage                  vk_images[16];
-            VkImageAspectFlags       aspects[16];
-        };
-        std::vector<Bound> bound;
+        // The draws' list, reused (an element is large: only what a resource uses of it is written).
+        const auto t_resources = std::chrono::steady_clock::now();
+        std::vector<GpBound>& bound = mGpBound;
+        bound.clear();
         bound.reserve(p.refl.resources.size());
         VkDeviceSize vertices_at = GP_NONE;
         const VkDeviceSize mark = mGpTop;
@@ -10111,8 +10124,10 @@ struct QLVulkanPresenter::Impl
         };
         for (const ql_glsl::Resource& r : p.refl.resources)
         {
-            Bound b = {};
+            bound.emplace_back();
+            GpBound& b = bound.back();
             b.r = &r;
+            b.n = 0;
             if (r.kind == ql_glsl::RES_UNIFORM_BLOCK)
             {
                 const VkDeviceSize bytes = llmax((VkDeviceSize)r.size, (VkDeviceSize)16);
@@ -10216,6 +10231,7 @@ struct QLVulkanPresenter::Impl
                     }
                 }
                 const size_t ri = (size_t)(&r - p.refl.resources.data());
+                b.n = llmin(r.count, 16u);
                 for (U32 e = 0; e < r.count && e < 16; ++e)
                 {
                     auto element = [&r, e]() { return r.count > 1 ? llformat("%s[%u]", r.name.c_str(), e) : r.name; };
@@ -10326,8 +10342,8 @@ struct QLVulkanPresenter::Impl
                 gpWhy(p.name + ": reads " + r.name + ", a kind of resource Vulkan does not bind yet");
                 return false;
             }
-            bound.push_back(b);
         }
+        const auto t_sets = std::chrono::steady_clock::now();
         U32 base_vertex = 0, base_index = 0;
         if (mesh)
         {
@@ -10359,8 +10375,9 @@ struct QLVulkanPresenter::Impl
         static std::vector<U64> set_content;
         set_content.clear();
         set_content.push_back((U64)(U32)d.program);
-        std::vector<std::pair<U32, U32>> dynamic_offsets;
-        for (const Bound& b : bound)
+        std::vector<std::pair<U32, U32>>& dynamic_offsets = mGpDynOffsets;
+        dynamic_offsets.clear();
+        for (const GpBound& b : bound)
         {
             set_content.push_back((U64)b.r->binding);
             if (b.r->kind == ql_glsl::RES_UNIFORM_BLOCK)
@@ -10442,9 +10459,10 @@ struct QLVulkanPresenter::Impl
                 gpWhy("the pass's descriptor pools are full");
                 return false;
             }
-        std::vector<VkWriteDescriptorSet> writes;
+        std::vector<VkWriteDescriptorSet>& writes = mGpWrites;
+        writes.clear();
         writes.reserve(bound.size());
-        for (const Bound& b : bound)
+        for (const GpBound& b : bound)
         {
             VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
             w.dstSet          = set;
@@ -10469,6 +10487,7 @@ struct QLVulkanPresenter::Impl
         ++mGpSetsMadeNow;
         }
 
+        const auto t_record = std::chrono::steady_clock::now();
         // Recorded from here: GL's images taken over, a barrier where this draw reads what an earlier one wrote (or
         // writes what one read), then the render pass.
         const U32 attachments = t.colors + (t.depth ? 1 : 0);
@@ -10490,9 +10509,9 @@ struct QLVulkanPresenter::Impl
             mGpArenaAcquired = true;
         }
         bool hazard = false;
-        for (const Bound& b : bound)
+        for (const GpBound& b : bound)
         {
-            for (U32 e = 0; e < 16; ++e)
+            for (U32 e = 0; e < b.n; ++e)
             {
                 if (b.vk_images[e])
                 {
@@ -10605,9 +10624,9 @@ struct QLVulkanPresenter::Impl
         {
             mGpWritten.insert(t.images[t.colors]);
         }
-        for (const Bound& b : bound)
+        for (const GpBound& b : bound)
         {
-            for (U32 e = 0; e < 16; ++e)
+            for (U32 e = 0; e < b.n; ++e)
             {
                 if (b.vk_images[e])
                 {
@@ -10616,6 +10635,12 @@ struct QLVulkanPresenter::Impl
             }
         }
         ++mGpDrawsNow;
+        const auto t_end = std::chrono::steady_clock::now();
+        const auto ns = [](auto a, auto b) { return (U64)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
+        mGpPhaseNow[0] += ns(t_start, t_resources);
+        mGpPhaseNow[1] += ns(t_resources, t_sets);
+        mGpPhaseNow[2] += ns(t_sets, t_record);
+        mGpPhaseNow[3] += ns(t_record, t_end);
         return true;
     }
 
@@ -10792,6 +10817,8 @@ struct QLVulkanPresenter::Impl
         mGpHostPeak     = 0;
         mGpDrawNanosLast = mGpDrawNanosNow;
         mGpDrawNanosNow  = 0;
+        memcpy(mGpPhaseLast, mGpPhaseNow, sizeof(mGpPhaseNow));
+        memset(mGpPhaseNow, 0, sizeof(mGpPhaseNow));
         mGpSetsMadeLast   = mGpSetsMadeNow;
         mGpSetsReusedLast = mGpSetsReusedNow;
         mGpSetsMadeNow = mGpSetsReusedNow = 0;
@@ -10809,10 +10836,14 @@ struct QLVulkanPresenter::Impl
             programs += p.ok ? 1 : 0;
         }
         return llformat("%u draws in %u passes last frame, %u kept by GL, Vulkan's part %.1f ms (%.1f us a draw), "
-                        "sets %u made, %u reused | %u of %u programs compiled | blocks %u written, %u reused, fullest "
-                        "pass %.1f of %u MB",
+                        "(checks %.1f, resources %.1f, set %.1f, record %.1f us), sets %u made, %u reused | %u of %u "
+                        "programs compiled | blocks %u written, %u reused, fullest pass %.1f of %u MB",
                         mGpDrawsLast, mGpPassesLast, mGpKeptLast, (double)mGpDrawNanosLast / 1e6,
-                        mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0, mGpSetsMadeLast,
+                        mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0,
+                        mGpDrawsLast ? (double)mGpPhaseLast[0] / 1e3 / mGpDrawsLast : 0.0,
+                        mGpDrawsLast ? (double)mGpPhaseLast[1] / 1e3 / mGpDrawsLast : 0.0,
+                        mGpDrawsLast ? (double)mGpPhaseLast[2] / 1e3 / mGpDrawsLast : 0.0,
+                        mGpDrawsLast ? (double)mGpPhaseLast[3] / 1e3 / mGpDrawsLast : 0.0, mGpSetsMadeLast,
                         mGpSetsReusedLast, programs, (U32)mGpPrograms.size(),
                         mGpBlocksWrittenLast, mGpBlocksReusedLast, (double)mGpHostPeakLast / (1 << 20),
                         (U32)(GP_SLOT_BYTES >> 20)) +
