@@ -2773,6 +2773,17 @@
             <key>Value</key>
             <real>1</real>
         </map>
+        <key>QuasarVulkanSceneStage</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar (with QuasarVulkanLighting): the G-buffer draws the pools make themselves (what Vulkan's own G-buffer draws left: multi-material batches, bumps, PBR and cut-outs it could not take, avatars) are recorded for Vulkan as GL's own programs. Applies at once.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>1</integer>
+        </map>
         <key>QuasarVulkanKeepGL</key>
         <map>
             <key>Comment</key>

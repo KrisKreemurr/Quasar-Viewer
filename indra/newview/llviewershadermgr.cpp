@@ -566,6 +566,20 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         {
             program.mQLWanted = ql_lighting;
         }
+        // The G-buffer's, for what the pools draw themselves in the scene's stage (the G-buffer's own draws left it).
+        for (LLGLSLShader& program : gDeferredMaterialIndexedProgram)
+        {
+            program.mQLWanted = ql_lighting;
+        }
+        for (LLGLSLShader* program :
+             { &gDeferredPBROpaqueProgram, &gDeferredPBRAlphaMaskProgram, &gDeferredPBROpaqueIndexedProgram,
+               &gDeferredPBRAlphaMaskIndexedProgram, &gDeferredDiffuseProgram, &gDeferredDiffuseAlphaMaskProgram,
+               &gDeferredNonIndexedDiffuseAlphaMaskProgram, &gDeferredNonIndexedDiffuseAlphaMaskNoColorProgram,
+               &gDeferredBumpProgram, &gDeferredBumpAlphaMaskProgram, &gDeferredTreeProgram, &gDeferredAvatarProgram,
+               &gDeferredImpostorProgram })
+        {
+            program->mQLWanted = ql_lighting;
+        }
         // The pools after the lighting, before and between the alpha pools, and the haze.
         for (LLGLSLShader* program : { &gDeferredFullbrightProgram, &gDeferredFullbrightShinyProgram, &gHazeProgram,
                                        &gHazeOnWaterProgram, &gDeferredAvatarAlphaProgram,

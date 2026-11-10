@@ -5901,6 +5901,16 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
                 ql_vulkan_probe_draws_begin(mRT->deferredScreen, main_view);
             }
         }
+        // Quasar: what the pools draw themselves after that (what the G-buffer's own draws left: multi-material batches,
+        // bumps, PBR and cut-outs it could not take, avatars) is recorded for Vulkan as GL's own programs, as the stages
+        // after the lighting record theirs (QuasarVulkanSceneStage). Main view alone (the stage checks it). Whatever
+        // Vulkan cannot take is GL's, after a hand-over, and a new run opens at the next draw it can.
+        static LLCachedControl<bool> ql_scene_stage(gSavedSettings, "QuasarVulkanSceneStage", true);
+        const bool ql_scene = ql_scene_stage() && !gCubeSnapshot;
+        if (ql_scene)
+        {
+            ql_vulkan_stage_begin_reopening("scene", 16);
+        }
 
         pool_set_t::iterator iter1 = mPools.begin();
 
@@ -5966,6 +5976,12 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         gGLLastMatrix = NULL;
         gGL.matrixMode(LLRender::MM_MODELVIEW);
         gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+
+        if (ql_scene)
+        {
+            ql_vulkan_stage_end();
+            ql_vulkan_stage_gl();  // the scene's run to the GPU before the G-buffer's own draws (for now)
+        }
 
         // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
         // the hand-over failed (Vulkan's draws are then off from now on), GL draws what it left to Vulkan.
