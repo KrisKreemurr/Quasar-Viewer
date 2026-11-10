@@ -12879,11 +12879,20 @@ namespace
                 t.name = texture_names[named].c_str();
                 const S32 unit = (S32)words[r.mWords + e];
                 ALTextureSlot* slot = unit >= 0 ? gGL.getTextureSlot((U32)unit) : nullptr;
+                // An element of a sampler array (an indexed batch's tex0..tex15): its batch binds the units it has
+                // textures for, and its texture_index never reaches the rest, which keep what earlier draws left.
+                // Where Vulkan cannot read what one holds, it reads black: GL reads nothing of it.
+                const bool batch_unit = r.mElements > 1;
                 if (slot && slot->getCurrType() != ALTextureSlot::TT_NONE)
                 {
                     if (slot->getCurrType() != ALTextureSlot::TT_TEXTURE &&
                         slot->getCurrType() != ALTextureSlot::TT_CUBE_MAP_ARRAY)
                     {
+                        if (batch_unit)
+                        {
+                            textures.push_back(t);  // black
+                            continue;
+                        }
                         ql_lighting_kept(llformat("%s: %s is a cube map or a 3D texture (not yet in Vulkan)",
                                                   shader.mName.c_str(), t.name));
                         return false;
@@ -12897,6 +12906,10 @@ namespace
                         if (const U32 copy = LLImageGL::qlVulkanCopyOf(t.texture))
                         {
                             t.texture = copy;
+                        }
+                        else if (batch_unit)
+                        {
+                            t.texture = 0;  // black, as above: no copy of what a batch left there
                         }
                     }
                     ALSamplerDesc desc;
