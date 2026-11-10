@@ -3884,6 +3884,25 @@ S32 LLImageGL::getStorageInternalFormat() const
     return isCompressed() ? mFormatPrimary : mFormatInternal;
 }
 
+// Quasar: the storage a texture is made with where Vulkan shares the textures (QuasarVulkanTextures). Vulkan has no
+// three-byte formats to share, so an RGB texture is made RGBA (GL fills the alpha with one as it uploads RGB), and
+// Vulkan's draws can read it rather than leave it, and every draw after it, to GL.
+static S32 ql_storage_format(S32 format)
+{
+    if (gQLExternalTexturesWanted && gQLExternalStorage)
+    {
+        if (format == GL_RGB8)
+        {
+            return GL_RGBA8;
+        }
+        if (format == GL_SRGB8)
+        {
+            return GL_SRGB8_ALPHA8;
+        }
+    }
+    return format;
+}
+
 // Allocate backing storage for the currently-bound texture at the given level-0 size,
 // and record the VRAM accounting for it. A texture it replaces leaves the count as its
 // owner deletes it (deleteTextures).
@@ -3893,7 +3912,8 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
 
     mMipLevels = has_mips ? calcMipLevelCount(width, height) : 1;
 
-    assertStorageAllocatable(mTarget, getStorageInternalFormat());
+    const S32 storage_format = ql_storage_format(getStorageInternalFormat());
+    assertStorageAllocatable(mTarget, storage_format);
 
     // Quasar: the storage from the external provider's shared memory (QuasarVulkanTextures), on the main thread, where
     // it can give it; the uploads into it are GL's as ever.
@@ -3909,8 +3929,8 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
     // the memory objects the storage comes from are shared between the contexts of the share group.
     const bool external = gQLExternalTexturesWanted && gQLExternalStorage && mTarget == GL_TEXTURE_2D && bound &&
                           gQLExternalStorage->allocateTexture(
-                              bound, getStorageInternalFormat(), width, height, mMipLevels,
-                              (unsigned long long)LLImageGL::dataFormatVRAMBytes(getStorageInternalFormat(), width, height,
+                              bound, storage_format, width, height, mMipLevels,
+                              (unsigned long long)LLImageGL::dataFormatVRAMBytes(storage_format, width, height,
                                                                                  mMipLevels));
     {
         LL_PROFILE_ZONE_NAMED("glTexStorage2D");
@@ -3919,14 +3939,14 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
         // must create a new texture -- see scaleDown and createGLTexture.
         if (!external)
         {
-            glTexStorage2D(mTarget, mMipLevels, getStorageInternalFormat(), width, height);
+            glTexStorage2D(mTarget, mMipLevels, storage_format, width, height);
         }
         skipSRGBDecode(mTarget);
         mStorageAllocated = true;
         mStorage.mWidth  = width;
         mStorage.mHeight = height;
         mStorage.mLevels = mMipLevels;
-        mStorage.mFormat = getStorageInternalFormat();
+        mStorage.mFormat = storage_format;
     }
 
     // The texture's bytes are what the global count recorded for the storage just made.
@@ -3945,7 +3965,7 @@ bool LLImageGL::storageFits(S32 width, S32 height) const
 
     return mStorage.mWidth == width
         && mStorage.mHeight == height
-        && mStorage.mFormat == getStorageInternalFormat()
+        && mStorage.mFormat == ql_storage_format(getStorageInternalFormat())
         && mStorage.mLevels == (mUseMipMaps ? calcMipLevelCount(width, height) : 1);
 }
 
@@ -4347,8 +4367,8 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
         }
         LLImageGL::generateTextures(1, &c.mCopy);
         slot0->bindManual(ALTextureSlot::TT_TEXTURE, c.mCopy);
-        if (!gQLExternalStorage->allocateTexture(c.mCopy, storage.mFormat, storage.mWidth, storage.mHeight,
-                                                 storage.mLevels, 0))
+        if (!gQLExternalStorage->allocateTexture(c.mCopy, ql_storage_format(storage.mFormat), storage.mWidth,
+                                                 storage.mHeight, storage.mLevels, 0))
         {
             ql_drop_copy(c);
             restore();
@@ -4360,11 +4380,43 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
         c.mLevels = storage.mLevels;
         c.mFormat = storage.mFormat;
     }
-    for (S32 level = 0; level < c.mLevels; ++level)
+    if (ql_storage_format(c.mFormat) == c.mFormat)
     {
-        const S32 w = llmax(1, c.mWidth >> level);
-        const S32 h = llmax(1, c.mHeight >> level);
-        glCopyImageSubData(name, GL_TEXTURE_2D, level, 0, 0, 0, c.mCopy, GL_TEXTURE_2D, level, 0, 0, 0, w, h, 1);
+        for (S32 level = 0; level < c.mLevels; ++level)
+        {
+            const S32 w = llmax(1, c.mWidth >> level);
+            const S32 h = llmax(1, c.mHeight >> level);
+            glCopyImageSubData(name, GL_TEXTURE_2D, level, 0, 0, 0, c.mCopy, GL_TEXTURE_2D, level, 0, 0, 0, w, h, 1);
+        }
+    }
+    else
+    {
+        // An RGB texture made before Vulkan shared the textures (the defaults made at start), copied into RGBA: a
+        // copy between formats of different sizes is a blit's, level by level, through framebuffers of its own.
+        static GLuint read_fbo = 0, draw_fbo = 0;
+        if (!read_fbo)
+        {
+            glGenFramebuffers(1, &read_fbo);
+            glGenFramebuffers(1, &draw_fbo);
+        }
+        GLint prev_read = 0, prev_draw = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+        LLGLDisable no_scissor(GL_SCISSOR_TEST);
+        for (S32 level = 0; level < c.mLevels; ++level)
+        {
+            const S32 w = llmax(1, c.mWidth >> level);
+            const S32 h = llmax(1, c.mHeight >> level);
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, name, level);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, c.mCopy, level);
+            glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev_draw);
     }
     c.mStamp = stamp;
     restore();

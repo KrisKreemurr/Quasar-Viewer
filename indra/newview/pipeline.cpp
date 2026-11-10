@@ -12882,7 +12882,11 @@ namespace
                 // An element of a sampler array (an indexed batch's tex0..tex15): its batch binds the units it has
                 // textures for, and its texture_index never reaches the rest, which keep what earlier draws left.
                 // Where Vulkan cannot read what one holds, it reads black: GL reads nothing of it.
-                const bool batch_unit = r.mElements > 1;
+                // The same for the batch units a program names one by one (indexedTextureF.glsl's tex1..tex15; tex0,
+                // which every batch binds, is read).
+                const bool batch_unit = r.mElements > 1 ||
+                                        (r.mName.size() > 3 && r.mName.compare(0, 3, "tex") == 0 &&
+                                         std::all_of(r.mName.begin() + 3, r.mName.end(), ::isdigit) && r.mName != "tex0");
                 if (slot && slot->getCurrType() != ALTextureSlot::TT_NONE)
                 {
                     if (slot->getCurrType() != ALTextureSlot::TT_TEXTURE &&
