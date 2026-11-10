@@ -17,6 +17,14 @@ set(ROOT_PROJECT_NAME "Slipstream" CACHE STRING
     "The root project/makefile/solution name. Defaults to Slipstream." FORCE)
 project(${ROOT_PROJECT_NAME})
 
+# Quasar: the Windows prebuilts name their import libraries libfoo.lib (libboost_context.lib),
+# which clang-cl's platform module does not look for under older CMake (Ubuntu 24.04's 3.28
+# searches no prefix), so the cross build could not find them.
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT CMAKE_HOST_WIN32)
+  list(APPEND CMAKE_FIND_LIBRARY_PREFIXES "lib")
+  list(REMOVE_DUPLICATES CMAKE_FIND_LIBRARY_PREFIXES)
+endif ()
+
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake"  "${CMAKE_CURRENT_BINARY_DIR}")
 
 include(conanbuildinfo OPTIONAL RESULT_VARIABLE USE_CONAN )

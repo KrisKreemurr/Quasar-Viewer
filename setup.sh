@@ -14,6 +14,14 @@ if [ ! -x "$LLVM/clang-cl" ] || ! command -v glslc >/dev/null || ! command -v 7z
   sudo bash /tmp/llvm.sh 22
   sudo apt install -y lld-22 llvm-22
 fi
+# A current CMake from Kitware's apt repository (Ubuntu's 3.28 is older than Slipstream builds with)
+if ! cmake --version 2>/dev/null | grep -q "version [4-9]"; then
+  wget -qO- https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+  echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+  sudo apt update
+  sudo apt install -y cmake
+  rm -rf ~/quasar-slipstream/build-windows-x86_64/CMakeCache.txt ~/quasar-slipstream/build-windows-x86_64/CMakeFiles
+fi
 # clang-cl, lld-link, llvm-rc, llvm-mt, llvm-lib, llvm-dlltool under their plain names
 export PATH="$LLVM:$PATH"
 if ! command -v xwin >/dev/null; then
