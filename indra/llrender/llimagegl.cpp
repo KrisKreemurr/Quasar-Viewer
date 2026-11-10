@@ -4262,6 +4262,27 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
     {
         return name;
     }
+    // Now and then, the copies of textures gone (or of names given since to other textures) let go of: the G-buffer's
+    // draws take copies of whatever small textures the scene shows, and a walk through the world would keep them all.
+    static U32 swept_frame = 0;
+    if (LLImageGL::sFrameCount >= swept_frame + 300)
+    {
+        swept_frame = LLImageGL::sFrameCount;
+        for (auto it = sQLCopies.begin(); it != sQLCopies.end();)
+        {
+            QLCopy& old = it->second;
+            const bool live = old.mImage && sImageList.count(old.mImage) && old.mImage->getTexName() == it->first;
+            if (!live && old.mMissFrame + 300 < LLImageGL::sFrameCount)
+            {
+                ql_drop_copy(old);
+                it = sQLCopies.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
     QLCopy& c = sQLCopies[name];
     const bool image_live = c.mImage && sImageList.count(c.mImage) && c.mImage->getTexName() == name;
     if (!image_live)

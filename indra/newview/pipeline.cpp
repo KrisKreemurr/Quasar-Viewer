@@ -14514,6 +14514,20 @@ U32 ql_sampled_levels(const LLImageGL* image)  // and lldrawpoolterrain.cpp
 // A material slot's texture for Vulkan: 0 for GL's default there (none, or the slot's own default: the flat normal in
 // the normal slot, white in the others), its GL name otherwise; false where the slot names a texture with no GL
 // texture yet (GL's then).
+// A texture for Vulkan's G-buffer draws: its own where it is in Vulkan's memory, otherwise a copy there (a small one GL
+// keeps, LLImageGL::qlVulkanCopyOf), or as it is, where Vulkan will refuse the draw and GL draw it.
+static U32 ql_gb_name(U32 name)
+{
+    if (name && gQLExternalStorage && !gQLExternalStorage->owns(name))
+    {
+        if (const U32 copy = LLImageGL::qlVulkanCopyOf(name))
+        {
+            return copy;
+        }
+    }
+    return name;
+}
+
 static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& name, U32& levels)
 {
     name   = 0;
@@ -14525,7 +14539,7 @@ static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& nam
         return true;
     }
     const LLImageGL* image = texture->getGLTexture();
-    name = image ? image->getTexName() : 0;
+    name = ql_gb_name(image ? image->getTexName() : 0);
     if (!name)
     {
         return false;
@@ -14684,7 +14698,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         if (count <= 1)
         {
             const LLImageGL* image = params.mTexture.notNull() ? params.mTexture->getGLTexture() : nullptr;
-            d.textures[0] = image ? image->getTexName() : 0;
+            d.textures[0] = ql_gb_name(image ? image->getTexName() : 0);
             d.levels[0]   = ql_sampled_levels(image);
             return d.textures[0] != 0;
         }
@@ -14697,7 +14711,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             LLViewerTexture* tex = params.mTextureList[t].get();
             const LLImageGL* image =
                 (tex ? tex : LLViewerFetchedTexture::sWhiteImagep.get())->getGLTexture();
-            d.batch[t]        = image ? image->getTexName() : 0;
+            d.batch[t]        = ql_gb_name(image ? image->getTexName() : 0);
             d.batch_levels[t] = ql_sampled_levels(image);
             if (!d.batch[t])
             {
@@ -14967,8 +14981,8 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
             const LLImageGL* diffuse = params.mTexture->getGLTexture();
             LLViewerTexture* bump_tex = LLDrawPoolBump::bumpImageOf(params.mBump, params.mTexture.get());
             const LLImageGL* bump = bump_tex ? bump_tex->getGLTexture() : nullptr;
-            const U32 diffuse_name = diffuse ? diffuse->getTexName() : 0;
-            const U32 bump_name    = bump ? bump->getTexName() : 0;
+            const U32 diffuse_name = ql_gb_name(diffuse ? diffuse->getTexName() : 0);
+            const U32 bump_name    = ql_gb_name(bump ? bump->getTexName() : 0);
             if (!diffuse_name || !bump_name || !place(params.mVertexBuffer.get()) || !last_tangents ||
                 (rig && !last_weights))
             {
@@ -15059,7 +15073,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
         const auto map_texture = [](LLViewerTexture* texture, U32& name, U32& levels)
         {
             const LLImageGL* image = texture ? texture->getGLTexture() : nullptr;
-            name = image ? image->getTexName() : 0;
+            name = ql_gb_name(image ? image->getTexName() : 0);
             levels = name ? ql_sampled_levels(image) : 1;
             return name != 0;
         };
