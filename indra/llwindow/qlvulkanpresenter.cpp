@@ -3794,6 +3794,8 @@ struct QLVulkanPresenter::Impl
         // The terrain's maps (ALTerrainSurfaceMaps): its heights and its composition, for the terrain Vulkan draws.
         { GL_R32F, VK_FORMAT_R32_SFLOAT, "R32F" },
         { GL_RG16F, VK_FORMAT_R16G16_SFLOAT, "RG16F" },
+        // The water's cell map (ALWaterSurface): each cell's height, for the water Vulkan draws.
+        { GL_RG32F, VK_FORMAT_R32G32_SFLOAT, "RG32F" },
     };
     static constexpr U32 TEX_FORMAT_COUNT = (U32)(sizeof(TEX_FORMATS) / sizeof(TEX_FORMATS[0]));
     // Per format: 0 not asked yet, 1 the device can share it, 2 it cannot. And the allocations still checked with GL
@@ -4060,7 +4062,8 @@ struct QLVulkanPresenter::Impl
         // The terrain's maps are wanted whatever they waste: a few hundred KB a region, and the terrain Vulkan draws
         // reads nothing else (their odd size, the grid and its apron, pads past the rule).
         const bool wanted_anyway =
-            TEX_FORMATS[index].vk == VK_FORMAT_R32_SFLOAT || TEX_FORMATS[index].vk == VK_FORMAT_R16G16_SFLOAT;
+            TEX_FORMATS[index].vk == VK_FORMAT_R32_SFLOAT || TEX_FORMATS[index].vk == VK_FORMAT_R16G16_SFLOAT ||
+            TEX_FORMATS[index].vk == VK_FORMAT_R32G32_SFLOAT;
         const auto known = mTexWastefulShapes.find(shape);
         if (!wanted_anyway && counted_bytes && known != mTexWastefulShapes.end() && counted_bytes <= known->second)
         {
@@ -7100,7 +7103,7 @@ struct QLVulkanPresenter::Impl
         const auto found = mExtTextures.find(texture);
         if (found == mExtTextures.end() || found->second.block < 0 || found->second.vk == VK_FORMAT_R8_UNORM ||
             found->second.vk == VK_FORMAT_R8G8_UNORM || found->second.vk == VK_FORMAT_R32_SFLOAT ||
-            found->second.vk == VK_FORMAT_R16G16_SFLOAT)
+            found->second.vk == VK_FORMAT_R16G16_SFLOAT || found->second.vk == VK_FORMAT_R32G32_SFLOAT)
         {
             return VK_NULL_HANDLE;
         }
