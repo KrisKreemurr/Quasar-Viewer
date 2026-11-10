@@ -8411,6 +8411,8 @@ struct QLVulkanPresenter::Impl
         VkCommandBuffer  cmd = VK_NULL_HANDLE;
         VkFence          fence = VK_NULL_HANDLE;
         VkDescriptorPool pool = VK_NULL_HANDLE;
+        std::vector<VkDescriptorPool> extra;  // made where a run filled `pool`, reset with it
+        U32              extra_used = 0;       // of extra, those this run has taken
         bool             submitted = false;
     };
     GpSlot           mGpSlots[GP_SLOTS];
@@ -8558,9 +8560,6 @@ struct QLVulkanPresenter::Impl
             return gpFail("vkMapMemory");
         }
         mGpMapped = (U8*)mapped;
-        const VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GP_SETS * 6 },
-                                                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GP_SETS * 16 },
-                                                { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64 } };
         for (GpSlot& slot : mGpSlots)
         {
             VkCommandBufferAllocateInfo cmd_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -8578,13 +8577,9 @@ struct QLVulkanPresenter::Impl
                 slot.fence = VK_NULL_HANDLE;
                 return gpFail("vkCreateFence");
             }
-            VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-            pool_info.maxSets       = GP_SETS;
-            pool_info.poolSizeCount = 3;
-            pool_info.pPoolSizes    = sizes;
-            if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &slot.pool) != VK_SUCCESS)
+            slot.pool = gpMakePool();
+            if (!slot.pool)
             {
-                slot.pool = VK_NULL_HANDLE;
                 return gpFail("vkCreateDescriptorPool");
             }
         }
@@ -8689,6 +8684,12 @@ struct QLVulkanPresenter::Impl
         for (GpSlot& slot : mGpSlots)
         {
             if (slot.pool) vkDestroyDescriptorPool(mDevice, slot.pool, nullptr);
+            for (VkDescriptorPool extra : slot.extra)
+            {
+                vkDestroyDescriptorPool(mDevice, extra, nullptr);
+            }
+            slot.extra.clear();
+            slot.extra_used = 0;
             if (slot.fence) vkDestroyFence(mDevice, slot.fence, nullptr);
             if (slot.cmd) vkFreeCommandBuffers(mDevice, mCommandPool, 1, &slot.cmd);
             slot = GpSlot();
@@ -9506,6 +9507,24 @@ struct QLVulkanPresenter::Impl
         return v.view;
     }
 
+    // A descriptor pool for a run's sets: a slot's own, or one more where a run filled it.
+    VkDescriptorPool gpMakePool()
+    {
+        const VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GP_SETS * 6 },
+                                                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GP_SETS * 16 },
+                                                { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64 } };
+        VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pool_info.maxSets       = GP_SETS;
+        pool_info.poolSizeCount = 3;
+        pool_info.pPoolSizes    = sizes;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &pool) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return pool;
+    }
+
     // Room in the slot's share of the host buffer; GP_NONE when the pass has used it all.
     VkDeviceSize gpAllocate(VkDeviceSize bytes)
     {
@@ -9701,6 +9720,11 @@ struct QLVulkanPresenter::Impl
         mGpTop      = 0;
         mGpBlocksDone.clear();
         vkResetDescriptorPool(mDevice, slot.pool, 0);
+        for (VkDescriptorPool extra : slot.extra)
+        {
+            vkResetDescriptorPool(mDevice, extra, 0);
+        }
+        slot.extra_used = 0;
         vkResetCommandBuffer(slot.cmd, 0);
         VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -10078,14 +10102,37 @@ struct QLVulkanPresenter::Impl
         }
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-        set_alloc.descriptorPool     = mGpSlots[mGpSlot].pool;
         set_alloc.descriptorSetCount = 1;
         set_alloc.pSetLayouts        = &p.setLayout;
-        if (vkAllocateDescriptorSets(mDevice, &set_alloc, &set) != VK_SUCCESS)
         {
-            give_back();
-            gpWhy("the pass's descriptor pool is full");
-            return false;
+            // The slot's pool, then as many more as the run fills (a draw with many samplers takes many descriptors).
+            GpSlot& slot = mGpSlots[mGpSlot];
+            bool allocated = false;
+            while (!allocated)
+            {
+                set_alloc.descriptorPool = slot.extra_used == 0 ? slot.pool : slot.extra[slot.extra_used - 1];
+                if (vkAllocateDescriptorSets(mDevice, &set_alloc, &set) == VK_SUCCESS)
+                {
+                    allocated = true;
+                    break;
+                }
+                if (slot.extra_used == slot.extra.size())
+                {
+                    VkDescriptorPool more = slot.extra.size() < 32 ? gpMakePool() : VK_NULL_HANDLE;
+                    if (!more)
+                    {
+                        break;
+                    }
+                    slot.extra.push_back(more);
+                }
+                ++slot.extra_used;
+            }
+            if (!allocated)
+            {
+                give_back();
+                gpWhy("the pass's descriptor pools are full");
+                return false;
+            }
         }
         std::vector<VkWriteDescriptorSet> writes;
         writes.reserve(bound.size());
