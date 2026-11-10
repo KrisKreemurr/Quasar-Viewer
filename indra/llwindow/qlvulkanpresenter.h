@@ -456,6 +456,15 @@ public:
         float             bounds_min = 0.f, bounds_max = 0.f;
         bool              cull_back = false;
         bool              cull_front = false;
+        // GL's stencil test (on where stencil_test): its function, reference and read mask, its operations on a
+        // stencil fail, a depth fail and a pass, and its write mask, front and back alike (LLRender's). And a clear of
+        // the depth attachment's stencil to clear_stencil_value first, where clear_stencil (as `clear` the colours).
+        bool              stencil_test = false;
+        unsigned          stencil_func = 0x0207;  // GL_ALWAYS
+        unsigned          stencil_ref = 0, stencil_read_mask = 0xFF, stencil_write_mask = 0xFF;
+        unsigned          stencil_fail = 0x1E00, stencil_depth_fail = 0x1E00, stencil_pass = 0x1E00;  // GL_KEEP
+        bool              clear_stencil = false;
+        unsigned          clear_stencil_value = 0;
         // Its vertices: positions alone, three floats each (the "position" attribute), GL's topology (GL_TRIANGLES,
         // GL_TRIANGLE_STRIP or GL_TRIANGLE_FAN), drawn `instances` times. Or none (the program places its vertices
         // from gl_VertexID, as the water's field does): vertex_count of them with no positions.

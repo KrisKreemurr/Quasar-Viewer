@@ -8452,8 +8452,11 @@ struct QLVulkanPresenter::Impl
         bool          depth = false;
         U32           width = 0, height = 0;
         VkRenderPass  load = VK_NULL_HANDLE, clear = VK_NULL_HANDLE;
+        // Where the depth attachment has stencil: passes that clear it, alone and with the colours.
+        VkRenderPass  clearStencil = VK_NULL_HANDLE, clearBoth = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         U64           formatKey = 0;
+        bool          stencil = false;  // its depth attachment has stencil
     };
     std::vector<GpTarget> mGpTargets;
 
@@ -8619,6 +8622,8 @@ struct QLVulkanPresenter::Impl
         if (t.framebuffer) vkDestroyFramebuffer(mDevice, t.framebuffer, nullptr);
         if (t.load) vkDestroyRenderPass(mDevice, t.load, nullptr);
         if (t.clear) vkDestroyRenderPass(mDevice, t.clear, nullptr);
+        if (t.clearStencil) vkDestroyRenderPass(mDevice, t.clearStencil, nullptr);
+        if (t.clearBoth) vkDestroyRenderPass(mDevice, t.clearBoth, nullptr);
         for (VkImageView& v : t.views)
         {
             if (v) vkDestroyImageView(mDevice, v, nullptr);
@@ -9020,7 +9025,7 @@ struct QLVulkanPresenter::Impl
     }
 
     // A render pass for a target's formats: its attachments loaded, or its colours cleared (the depth loaded either way).
-    VkRenderPass gpRenderPass(const GpTarget& t, bool clear)
+    VkRenderPass gpRenderPass(const GpTarget& t, bool clear, bool clear_stencil = false)
     {
         VkAttachmentDescription attachments[5] = {};
         VkAttachmentReference   color_refs[4] = {};
@@ -9034,7 +9039,9 @@ struct QLVulkanPresenter::Impl
             a.samples        = VK_SAMPLE_COUNT_1_BIT;
             a.loadOp         = (clear && !is_depth) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
             a.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-            a.stencilLoadOp  = stencil ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            a.stencilLoadOp  = !stencil       ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
+                               : clear_stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                               : VK_ATTACHMENT_LOAD_OP_LOAD;
             a.stencilStoreOp = stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
             a.initialLayout  = VK_IMAGE_LAYOUT_GENERAL;
             a.finalLayout    = VK_IMAGE_LAYOUT_GENERAL;
@@ -9158,7 +9165,14 @@ struct QLVulkanPresenter::Impl
         t.formatKey = t.formatKey * 7 + (t.depth ? 1 : 0);
         t.load  = gpRenderPass(t, false);
         t.clear = gpRenderPass(t, true);
-        if (!t.load || !t.clear)
+        t.stencil = t.depth && (formats[t.colors] == VK_FORMAT_D24_UNORM_S8_UINT ||
+                                formats[t.colors] == VK_FORMAT_D32_SFLOAT_S8_UINT);
+        if (t.stencil)
+        {
+            t.clearStencil = gpRenderPass(t, false, true);
+            t.clearBoth    = gpRenderPass(t, true, true);
+        }
+        if (!t.load || !t.clear || (t.stencil && (!t.clearStencil || !t.clearBoth)))
         {
             destroyGpTarget(t);
             gpWhy("vkCreateRenderPass failed");
@@ -9205,6 +9219,18 @@ struct QLVulkanPresenter::Impl
                   ((U64)(d.depth_write ? 1 : 0) << 20) + ((U64)(bounds ? 1 : 0) << 21) +
                   ((U64)(d.cull_back ? 1 : 0) << 22) + ((U64)d.topology << 24) + ((U64)t.colors << 40) +
                   ((U64)(mesh ? 1 : 0) << 44) + ((U64)(d.cull_front ? 1 : 0) << 45) + ((U64)(d.color_mask & 0xF) << 46);
+        const bool stencil = d.stencil_test && t.stencil;  // GL's test passes everything where there is no stencil
+        if (stencil)
+        {
+            key = key * 1000003ull + 1;
+            key = key * 31 + d.stencil_func;
+            key = key * 257 + (d.stencil_ref & 0xFF);
+            key = key * 257 + (d.stencil_read_mask & 0xFF);
+            key = key * 257 + (d.stencil_write_mask & 0xFF);
+            key = key * 31 + d.stencil_fail;
+            key = key * 31 + d.stencil_depth_fail;
+            key = key * 31 + d.stencil_pass;
+        }
         if (d.blend == 3)
         {
             key = key * 31 + d.blend_src;
@@ -9282,6 +9308,34 @@ struct QLVulkanPresenter::Impl
         depth.depthBoundsTestEnable = bounds ? VK_TRUE : VK_FALSE;
         depth.minDepthBounds        = 0.f;
         depth.maxDepthBounds        = 1.f;
+        if (stencil)
+        {
+            auto op = [](unsigned gl_op)
+            {
+                switch (gl_op)
+                {
+                    case GL_ZERO: return VK_STENCIL_OP_ZERO;
+                    case GL_REPLACE: return VK_STENCIL_OP_REPLACE;
+                    case GL_INCR: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+                    case GL_DECR: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+                    case GL_INVERT: return VK_STENCIL_OP_INVERT;
+                    case GL_INCR_WRAP: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+                    case GL_DECR_WRAP: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+                    default: return VK_STENCIL_OP_KEEP;
+                }
+            };
+            VkStencilOpState face = {};
+            face.failOp      = op(d.stencil_fail);
+            face.passOp      = op(d.stencil_pass);
+            face.depthFailOp = op(d.stencil_depth_fail);
+            face.compareOp   = gpCompare(d.stencil_func);
+            face.compareMask = d.stencil_read_mask & 0xFF;
+            face.writeMask   = d.stencil_write_mask & 0xFF;
+            face.reference   = d.stencil_ref & 0xFF;
+            depth.stencilTestEnable = VK_TRUE;
+            depth.front = face;
+            depth.back  = face;
+        }
         VkPipelineColorBlendAttachmentState blends[4] = {};
         for (U32 i = 0; i < t.colors; ++i)
         {
@@ -10209,7 +10263,8 @@ struct QLVulkanPresenter::Impl
             hazard = hazard || mGpRead.count(t.images[t.colors]) != 0;
         }
         // A target other than the open one, written before: a barrier as well (its writes are ordered by nothing).
-        if (hazard || d.clear)
+        const bool clear_stencil = d.clear_stencil && t.stencil;
+        if (hazard || d.clear || clear_stencil)
         {
             if (mGpRecorded)
             {
@@ -10221,7 +10276,7 @@ struct QLVulkanPresenter::Impl
             }
         }
         VkCommandBuffer cmd = mGpSlots[mGpSlot].cmd;
-        if (mGpOpenTarget != target_index || d.clear)
+        if (mGpOpenTarget != target_index || d.clear || clear_stencil)
         {
             gpEndRenderPass();
             VkClearValue clears[5] = {};
@@ -10229,8 +10284,13 @@ struct QLVulkanPresenter::Impl
             {
                 memcpy(clears[i].color.float32, d.clear_color, sizeof(d.clear_color));
             }
+            if (t.depth)
+            {
+                clears[t.colors].depthStencil = { 0.f, d.clear_stencil_value & 0xFF };
+            }
             VkRenderPassBeginInfo pass_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-            pass_begin.renderPass      = d.clear ? t.clear : t.load;
+            pass_begin.renderPass      = clear_stencil ? (d.clear ? t.clearBoth : t.clearStencil)
+                                                       : (d.clear ? t.clear : t.load);
             pass_begin.framebuffer     = t.framebuffer;
             pass_begin.renderArea      = { { 0, 0 }, { t.width, t.height } };
             pass_begin.clearValueCount = attachments;

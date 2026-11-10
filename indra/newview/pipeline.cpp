@@ -12671,6 +12671,8 @@ namespace
     bool            sQLRecording = false;
     LLRenderTarget* sQLPendingClear = nullptr;
     LLColor4        sQLPendingColor;
+    bool            sQLPendingColors = true;    // the clear pending clears the colours
+    bool            sQLPendingStencil = false;  // and the stencil (to 0)
 
     bool ql_lighting_started()
     {
@@ -12716,6 +12718,12 @@ namespace
         U32  topology = GL_TRIANGLES;
         S32  viewport[4] = {};  // width 0: the whole target
         U32  instances = 1;
+        // The stencil test (LLRender's), and a clear of the stencil first (to 0, GL's clear value here).
+        bool stencil_test = false;
+        U32  stencil_func = GL_ALWAYS, stencil_read_mask = 0xFF, stencil_write_mask = 0xFF;
+        S32  stencil_ref = 0;
+        U32  stencil_fail = GL_KEEP, stencil_depth_fail = GL_KEEP, stencil_pass = GL_KEEP;
+        bool clear_stencil = false;
     };
 
     // GL's state now, as LLRender and LLGLState track it: what a draw made here would draw with.
@@ -12737,6 +12745,13 @@ namespace
         st.cull_back  = cull && gGL.getCullFace() != GL_FRONT;
         st.cull_front = cull && gGL.getCullFace() != GL_BACK;
         gGL.qlViewport(st.viewport);
+        st.stencil_test = LLGLState::qlEnabled(GL_STENCIL_TEST);
+        if (st.stencil_test)
+        {
+            gGL.getStencilFunc(st.stencil_func, st.stencil_ref, st.stencil_read_mask);
+            gGL.getStencilOp(st.stencil_fail, st.stencil_depth_fail, st.stencil_pass);
+            st.stencil_write_mask = gGL.getStencilMask();
+        }
         F64 zmin = 0.0, zmax = 1.0;
         if (ALDepthBounds::qlCurrent(zmin, zmax))
         {
@@ -12980,6 +12995,16 @@ namespace
         d.bounds_max      = state.bounds_max;
         d.cull_back       = state.cull_back;
         d.cull_front      = state.cull_front;
+        d.stencil_test        = state.stencil_test;
+        d.stencil_func        = state.stencil_func;
+        d.stencil_ref         = (unsigned)state.stencil_ref;
+        d.stencil_read_mask   = state.stencil_read_mask;
+        d.stencil_write_mask  = state.stencil_write_mask;
+        d.stencil_fail        = state.stencil_fail;
+        d.stencil_depth_fail  = state.stencil_depth_fail;
+        d.stencil_pass        = state.stencil_pass;
+        d.clear_stencil       = state.clear_stencil;
+        d.clear_stencil_value = 0;
         d.positions       = positions;
         d.vertex_count    = vertex_count;
         d.topology        = state.topology;
@@ -13001,7 +13026,7 @@ namespace
     }
 
     // A clear Vulkan makes into `target`: a draw of nothing into a pass that clears its colours first.
-    bool ql_clear_draw(LLRenderTarget* target, const LLColor4& color)
+    bool ql_clear_draw(LLRenderTarget* target, const LLColor4& color, bool colors = true, bool stencil = false)
     {
         if (!target || !target->getNumTextures())
         {
@@ -13031,7 +13056,8 @@ namespace
         d.depth  = target->getAttachedDepth();
         d.width  = target->getWidth();
         d.height = target->getHeight();
-        d.clear  = true;
+        d.clear  = colors;
+        d.clear_stencil = stencil;
         for (U32 i = 0; i < 4; ++i)
         {
             d.clear_color[i] = color.mV[i];
@@ -13045,8 +13071,8 @@ namespace
         return true;
     }
 
-    // A clear GL makes, at `color`, of `target`'s colours: bound for it where it is not.
-    void ql_gl_clear(LLRenderTarget* target, const LLColor4& color)
+    // A clear GL makes, at `color`, of `target`'s colours and or its stencil: bound for it where it is not.
+    void ql_gl_clear(LLRenderTarget* target, const LLColor4& color, bool colors = true, bool stencil = false)
     {
         const LLColor4 previous = gGL.getClearColor();
         gGL.setClearColor(color);
@@ -13055,7 +13081,7 @@ namespace
         {
             target->bindTarget();
         }
-        target->clear(GL_COLOR_BUFFER_BIT);
+        target->clear((colors ? GL_COLOR_BUFFER_BIT : 0) | (stencil ? GL_STENCIL_BUFFER_BIT : 0));
         if (!bound)
         {
             target->flush();
@@ -13093,9 +13119,11 @@ namespace
         sQLHandingOver = true;
         LLRenderTarget* gl_clear = nullptr;
         const LLColor4  color    = sQLPendingColor;
+        const bool      colors   = sQLPendingColors;
+        const bool      stencil  = sQLPendingStencil;
         if (sQLPendingClear)
         {
-            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor, colors, stencil))
             {
                 gl_clear = sQLPendingClear;
             }
@@ -13109,7 +13137,7 @@ namespace
         sQLHandingOver = false;
         if (gl_clear)
         {
-            ql_gl_clear(gl_clear, color);
+            ql_gl_clear(gl_clear, color, colors, stencil);
         }
     }
 
@@ -13124,7 +13152,7 @@ namespace
 
     // A colour clear of `target` to be made where it stands in the run: carried by the next draw into it. One pending
     // for another target is made first. False: GL clears it (the run handed over).
-    bool ql_run_defer_clear(LLRenderTarget* target, const LLColor4& color)
+    bool ql_run_defer_clear(LLRenderTarget* target, const LLColor4& color, bool colors, bool stencil)
     {
         if (!sQLRunOpen)
         {
@@ -13132,14 +13160,21 @@ namespace
         }
         if (sQLPendingClear && sQLPendingClear != target)
         {
-            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor, sQLPendingColors, sQLPendingStencil))
             {
                 ql_run_hand_over();  // which GL-clears it after
                 return false;
             }
         }
-        sQLPendingClear = target;
-        sQLPendingColor = color;
+        else if (sQLPendingClear == target)
+        {
+            colors  = colors || sQLPendingColors;  // two clears of one target before a draw: both
+            stencil = stencil || sQLPendingStencil;
+        }
+        sQLPendingClear   = target;
+        sQLPendingColor   = color;
+        sQLPendingColors  = colors;
+        sQLPendingStencil = stencil;
         return true;
     }
 
@@ -13149,16 +13184,18 @@ namespace
                      U32 vertex_count, const QLVulkanPresenter::GpMesh* mesh = nullptr)
     {
         LLColor4 color;
-        bool     clear = false;
+        bool     clear = false, clear_stencil = false, pending = false;
         if (sQLPendingClear)
         {
             if (sQLPendingClear == target)
             {
-                clear = true;
-                color = sQLPendingColor;
+                pending       = true;
+                clear         = sQLPendingColors;
+                clear_stencil = sQLPendingStencil;
+                color         = sQLPendingColor;
                 sQLPendingClear = nullptr;
             }
-            else if (ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            else if (ql_clear_draw(sQLPendingClear, sQLPendingColor, sQLPendingColors, sQLPendingStencil))
             {
                 sQLPendingClear = nullptr;
             }
@@ -13167,11 +13204,15 @@ namespace
                 return false;  // the caller hands over, and GL clears it then
             }
         }
-        const bool drawn = ql_gl_program_draw(shader, target, clear, color, state, positions, vertex_count, mesh);
-        if (!drawn && clear)
+        QLGLState with_clear = state;
+        with_clear.clear_stencil = clear_stencil;
+        const bool drawn = ql_gl_program_draw(shader, target, clear, color, with_clear, positions, vertex_count, mesh);
+        if (!drawn && pending)
         {
-            sQLPendingClear = target;  // still to be made: GL's, after the hand-over, before GL's draw
-            sQLPendingColor = color;
+            sQLPendingClear   = target;  // still to be made: GL's, after the hand-over, before GL's draw
+            sQLPendingColor   = color;
+            sQLPendingColors  = clear;
+            sQLPendingStencil = clear_stencil;
         }
         return drawn;
     }
@@ -13182,7 +13223,7 @@ namespace
     bool ql_run_is_open() { return false; }
     bool ql_run_begin() { return false; }
     void ql_run_hand_over() {}
-    bool ql_run_defer_clear(LLRenderTarget*, const LLColor4&) { return false; }
+    bool ql_run_defer_clear(LLRenderTarget*, const LLColor4&, bool, bool) { return false; }
 }
 #endif
 
@@ -15676,11 +15717,18 @@ bool ql_vulkan_stage_active()
 // stands among Vulkan's draws. Anything else, or no run, is GL's clear (after a hand-over).
 void ql_vulkan_clear(LLRenderTarget* target, U32 mask)
 {
-    // The default mask is the colours alone where the target has no depth of its own or shared.
-    const bool colours_only = mask == GL_COLOR_BUFFER_BIT ||
-                              (mask == 0xFFFFFFFF && target && !target->getDepth() && !target->getAttachedDepth());
-    if (sQLStage.active && ql_run_is_open() && target && colours_only && target->getNumTextures() &&
-        ql_run_defer_clear(target, gGL.getClearColor()))
+    // The default mask is the colours alone where the target has no depth of its own or shared. A stencil clear is
+    // Vulkan's where GL's would write every bit of it (its write mask whole) and no depth is cleared with it.
+    if (mask == 0xFFFFFFFF && target && !target->getDepth() && !target->getAttachedDepth())
+    {
+        mask = GL_COLOR_BUFFER_BIT;
+    }
+    const bool colors  = (mask & GL_COLOR_BUFFER_BIT) != 0;
+    const bool stencil = (mask & GL_STENCIL_BUFFER_BIT) != 0;
+    const bool vulkan_mask = (mask & ~(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) == 0 && (colors || stencil) &&
+                             (!stencil || (gGL.getStencilMask() & 0xFF) == 0xFF);
+    if (sQLStage.active && ql_run_is_open() && target && vulkan_mask && target->getNumTextures() &&
+        ql_run_defer_clear(target, gGL.getClearColor(), colors, stencil))
     {
         return;
     }
@@ -15707,10 +15755,6 @@ static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 
     if (!shader || !target)
     {
         ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
-    }
-    else if (LLGLState::qlEnabled(GL_STENCIL_TEST))
-    {
-        ql_lighting_kept(shader->mName + ": tests the stencil (not yet in Vulkan)");
     }
     else if (!vb || !count || !LLNavShapeVBOManager::shortIndices(vb) || !vb->hasDataType(LLVertexBuffer::TYPE_VERTEX))
     {
@@ -15793,10 +15837,6 @@ void ql_vulkan_screen_triangle()
         if (!shader || !target)
         {
             ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
-        }
-        else if (LLGLState::qlEnabled(GL_STENCIL_TEST))
-        {
-            ql_lighting_kept(shader->mName + ": tests the stencil (not yet in Vulkan)");
         }
         else if (ql_stage_run())
         {
