@@ -568,7 +568,9 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         }
         // The pools after the lighting, before and between the alpha pools, and the haze.
         for (LLGLSLShader* program : { &gDeferredFullbrightProgram, &gDeferredFullbrightShinyProgram, &gHazeProgram,
-                                       &gHazeOnWaterProgram, &gDeferredAvatarAlphaProgram })
+                                       &gHazeOnWaterProgram, &gDeferredAvatarAlphaProgram,
+                                       // the multi-material batches' glow, after the lighting as the scalar ones
+                                       &gPBRGlowIndexedProgram, &gDeferredEmissiveIndexedProgram })
         {
             program->mQLWanted = ql_lighting;
         }

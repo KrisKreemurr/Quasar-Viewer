@@ -3884,9 +3884,9 @@ S32 LLImageGL::getStorageInternalFormat() const
     return isCompressed() ? mFormatPrimary : mFormatInternal;
 }
 
-// Quasar: the storage a texture is made with where Vulkan shares the textures (QuasarVulkanTextures). Vulkan has no
-// three-byte formats to share, so an RGB texture is made RGBA (GL fills the alpha with one as it uploads RGB), and
-// Vulkan's draws can read it rather than leave it, and every draw after it, to GL.
+// Quasar: the storage Vulkan gives a texture of `format` (QLVulkanPresenter's texAllocate): no three-byte formats, so
+// an RGB texture is stored RGBA. A copy of an RGB texture GL keeps is made so, and filled by a blit, which crosses
+// formats where glCopyImageSubData cannot.
 static S32 ql_storage_format(S32 format)
 {
     if (gQLExternalTexturesWanted && gQLExternalStorage)
@@ -3912,7 +3912,7 @@ void LLImageGL::allocateTextureStorage(S32 width, S32 height, bool has_mips)
 
     mMipLevels = has_mips ? calcMipLevelCount(width, height) : 1;
 
-    const S32 storage_format = ql_storage_format(getStorageInternalFormat());
+    const S32 storage_format = getStorageInternalFormat();
     assertStorageAllocatable(mTarget, storage_format);
 
     // Quasar: the storage from the external provider's shared memory (QuasarVulkanTextures), on the main thread, where
@@ -3965,7 +3965,7 @@ bool LLImageGL::storageFits(S32 width, S32 height) const
 
     return mStorage.mWidth == width
         && mStorage.mHeight == height
-        && mStorage.mFormat == ql_storage_format(getStorageInternalFormat())
+        && mStorage.mFormat == getStorageInternalFormat()
         && mStorage.mLevels == (mUseMipMaps ? calcMipLevelCount(width, height) : 1);
 }
 
@@ -4264,6 +4264,7 @@ namespace
         U32        mCopy = 0;
         S32        mWidth = 0, mHeight = 0, mLevels = 0, mFormat = 0;
         U32        mMissFrame = 0;    // a name found to have no image of this class: not searched for again this frame
+        U64        mFailedStamp = 0;  // the contents a copy could not be made of: not tried again until they change
     };
     std::unordered_map<U32, QLCopy> sQLCopies;  // by the source's GL name
 
@@ -4335,6 +4336,10 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
     }
     const StorageDesc& storage = c.mImage->mStorage;
     const U64 stamp = c.mImage->getContentStamp();
+    if (!c.mCopy && stamp && c.mFailedStamp == stamp)
+    {
+        return 0;  // no storage for it in Vulkan's memory last time: not asked again every frame
+    }
     const bool same_shape = c.mCopy && c.mWidth == storage.mWidth && c.mHeight == storage.mHeight &&
                             c.mLevels == storage.mLevels && c.mFormat == storage.mFormat;
     if (same_shape && c.mStamp == stamp)
@@ -4372,7 +4377,8 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
         {
             ql_drop_copy(c);
             restore();
-            c.mMissFrame = LLImageGL::sFrameCount + 1;
+            c.mMissFrame   = LLImageGL::sFrameCount + 1;
+            c.mFailedStamp = stamp;
             return 0;
         }
         c.mWidth  = storage.mWidth;
