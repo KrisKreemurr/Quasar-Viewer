@@ -8414,8 +8414,9 @@ struct QLVulkanPresenter::Impl
     std::vector<GpProgram> mGpPrograms;
     std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
 
-    static constexpr U32 GP_SLOTS = 16;  // runs in flight: a frame's lighting, alpha and post chain take several each
-    static constexpr VkDeviceSize GP_SLOT_BYTES = 8ull << 20;  // a run's blocks and vertices (0.1 MB with blocks reused)
+    // Runs in flight: a frame's scene, lighting, alpha and post chain take several each, and three frames are queued.
+    static constexpr U32 GP_SLOTS = 64;
+    static constexpr VkDeviceSize GP_SLOT_BYTES = 3ull << 20;  // a run's blocks and vertices (0.1 MB with blocks reused)
     static constexpr U32          GP_SETS = 1024;               // a pass's draws
     static constexpr VkDeviceSize GP_NONE = ~(VkDeviceSize)0;  // no room
     struct GpSlot
@@ -9794,7 +9795,9 @@ struct QLVulkanPresenter::Impl
         GpSlot& slot = mGpSlots[mGpNextSlot];
         if (slot.submitted)
         {
-            if (vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS)
+            // The oldest run: frames back, so all but done. Waited for (a little), rather than leave GL the whole run.
+            if (vkGetFenceStatus(mDevice, slot.fence) != VK_SUCCESS &&
+                vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, 50ull * 1000 * 1000) != VK_SUCCESS)
             {
                 gpWhy("all its submission slots still busy");
                 return false;

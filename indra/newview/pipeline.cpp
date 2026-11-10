@@ -5909,7 +5909,7 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
         const bool ql_scene = ql_scene_stage() && !gCubeSnapshot;
         if (ql_scene)
         {
-            ql_vulkan_stage_begin_reopening("scene", 16);
+            ql_vulkan_stage_begin_reopening("scene", 8);
         }
 
         pool_set_t::iterator iter1 = mPools.begin();
