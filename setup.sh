@@ -57,6 +57,13 @@ if ! make windows 2>&1 | tee ~/quasar-build.log; then
 fi
 rm -rf /mnt/c/dev/QuasarSlipstream
 7z x -o/mnt/c/dev/QuasarSlipstream build-windows-x86_64/package/*_win64.zip >/dev/null
+# A desktop shortcut straight to the exe, wherever the zip put it
+EXE=$(find /mnt/c/dev/QuasarSlipstream -maxdepth 3 -iname "SlipstreamViewer.exe" | head -1)
+if [ -n "$EXE" ]; then
+  WEXE=$(wslpath -w "$EXE")
+  powershell.exe -NoProfile -Command "\$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\\Quasar (Slipstream build).lnk'); \$s.TargetPath='$WEXE'; \$s.WorkingDirectory=(Split-Path '$WEXE'); \$s.Save()" >/dev/null 2>&1 || true
+  echo "Viewer: $WEXE  (shortcut on your desktop: Quasar (Slipstream build))"
+fi
 # A double-click rebuild for Windows, so Linux never has to be opened again
 printf '@echo off\r\nwsl -d Ubuntu-24.04 -- bash -lc "~/quasar-slipstream/setup.sh"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
 echo "Done: C:\\dev\\QuasarSlipstream  (next time, double-click C:\\dev\\Build-Quasar.bat)"
