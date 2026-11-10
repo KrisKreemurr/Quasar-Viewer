@@ -9289,6 +9289,7 @@ struct QLVulkanPresenter::Impl
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
         assembly.topology = d.topology == GL_TRIANGLE_STRIP ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
                             : d.topology == GL_TRIANGLE_FAN ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN
+                            : d.topology == GL_POINTS       ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                                                             : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         VkPipelineViewportStateCreateInfo viewport_state = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
         viewport_state.viewportCount = 1;
@@ -9904,11 +9905,8 @@ struct QLVulkanPresenter::Impl
             gpWhy(p.name + ": no vertices");
             return false;
         }
-        if (p.outputs > d.color_count)
-        {
-            gpWhy(llformat("%s writes %u colours into a target of %u", p.name.c_str(), p.outputs, d.color_count));
-            return false;
-        }
+        // A program writing more colours than the target has (a depth copy's colour into a target of depth alone): the
+        // writes past its attachments go nowhere, as GL's to draw buffers it has none for.
         if (d.bounds_max > d.bounds_min && (!mHasDepthBounds || !d.depth))
         {
             gpWhy(p.name + ": held to depth bounds, which this device or target has not");

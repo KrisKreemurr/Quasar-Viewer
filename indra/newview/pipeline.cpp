@@ -1083,6 +1083,7 @@ bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens);
 void ql_vulkan_clear(LLRenderTarget* target, U32 mask);
 void ql_vulkan_screen_triangle();
 bool ql_vulkan_stage_active();
+bool ql_vulkan_draw_positions(const F32* positions, U32 count, U32 gl_mode);
 
 // Quasar: whether what Vulkan's lighting reads is made in Vulkan's memory (QuasarVulkanLighting, read at start), once
 // the render target self-test has passed. Also the reflection probes' (LLReflectionMapManager).
@@ -9470,8 +9471,25 @@ void LLPipeline::generateExposure(LLRenderTarget* src, LLRenderTarget* dst, bool
                                             EXPOSURE_HISTOGRAM_MIN_EV, bins_per_ev);
 
         mExposureHistogramVB->setBuffer();
-        ql_vulkan_stage_gl();  // Quasar: points from a buffer of their own, GL's for now
-        mExposureHistogramVB->drawArrays(LLRender::POINTS, 0, mExposureHistogramVB->getNumVerts());
+        // Quasar: the same points, from a copy the CPU keeps, Vulkan's where a stage is open (QuasarVulkanLighting).
+        static std::vector<F32> histogram_points;
+        if (histogram_points.empty())
+        {
+            for (U32 y = 0; y < EXPOSURE_METER_HEIGHT; ++y)
+            {
+                for (U32 x = 0; x < EXPOSURE_METER_WIDTH; ++x)
+                {
+                    for (F32 part : { 0.f, 1.f })
+                    {
+                        histogram_points.insert(histogram_points.end(), { (F32)x, (F32)y, part });
+                    }
+                }
+            }
+        }
+        if (!ql_vulkan_draw_positions(histogram_points.data(), (U32)histogram_points.size() / 3, GL_POINTS))
+        {
+            mExposureHistogramVB->drawArrays(LLRender::POINTS, 0, mExposureHistogramVB->getNumVerts());
+        }
 
         gExposureHistogramProgram.unbind();
         gGL.setSceneBlendType(LLRender::BT_ALPHA);
@@ -12786,7 +12804,7 @@ namespace
             Recording() { sQLRecording = true; }
             ~Recording() { sQLRecording = was; }
         } recording;
-        if (!target || !target->getNumTextures())
+        if (!target || (!target->getNumTextures() && !target->getAttachedDepth()))
         {
             ql_lighting_kept(shader.mName + ": no target");
             return false;
@@ -15852,6 +15870,35 @@ void ql_vulkan_screen_triangle()
 #endif
     gPipeline.mScreenTriangleVB->setBuffer();
     gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+}
+
+// A draw of `count` vertices from positions the CPU holds (three floats each), in GL's `gl_mode`, with what GL has bound
+// now: Vulkan's where a stage is active and it can. False: GL draws it (the run handed over).
+bool ql_vulkan_draw_positions(const F32* positions, U32 count, U32 gl_mode)
+{
+#if QL_VULKAN_SHADOWS
+    if (!sQLStage.active)
+    {
+        return false;
+    }
+    LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
+    LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
+    bool drawn = false;
+    if (!shader || !target)
+    {
+        ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
+    }
+    else if (ql_stage_run())
+    {
+        QLGLState state = ql_gl_state_now();
+        state.topology  = gl_mode;
+        drawn = ql_run_draw(*shader, target, state, positions, count);
+    }
+    return ql_stage_drawn(drawn);
+#else
+    (void)positions; (void)count; (void)gl_mode;
+    return false;
+#endif
 }
 
 // The hooks llrender calls (qlglwork.h), set once.

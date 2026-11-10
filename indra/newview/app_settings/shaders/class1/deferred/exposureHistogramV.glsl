@@ -74,4 +74,7 @@ void main()
     gl_Position = (w > 0.0 && L > 0.0) ? vec4((bin + 0.5) / BINS * 2.0 - 1.0, 0.0, 0.0, 1.0)
                                        : vec4(2.0, 2.0, 0.0, 1.0);
     vary_weight_log = vec2(w, w * ev);
+    // Quasar: the size GL draws points at here, stated for Vulkan, which reads it from the shader (GL ignores it while
+    // GL_PROGRAM_POINT_SIZE is off).
+    gl_PointSize = 1.0;
 }
