@@ -286,7 +286,8 @@ public:
     };
     static bool gbufferTerrain(const TerrainDraw& draw);
     static std::string terrainInfo();
-    static bool gbufferEnd();
+    // carry_run: the open run of GL's programs (glPassBegin) is handed over with these draws, ahead of them, and closed.
+    static bool gbufferEnd(bool carry_run = false);
     static void gbufferAbandon();
     static std::string gbufferInfo();
 

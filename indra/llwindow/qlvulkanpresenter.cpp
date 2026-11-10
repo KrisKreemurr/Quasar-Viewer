@@ -8096,15 +8096,26 @@ struct QLVulkanPresenter::Impl
     }
 
     // The face's draws, over what GL drew of its G-buffer: one hand-over, waited for on the GPU by GL before it lights.
-    bool gbufferEnd()
+    // carry_run: the open pass of GL's programs (gpPass, the scene's leftovers) goes in this hand-over, ahead of the
+    // G-buffer's draws, with one GL signal and one wait for both; where there is nothing of the G-buffer's to submit,
+    // it is handed over by itself first. Either way it is closed after.
+    bool gbufferEnd(bool carry_run = false)
     {
         if (!mGbInPass)
         {
+            if (carry_run)
+            {
+                gpPassEnd();
+            }
             return false;
         }
         mGbInPass = false;
         if (mGbDraws.empty() && mTrQueued.empty())
         {
+            if (carry_run)
+            {
+                gpPassEnd();
+            }
             return true;
         }
         LL_PROFILE_ZONE_NAMED("vulkan probe draws");
@@ -8120,9 +8131,20 @@ struct QLVulkanPresenter::Impl
             mShMergeFailed = !merged;
         }
         mShMergeNext = false;
+        // The scene's run of GL's programs, closed for this submission (QuasarVulkanSceneStage).
+        VkCommandBuffer     gp_cmd = VK_NULL_HANDLE;
+        std::vector<GLuint> gp_names;
+        const bool          gp_carried = carry_run && gpCarry(gp_cmd, gp_names);
         // What GL hands over: the arena, the attachments, and every texture drawn with (once each); and the shadows'.
         std::vector<GLuint> textures(target.names, target.names + target.colors + 1);
         textures.insert(textures.end(), mGbPassTextures.begin(), mGbPassTextures.end());
+        for (GLuint name : gp_names)
+        {
+            if (std::find(textures.begin(), textures.end(), name) == textures.end())
+            {
+                textures.push_back(name);
+            }
+        }
         const std::vector<VkImage>& texture_images = mGbPassImages;
         std::vector<GLuint> gl_buffers = { mGbArena.gl };
         if (merged && sShSignalObjects)
@@ -8301,9 +8323,19 @@ struct QLVulkanPresenter::Impl
         submit.waitSemaphoreCount   = 1;
         submit.pWaitSemaphores      = &mGbGLDoneVK;
         submit.pWaitDstStageMask    = &wait_stage;
-        // The shadows' commands first in the batch: one wait on GL, one signal back.
-        const VkCommandBuffer submitted[2] = { merged ? sh.cmd : slot.cmd, slot.cmd };
-        submit.commandBufferCount   = merged ? 2 : 1;
+        // The scene's run first, then the shadows' commands, then the G-buffer's: one wait on GL, one signal back.
+        VkCommandBuffer submitted[3];
+        U32 submitted_count = 0;
+        if (gp_carried)
+        {
+            submitted[submitted_count++] = gp_cmd;
+        }
+        if (merged)
+        {
+            submitted[submitted_count++] = sh.cmd;
+        }
+        submitted[submitted_count++] = slot.cmd;
+        submit.commandBufferCount   = submitted_count;
         submit.pCommandBuffers      = submitted;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores    = &mGbVKDoneVK;
@@ -8311,6 +8343,10 @@ struct QLVulkanPresenter::Impl
         {
             LL_PROFILE_ZONE_NAMED("vulkan probe draws - vk submit");
             result = vkQueueSubmit(mQueue, 1, &submit, slot.fence);
+        }
+        if (gp_carried)
+        {
+            gpCarried(result);
         }
         if (merged)
         {
@@ -10412,18 +10448,10 @@ struct QLVulkanPresenter::Impl
         mGpInPass = false;
     }
 
-    bool gpPassEnd()
+    // The pass's commands closed: its render pass ended, every image it took given back to GL's queue, and the arena;
+    // the command buffer ended. The pass is no longer recorded (its slot, names and arena use stand for the submission).
+    void gpFinishCommands()
     {
-        if (!mGpInPass)
-        {
-            return false;
-        }
-        if (!mGpRecorded)
-        {
-            gpPassAbandon();
-            return true;
-        }
-        LL_PROFILE_ZONE_NAMED("vulkan gl programs");
         gpEndRenderPass();
         GpSlot& slot = mGpSlots[mGpSlot];
         // Back to GL's queue, every image taken.
@@ -10454,6 +10482,62 @@ struct QLVulkanPresenter::Impl
         }
         vkEndCommandBuffer(slot.cmd);
         mGpInPass = false;
+    }
+
+    // The open pass carried by the G-buffer's hand-over (gbufferEnd): its commands closed for that submission, which
+    // waits for GL's signal over its names (and the arena, where it read it) too. False: nothing to carry.
+    bool gpCarry(VkCommandBuffer& cmd, std::vector<GLuint>& names)
+    {
+        if (!mGpInPass)
+        {
+            return false;
+        }
+        if (!mGpRecorded)
+        {
+            gpPassAbandon();
+            return false;
+        }
+        gpFinishCommands();
+        vkResetFences(mDevice, 1, &mGpSlots[mGpSlot].fence);
+        cmd   = mGpSlots[mGpSlot].cmd;
+        names = mGpNames;
+        return true;
+    }
+
+    // After the carrying submission: the slot's fence signalled once it is done, or the runner stopped where it failed.
+    void gpCarried(VkResult result)
+    {
+        GpSlot& slot = mGpSlots[mGpSlot];
+        if (result == VK_SUCCESS)
+        {
+            result = vkQueueSubmit(mQueue, 0, nullptr, slot.fence);
+        }
+        if (result != VK_SUCCESS)
+        {
+            mGpReady = false;
+            mGpNote  = llformat("stopped: a pass the G-buffer's hand-over carried could not be submitted (VkResult %d)",
+                                (S32)result);
+            LL_WARNS("Vulkan") << "GL programs in Vulkan " << mGpNote << LL_ENDL;
+            return;
+        }
+        slot.submitted = true;
+        ++mGpPassesNow;
+    }
+
+    bool gpPassEnd()
+    {
+        if (!mGpInPass)
+        {
+            return false;
+        }
+        if (!mGpRecorded)
+        {
+            gpPassAbandon();
+            return true;
+        }
+        LL_PROFILE_ZONE_NAMED("vulkan gl programs");
+        gpFinishCommands();
+        GpSlot& slot = mGpSlots[mGpSlot];
 
         const std::vector<GLenum> layouts(mGpNames.size(), GL_LAYOUT_GENERAL_EXT);
         std::vector<GLuint> gl_buffers;
@@ -12243,9 +12327,9 @@ std::string QLVulkanPresenter::terrainInfo()
 }
 
 // static
-bool QLVulkanPresenter::gbufferEnd()
+bool QLVulkanPresenter::gbufferEnd(bool carry_run)
 {
-    return sActive && sActive->gbufferEnd();
+    return sActive && sActive->gbufferEnd(carry_run);
 }
 
 // static

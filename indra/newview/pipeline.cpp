@@ -5981,8 +5981,7 @@ void LLPipeline::renderGeomDeferred(LLCamera& camera, bool do_occlusion)
 
         if (ql_scene)
         {
-            ql_vulkan_stage_end();
-            ql_vulkan_stage_gl();  // the scene's run to the GPU before the G-buffer's own draws (for now)
+            ql_vulkan_stage_end();  // its run goes with the G-buffer's own draws (ql_vulkan_probe_draws_end)
         }
 
         // Quasar: Vulkan's draws of the face's simple prims, over what GL drew, before the stars test against it. Where
@@ -13203,6 +13202,17 @@ namespace
         }
     }
 
+    // Whether the open run can go in another hand-over as it stands (the G-buffer's: QLVulkanPresenter::gbufferEnd), with
+    // no clear still to be made in it; and, once it has gone, closed without a hand-over of its own.
+    bool ql_run_carriable()
+    {
+        return sQLRunOpen && !sQLHandingOver && !sQLPendingClear;
+    }
+    void ql_run_carried()
+    {
+        sQLRunOpen = false;
+    }
+
     // llrender's call before GL's work on the GPU (qlglwork.h): the run handed over first, unless the work is the run's.
     void ql_run_before_gl_work()
     {
@@ -13283,6 +13293,8 @@ namespace
 namespace
 {
     bool ql_run_is_open() { return false; }
+    bool ql_run_carriable() { return false; }
+    void ql_run_carried() {}
     bool ql_run_begin() { return false; }
     void ql_run_hand_over() {}
     bool ql_run_defer_clear(LLRenderTarget*, const LLColor4&, bool, bool) { return false; }
@@ -15520,7 +15532,13 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 
 static QLVulkanLost ql_vulkan_probe_draws_end()
 {
-    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
+    // Quasar: an open run of GL's draws in Vulkan (the scene's leftovers) goes to the GPU with this submission, ahead of
+    // its draws, where it can; otherwise by itself, before it.
+    const bool carry = sQLProbeDrawsOpen && ql_run_carriable();
+    if (!carry)
+    {
+        ql_vulkan_stage_gl();
+    }
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
     const bool materials_taken = gQLVulkanMaterialLeftovers != nullptr;
@@ -15541,8 +15559,13 @@ static QLVulkanLost ql_vulkan_probe_draws_end()
     }
     sQLProbeDrawsOpen = false;
 #if QL_VULKAN_SHADOWS
-    gGL.flush();
-    if (!QLVulkanPresenter::gbufferEnd())
+    gGL.flush();  // where it draws, llrender hands the run over first
+    const bool carry_now = carry && ql_run_is_open();
+    if (carry_now)
+    {
+        ql_run_carried();
+    }
+    if (!QLVulkanPresenter::gbufferEnd(carry_now))
     {
         bool any_material = false;
         for (U32 m = 0; m < QL_MATERIAL_PASSES * (rigged_materials ? 2 : 1); ++m)
