@@ -3,7 +3,10 @@
 //   test 0, shadowAlphaMaskF.glsl (PASS_ALPHA_MASK): the texture's alpha against the cutoff less half an 8-bit step,
 //           then times the vertex colour's alpha against 0.05;
 //   test 1, the same under IS_FULLBRIGHT (PASS_FULLBRIGHT_ALPHA_MASK): no vertex alpha, still the 0.05;
-//   test 2, treeShadowF.glsl (the legacy material masks): the cutoff test alone.
+//   test 2, treeShadowF.glsl (the legacy material masks): the cutoff test alone;
+//   test 3, shadowAlphaMaskF.glsl stippled (PASS_ALPHA, the blended casters): the texture's alpha against the cutoff
+//           (the shadow's own, no half step), times the vertex alpha against 0.05, then below 0.88 every other texel
+//           of the map left out in a checkerboard: a half-density shadow.
 // The masked passes never stipple. The texture is its tile of the atlas, repeated as GL's wrap repeats it, sampled
 // linearly half a texel inside the tile's edges so no neighbour bleeds in.
 
@@ -21,6 +24,23 @@ void main()
     vec2 uv = fract(vary_texcoord0);
     vec2 at = (vary_tile.xy + 0.5 + uv * (vary_tile.z - 1.0)) / ATLAS_SIZE;
     float alpha = textureLod(atlas, at, 0.0).a;
+    if (vary_test > 2.5)
+    {
+        if (alpha < vary_tile.w)
+        {
+            discard;
+        }
+        alpha *= vertex_alpha;
+        if (alpha < 0.05)
+        {
+            discard;
+        }
+        if (alpha < 0.88 && ((int(gl_FragCoord.x) + int(gl_FragCoord.y)) & 1) == 0)
+        {
+            discard;
+        }
+        return;
+    }
     if (alpha < vary_tile.w - 0.001953125)
     {
         discard;

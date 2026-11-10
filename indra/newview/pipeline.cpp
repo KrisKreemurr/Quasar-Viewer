@@ -14786,7 +14786,12 @@ struct QLMaskLeftovers
 {
     bool mTaken = false;  // Vulkan drew this map's masked passes; GL draws only what is left here
     std::vector<LLDrawInfo*> mLists[QL_MASK_PASS_COUNT][2];
+    // The blended casters (PASS_ALPHA, renderAlphaObjects') Vulkan left, unrigged and rigged: test 3, stippled.
+    std::vector<LLDrawInfo*> mAlpha[2];
 };
+// The blended casters' pass, after the masked ones: shadowAlphaMaskF with its stipple (qlshadowmask.frag's test 3) at
+// the shadow's own cutoff; rigged and unrigged in one render map, told apart by the draw's avatar.
+static constexpr QLMaskPass QL_ALPHA_SHADOW_PASS = { LLRenderPass::PASS_ALPHA, 3, true };
 
 static S32 ql_mask_pass_index(U32 type)
 {
@@ -16311,6 +16316,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         lists[0].clear();
         lists[1].clear();
     }
+    masked_leftovers.mAlpha[0].clear();
+    masked_leftovers.mAlpha[1].clear();
 #if QL_VULKAN_SHADOWS
     QLVulkanPresenter::shadowFrame(LLFrameTimer::getFrameCount());
     static LLCachedControl<bool> signal_objects(gSavedSettings, "QuasarVulkanShadowSignalObjects", true);
@@ -16574,22 +16581,39 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
             U64 last_skin = 0;
             unsigned palette = ~0u;
             bool skip_skin = true;
-            for (U32 p = 0; p < QL_MASK_PASS_COUNT; ++p)
+            for (U32 p = 0; p <= QL_MASK_PASS_COUNT; ++p)
             {
-                const QLMaskPass& pass = QL_MASK_PASSES[p];
-                const U32 type = pass.mType + (rig ? 1 : 0);
+                // The last: the blended casters (QL_ALPHA_SHADOW_PASS).
+                const bool alpha_pass = p == QL_MASK_PASS_COUNT;
+                const QLMaskPass& pass = alpha_pass ? QL_ALPHA_SHADOW_PASS : QL_MASK_PASSES[p];
+                const U32 type = alpha_pass ? pass.mType : pass.mType + (rig ? 1 : 0);
                 auto* end = gPipeline.endRenderMap(type);
                 for (LLCullResult::drawinfo_iterator i = gPipeline.beginRenderMap(type); i != end;)
                 {
                     LLDrawInfo* params = *i;
                     LLCullResult::increment_iterator(i, end);
+                    if (alpha_pass && (!params || rig != (params->mAvatar != nullptr)))
+                    {
+                        continue;  // the other half's (renderAlphaObjects tells them apart by the avatar)
+                    }
+                    auto gl_draws = [&]()
+                    {
+                        (alpha_pass ? masked_leftovers.mAlpha[r] : masked_leftovers.mLists[p][r]).push_back(params);
+                    };
                     // As pushMaskBatches passes over them: nothing to draw, or a multi-material batch the indexed
-                    // pass draws.
-                    if (!params || !params->mCount || params->mMaterialSlotList.size() > 1)
+                    // pass draws. The blended ones have no indexed pass, and PBR's its own program: GL's.
+                    if (!params || !params->mCount)
                     {
                         continue;
                     }
-                    auto gl_draws = [&]() { masked_leftovers.mLists[p][r].push_back(params); };
+                    if (params->mMaterialSlotList.size() > 1 || (alpha_pass && params->mGLTFMaterial))
+                    {
+                        if (alpha_pass)
+                        {
+                            gl_draws();
+                        }
+                        continue;
+                    }
                     const bool batched = pass.mBatchTextures && params->mTextureList.size() > 1;
                     if (!batched && params->mTexture.isNull())
                     {
@@ -16692,7 +16716,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                         // A mesh without colours is placed without them: only a test that reads none draws it.
                         last_colors = colors;
                     }
-                    if (!last_in_arena || (pass.mTest == 0 && !last_colors))
+                    if (!last_in_arena || ((pass.mTest == 0 || pass.mTest == 3) && !last_colors))
                     {
                         ql_mask_why(!last_in_arena ? QL_MASK_ARENA : QL_MASK_COLORS);
                         gl_draws();
@@ -16710,7 +16734,8 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                                                     ? (const F32*)params->mTextureMatrix->mMatrix
                                                     : nullptr;
                     if (!QLVulkanPresenter::shadowDrawMasked(mvp.getF32ptr(), rig ? palette : ~0u, tile, texture_matrix,
-                                                             params->mAlphaMaskCutoff, pass.mTest, base_vertex,
+                                                             alpha_pass ? ALPHA_BLEND_CUTOFF : params->mAlphaMaskCutoff,
+                                                             pass.mTest, base_vertex,
                                                              base_index + params->mOffset, params->mCount,
                                                              batch_count ? batch_tiles : nullptr, batch_count))
                     {
@@ -16945,6 +16970,67 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
         gGLLastMatrix = NULL;
     };
 
+    // The blended casters Vulkan left, as renderAlphaObjects draws them.
+    auto alpha_leftovers = [&](bool rigged)
+    {
+        gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        gGLLastMatrix = NULL;
+        const S32 sun_up = LLEnvironment::instance().getIsSunUp() ? 1 : 0;
+        const U32 target_width = LLRenderTarget::sCurResX;
+        const LLVOAvatar* last_avatar = nullptr;
+        U64 last_mesh = 0;
+        bool skip_last = false;
+        const LLVOAvatar* last_avatar_gltf = nullptr;
+        U64 last_mesh_gltf = 0;
+        bool skip_last_gltf = false;
+        LLFetchedGLTFMaterial* last_mat = nullptr;
+        LLViewerTexture* last_tex = nullptr;
+        LLGLSLShader* configured = nullptr;
+        const auto bind_caster = [&](LLGLSLShader& program, bool legacy)
+        {
+            program.bind(rigged);
+            LLGLSLShader* bound = LLGLSLShader::sCurBoundShaderPtr;
+            if (bound != configured)
+            {
+                configured = bound;
+                bound->uniform1i(LLShaderMgr::SUN_UP_FACTOR, sun_up);
+                bound->uniform1f(LLShaderMgr::DEFERRED_SHADOW_TARGET_WIDTH, (float)target_width);
+                if (legacy)
+                {
+                    bound->uniform1f(LLShaderMgr::DEFERRED_SHADOW_STIPPLE, 1.f);
+                }
+                bound->setMinimumAlpha(ALPHA_BLEND_CUTOFF);
+            }
+        };
+        for (LLDrawInfo* params : vulkan_masked.mAlpha[rigged ? 1 : 0])
+        {
+            if (params->mGLTFMaterial)
+            {
+                bind_caster(gDeferredShadowGLTFAlphaBlendProgram, false);
+                if (rigged)
+                {
+                    LLRenderPass::pushRiggedGLTFBatch(*params, last_avatar_gltf, last_mesh_gltf, skip_last_gltf,
+                                                      last_mat, last_tex);
+                }
+                else
+                {
+                    LLRenderPass::pushGLTFBatch(*params, last_mat, last_tex);
+                }
+                continue;
+            }
+            bind_caster(gDeferredShadowAlphaMaskProgram, true);
+            last_mat = nullptr;  // pushBatch clobbers texture units
+            last_tex = nullptr;
+            if (!rigged || mSimplePool->uploadMatrixPalette(params->mAvatar, params->mSkinInfo, last_avatar, last_mesh,
+                                                            skip_last))
+            {
+                mSimplePool->pushBatch(*params, true, true);
+            }
+        }
+        gGL.loadMatrix(LLViewerCamera::getCurrent().getModelview());
+        gGLLastMatrix = NULL;
+    };
+
     for (int j = 0; j < 2; ++j) // 0 -- static, 1 -- rigged
     {
         bool rigged = j == 1;
@@ -17079,7 +17165,14 @@ void LLPipeline::drawShadow(const LLMatrix4a& view, const LLMatrix4a& proj, LLCa
                 LL_PROFILE_ZONE_NAMED_CATEGORY_PIPELINE("shadow alpha blend");
                 LL_PROFILE_GPU_ZONE("shadow alpha blend");
                 const U32 blend_draws = LLRender::sDrawCalls;
-                renderAlphaObjects(rigged);
+                if (vulkan_casters && vulkan_masked.mTaken)
+                {
+                    alpha_leftovers(rigged);  // what Vulkan left of them
+                }
+                else
+                {
+                    renderAlphaObjects(rigged);
+                }
                 ql_shadow_part(QL_SHADOW_BLEND, blend_draws);
             }
 
