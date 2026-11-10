@@ -52,6 +52,7 @@
 #include <boost/unordered_map.hpp>
 
 #include "qlexternalstorage.h"
+#include "qlglwork.h"
 
 // Quasar: the provider of storage from another API's memory (qlexternalstorage.h), and where it is asked.
 QLExternalStorage* gQLExternalStorage = nullptr;
@@ -1917,6 +1918,7 @@ bool LLImageGL::setSubImageFromFrameBuffer(S32 fb_x, S32 fb_y, S32 x_pos, S32 y_
     if (gGL.getTextureSlot(0)->bind(this, false, true))
     {
         touchContents();
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x_pos, y_pos, fb_x, fb_y, width, height);
         mGLTextureCreated = true;
         stop_glerror();
@@ -2963,6 +2965,7 @@ bool LLImageGL::readBackRaw(S32 discard_level, LLImageRaw* imageraw, bool compre
         }
 
         const auto began = std::chrono::steady_clock::now();
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glGetTexImage(GL_TEXTURE_2D, gl_discard, mFormatPrimary, mFormatType, (GLvoid*)(imageraw->getData()));
         ++sReadbacks;
         sReadbackSeconds += std::chrono::duration<F64>(std::chrono::steady_clock::now() - began).count();
@@ -3954,6 +3957,7 @@ void LLImageGL::generateMipmaps(U32 target)
     // whatever sampler the last draw left on the slot. bindSampler dedups, so this is free
     // when the slot is already sampler-less.
     gGL.getTextureSlot(0)->bindSampler(0);
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glGenerateMipmap(target);
 }
 
@@ -4040,6 +4044,7 @@ bool LLImageGL::scaleDown(S32 desired_discard)
             // copy, which then reads back as sRGB. Pin it: trilinear to pull from the
             // source's own mip chain, clamp, and no decode.
             gGL.getTextureSlot(0)->bindSampler(gGL.getSampler(ALSamplers::TrilinearClamp));
+            qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
             glDrawArrays(GL_TRIANGLES, 0, 3);
 
             // Bind the new name and give it storage, then copy the rendered result out
@@ -4091,6 +4096,7 @@ bool LLImageGL::scaleDown(S32 desired_discard)
         }
 
         // read the desired mip out of the old texture into the PBO
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glGetTexImage(mTarget, mip, mFormatPrimary, mFormatType, nullptr);
 
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);

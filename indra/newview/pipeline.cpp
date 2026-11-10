@@ -31,6 +31,7 @@
 #include <atomic>
 
 #include "pipeline.h"
+#include "qlglwork.h"  // Quasar: llrender's hooks for Vulkan's runs
 #include <algorithm>
 #include <sstream>
 
@@ -804,6 +805,7 @@ void LLPipeline::applyRenderInputs()
     // as it is released, and names each for whoever acquires it. Nothing is trimmed until the user is logged in: the
     // login's frames draw no world, and the world's first frame takes what the reconcile readied for it rather than
     // building it mid-pass.
+    ql_vulkan_stage_gl();  // Quasar: nothing of last frame's Vulkan run left open into this one
     mTransientTargets.setValidation(gDebugGL);
     mTransientTargets.holdTrimming(LLStartUp::getStartupState() < STATE_STARTED);
     mTransientTargets.beginFrame();
@@ -1080,6 +1082,7 @@ static bool ql_vulkan_targets_wanted(std::optional<ALRenderResourcePlan::Pack> p
 bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens);
 void ql_vulkan_clear(LLRenderTarget* target, U32 mask);
 void ql_vulkan_screen_triangle();
+bool ql_vulkan_stage_active();
 
 // Quasar: whether what Vulkan's lighting reads is made in Vulkan's memory (QuasarVulkanLighting, read at start), once
 // the render target self-test has passed. Also the reflection probes' (LLReflectionMapManager).
@@ -6192,6 +6195,23 @@ void LLPipeline::renderGeomPostDeferred(LLCamera& camera)
     gGL.setSceneBlendType(LLRender::BT_ALPHA);
     gGL.setColorMask(true, false);
 
+    // Quasar: the pools after the lighting and the haze drawn by Vulkan where they can be (QuasarVulkanLighting), in
+    // the run the lighting left open; the alpha pools' stages sit inside this one.
+    struct QLPostDeferredStage
+    {
+        bool on = true;
+        QLPostDeferredStage() { ql_vulkan_stage_begin_reopening("after lighting", 6); }
+        void end()
+        {
+            if (on)
+            {
+                on = false;
+                ql_vulkan_stage_end();
+            }
+        }
+        ~QLPostDeferredStage() { end(); }
+    } ql_post_deferred_stage;
+
     pool_set_t::iterator iter1 = mPools.begin();
 
     if (gDebugGL || gDebugPipeline)
@@ -6300,6 +6320,8 @@ void LLPipeline::renderGeomPostDeferred(LLCamera& camera)
         iter1 = iter2;
         stop_glerror();
     }
+
+    ql_post_deferred_stage.end();  // the debug displays below are GL's
 
     if (!done_cutout_seed)
     {
@@ -10312,7 +10334,20 @@ void LLPipeline::copyColor(LLRenderTarget& dst, LLRenderTarget& src)
                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
         return;
     }
-    LLRenderTarget::drawCopy(dst, src, nullptr, gCopyProgram, *mScreenTriangleVB);
+    // LLRenderTarget::drawCopy's draw, through the screen triangle Vulkan takes where a stage is open (Quasar).
+    dst.bindTarget();
+    {
+        LLGLSColorMask color(true, true);
+        LLGLDepthTest no_depth(GL_FALSE, GL_FALSE);
+        LLGLDisable no_blend(GL_BLEND);
+        LLGLDisable no_cull(GL_CULL_FACE);
+        gCopyProgram.bind();
+        gCopyProgram.bindTexture(LLShaderMgr::DIFFUSE_MAP, &src, ALSamplers::PointClamp);
+        ql_vulkan_screen_triangle();
+        gCopyProgram.unbindTexture(LLShaderMgr::DIFFUSE_MAP);
+        gCopyProgram.unbind();
+    }
+    dst.flush();
 }
 
 void LLPipeline::copyColor(LLRenderTarget& dst, LLRenderTarget& src, const LLRect& rect)
@@ -10343,7 +10378,11 @@ void LLPipeline::copySceneDepth(LLRenderTarget& dst)
 
         // Cleared whole before it is drawn over. radeonsi makes a depth's tile metadata sampleable only at a whole
         // clear, once a sample has had to decompress it: a copy never cleared is decompressed for every frame's readers.
-        dst.clear(GL_DEPTH_BUFFER_BIT);
+        // Not where Vulkan draws the copy (Quasar): the draw writes every texel, and the clear would be GL's.
+        if (!ql_vulkan_stage_active())
+        {
+            dst.clear(GL_DEPTH_BUFFER_BIT);
+        }
 
         if (gCopyDepthProgram.isComplete())
         {
@@ -11606,11 +11645,6 @@ void LLPipeline::renderFinalize()
     // Edges come from rendering the cutout larger and averaging it down.
     const bool cutout = sCutoutRender;
 
-    if (hdr && !cutout)
-    {
-        copyScreenSpaceReflections(&mRT->screen, &mSceneMap);
-    }
-
     // Quasar: the post chain's passes drawn by Vulkan (QuasarVulkanLighting), from here to the final blit, which draws
     // into the window and stays GL's. Each pass Vulkan cannot draw is GL's, a hand-over before it; the passes after it
     // open a run again, as many times as given.
@@ -11631,6 +11665,7 @@ void LLPipeline::renderFinalize()
 
     if (hdr && !cutout)
     {
+        copyScreenSpaceReflections(&mRT->screen, &mSceneMap);
         generateLuminance(&mRT->screen, &mLuminanceMap);
 
         generateExposure(&mLuminanceMap, &mExposureMap);
@@ -12628,6 +12663,15 @@ namespace
     std::string sQLLightingWhy;
     U32         sQLLightingShare = 0;  // the draws of the stage Vulkan had last (U32_MAX: all)
 
+    // The Vulkan run open (QLVulkanPresenter::glPassBegin): the lighting's and every stage's, handed over when GL next
+    // needs the GPU (ql_run_hand_over). A clear still to be made in it, and whether a hand-over or a recording is under
+    // way (GL's work then is the run's own, not GL's after it).
+    bool            sQLRunOpen = false;
+    bool            sQLHandingOver = false;
+    bool            sQLRecording = false;
+    LLRenderTarget* sQLPendingClear = nullptr;
+    LLColor4        sQLPendingColor;
+
     bool ql_lighting_started()
     {
         static const bool started = gSavedSettings.getBOOL("QuasarVulkanLighting");
@@ -12693,6 +12737,12 @@ namespace
         st.cull_back  = cull && gGL.getCullFace() != GL_FRONT;
         st.cull_front = cull && gGL.getCullFace() != GL_BACK;
         gGL.qlViewport(st.viewport);
+        F64 zmin = 0.0, zmax = 1.0;
+        if (ALDepthBounds::qlCurrent(zmin, zmax))
+        {
+            st.bounds_min = (F32)zmin;
+            st.bounds_max = (F32)zmax;
+        }
         return st;
     }
 
@@ -12714,6 +12764,13 @@ namespace
                             const QLGLState& state, const F32* positions, U32 vertex_count,
                             const QLVulkanPresenter::GpMesh* mesh = nullptr)
     {
+        // What GL does while the draw is recorded (a flush of LLRender's batches, a texture's copy) is before the run.
+        struct Recording
+        {
+            bool was = sQLRecording;
+            Recording() { sQLRecording = true; }
+            ~Recording() { sQLRecording = was; }
+        } recording;
         if (!target || !target->getNumTextures())
         {
             ql_lighting_kept(shader.mName + ": no target");
@@ -12925,6 +12982,190 @@ namespace
         }
         return true;
     }
+
+    // A clear Vulkan makes into `target`: a draw of nothing into a pass that clears its colours first.
+    bool ql_clear_draw(LLRenderTarget* target, const LLColor4& color)
+    {
+        if (!target || !target->getNumTextures())
+        {
+            return false;
+        }
+        static const char vertex[]   = "#version 450\nvoid main() { gl_Position = vec4(0.0); }\n";
+        static const char fragment[] = "#version 450\nvoid main() { }\n";
+        static const QLVulkanPresenter::GpSource sources[2] = {
+            { GL_VERTEX_SHADER, "quasar clear (vertex)", vertex, sizeof(vertex) - 1 },
+            { GL_FRAGMENT_SHADER, "quasar clear (fragment)", fragment, sizeof(fragment) - 1 }
+        };
+        static const U64 key = 0x51C1EA2ull;  // no GL program has this address
+        const int program = QLVulkanPresenter::glProgram(key, 1, "Quasar clear", sources, 2);
+        if (program < 0)
+        {
+            ql_lighting_kept("the clear's program: " + QLVulkanPresenter::glProgramNote(key));
+            return false;
+        }
+        QLVulkanPresenter::GpDraw d;
+        d.program       = program;
+        d.white_texture = ALTextureSlot::sWhiteTexture.load();
+        d.color_count   = llmin(target->getNumTextures(), 4u);
+        for (U32 i = 0; i < d.color_count; ++i)
+        {
+            d.colors[i] = target->getTexture(i);
+        }
+        d.depth  = target->getAttachedDepth();
+        d.width  = target->getWidth();
+        d.height = target->getHeight();
+        d.clear  = true;
+        for (U32 i = 0; i < 4; ++i)
+        {
+            d.clear_color[i] = color.mV[i];
+        }
+        d.vertex_count = 0;
+        if (!QLVulkanPresenter::glDraw(d))
+        {
+            ql_lighting_kept(QLVulkanPresenter::glInfo());
+            return false;
+        }
+        return true;
+    }
+
+    // A clear GL makes, at `color`, of `target`'s colours: bound for it where it is not.
+    void ql_gl_clear(LLRenderTarget* target, const LLColor4& color)
+    {
+        const LLColor4 previous = gGL.getClearColor();
+        gGL.setClearColor(color);
+        const bool bound = LLRenderTarget::getCurrentBoundTarget() == target;
+        if (!bound)
+        {
+            target->bindTarget();
+        }
+        target->clear(GL_COLOR_BUFFER_BIT);
+        if (!bound)
+        {
+            target->flush();
+        }
+        gGL.setClearColor(previous);
+    }
+
+    bool ql_run_is_open()
+    {
+        return sQLRunOpen;
+    }
+
+    // The run open, or a new one begun.
+    bool ql_run_begin()
+    {
+        if (!sQLRunOpen)
+        {
+            sQLRunOpen = QLVulkanPresenter::glPassBegin();
+            if (!sQLRunOpen)
+            {
+                ql_lighting_kept(QLVulkanPresenter::glInfo());
+            }
+        }
+        return sQLRunOpen;
+    }
+
+    // What Vulkan recorded, handed to the GPU before GL's next work: a clear still to be made recorded first (or GL's,
+    // after it, where Vulkan cannot make it).
+    void ql_run_hand_over()
+    {
+        if (!sQLRunOpen || sQLHandingOver)
+        {
+            return;
+        }
+        sQLHandingOver = true;
+        LLRenderTarget* gl_clear = nullptr;
+        const LLColor4  color    = sQLPendingColor;
+        if (sQLPendingClear)
+        {
+            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            {
+                gl_clear = sQLPendingClear;
+            }
+            sQLPendingClear = nullptr;
+        }
+        sQLRunOpen = false;
+        if (!QLVulkanPresenter::glPassEnd())
+        {
+            ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
+        }
+        sQLHandingOver = false;
+        if (gl_clear)
+        {
+            ql_gl_clear(gl_clear, color);
+        }
+    }
+
+    // llrender's call before GL's work on the GPU (qlglwork.h): the run handed over first, unless the work is the run's.
+    void ql_run_before_gl_work()
+    {
+        if (sQLRunOpen && !sQLHandingOver && !sQLRecording && on_main_thread())
+        {
+            ql_run_hand_over();
+        }
+    }
+
+    // A colour clear of `target` to be made where it stands in the run: carried by the next draw into it. One pending
+    // for another target is made first. False: GL clears it (the run handed over).
+    bool ql_run_defer_clear(LLRenderTarget* target, const LLColor4& color)
+    {
+        if (!sQLRunOpen)
+        {
+            return false;
+        }
+        if (sQLPendingClear && sQLPendingClear != target)
+        {
+            if (!ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            {
+                ql_run_hand_over();  // which GL-clears it after
+                return false;
+            }
+        }
+        sQLPendingClear = target;
+        sQLPendingColor = color;
+        return true;
+    }
+
+    // A draw recorded in the open run, taking with it the clear pending for its target (one pending for another target
+    // made first). False: nothing recorded, the clear still pending.
+    bool ql_run_draw(LLGLSLShader& shader, LLRenderTarget* target, const QLGLState& state, const F32* positions,
+                     U32 vertex_count, const QLVulkanPresenter::GpMesh* mesh = nullptr)
+    {
+        LLColor4 color;
+        bool     clear = false;
+        if (sQLPendingClear)
+        {
+            if (sQLPendingClear == target)
+            {
+                clear = true;
+                color = sQLPendingColor;
+                sQLPendingClear = nullptr;
+            }
+            else if (ql_clear_draw(sQLPendingClear, sQLPendingColor))
+            {
+                sQLPendingClear = nullptr;
+            }
+            else
+            {
+                return false;  // the caller hands over, and GL clears it then
+            }
+        }
+        const bool drawn = ql_gl_program_draw(shader, target, clear, color, state, positions, vertex_count, mesh);
+        if (!drawn && clear)
+        {
+            sQLPendingClear = target;  // still to be made: GL's, after the hand-over, before GL's draw
+            sQLPendingColor = color;
+        }
+        return drawn;
+    }
+}
+#else
+namespace
+{
+    bool ql_run_is_open() { return false; }
+    bool ql_run_begin() { return false; }
+    void ql_run_hand_over() {}
+    bool ql_run_defer_clear(LLRenderTarget*, const LLColor4&) { return false; }
 }
 #endif
 
@@ -13013,7 +13254,7 @@ void LLPipeline::renderDeferredLighting()
         // they are what Vulkan's draws read.
         struct QLRun
         {
-            bool open = false;  // a pass begun, and every draw so far recorded
+            bool open = false;  // the run open, and every draw of the lighting so far recorded in it
             U32  recorded = 0;
             bool whole = false; // the stage was Vulkan's to its end
             void handOver()
@@ -13024,10 +13265,7 @@ void LLPipeline::renderDeferredLighting()
                     return;
                 }
                 open = false;
-                if (!QLVulkanPresenter::glPassEnd())
-                {
-                    ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
-                }
+                ql_run_hand_over();
 #endif
             }
         } ql_run;
@@ -13044,11 +13282,7 @@ void LLPipeline::renderDeferredLighting()
             }
             if (ql_lighting_wanted())
             {
-                ql_run.open = QLVulkanPresenter::glPassBegin();
-                if (!ql_run.open)
-                {
-                    ql_lighting_kept(QLVulkanPresenter::glInfo());
-                }
+                ql_run.open = ql_run_begin();
             }
         }
 #endif
@@ -13673,7 +13907,9 @@ void LLPipeline::renderDeferredLighting()
 
         // What Vulkan drew of the lighting, handed over before anything after it reads the screen.
         ql_run.whole = ql_run.open;
-        ql_run.handOver();
+        // The run stays open for whatever Vulkan takes next (the pools after the lighting, the alpha, the post chain),
+        // handed over when GL next needs the GPU.
+        ql_run.open = false;
 #if QL_VULKAN_SHADOWS
         if (ql_lighting_wanted())
         {
@@ -13850,9 +14086,8 @@ void LLPipeline::doAtmospherics()
                 haze_shader.uniform1f(LLShaderMgr::WATER_GROUND_FADE, ALFarPlane::groundFade(height));
             }
 
-            // full screen blit
-            mScreenTriangleVB->setBuffer();
-            mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
+            // full screen blit: Vulkan's where the stage after the lighting is open (QuasarVulkanLighting)
+            ql_vulkan_screen_triangle();
 
             unbindDeferredShader(haze_shader);
         };
@@ -14374,6 +14609,7 @@ static bool sQLVulkanShadowLost = false;
 
 static void ql_vulkan_shadow_flush()
 {
+    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
 #if QL_VULKAN_SHADOWS
     if (!QLVulkanPresenter::shadowFlush())
     {
@@ -14551,6 +14787,7 @@ static bool ql_slot_texture(LLViewerTexture* texture, bool normal_slot, U32& nam
 
 static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 {
+    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
     sQLProbeDrawsOpen = false;
     LLDrawPoolTerrain::qlBeginPass(main_view);
     gQLVulkanSimpleLeftovers = nullptr;
@@ -15163,6 +15400,7 @@ static bool ql_vulkan_probe_draws_begin(LLRenderTarget& gbuffer, bool main_view)
 
 static QLVulkanLost ql_vulkan_probe_draws_end()
 {
+    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan goes to the GPU before this submission
     gQLVulkanSimpleLeftovers = nullptr;
     gQLVulkanPBRLeftovers = nullptr;
     const bool materials_taken = gQLVulkanMaterialLeftovers != nullptr;
@@ -15269,30 +15507,30 @@ std::string ql_vulkan_terrain_maps_info()
 
 // ---- Quasar: a stage of GL's draws recorded for Vulkan (QuasarVulkanLighting: the alpha pools, the post chain) -----
 //
-// A stage opens a Vulkan run; each draw site asks ql_vulkan_draw_now (a mesh) or ql_vulkan_screen_triangle (a full-screen
-// pass) to take its draw as GL holds it (its program bound, its uniforms and textures set, its target bound, GL's state),
-// and draws it with GL only where that fails. The first draw Vulkan cannot take hands the run over, and GL draws it; a
-// stage begun with reopens opens a new run at its next draw Vulkan can take, as many times as it was given (each another
-// hand-over), and one without leaves GL the rest. The stage's end hands over what is left. Nothing Vulkan records runs
-// before the hand-over, so GL's draws always come after it.
+// A stage lets Vulkan take GL's draws: each draw of an indexed vertex buffer (LLVertexBuffer::drawRange, through
+// gQLVulkanDrawRange), each full-screen pass (ql_vulkan_screen_triangle) and each colour clear (ql_vulkan_clear) is
+// recorded for Vulkan as GL holds it (its program bound, its uniforms and textures set, its target bound, GL's state)
+// where it can be, into the run open (ql_run_begin, shared with the lighting's), and drawn by GL where it cannot,
+// after the run is handed over. A stage begun with reopens opens a new run at its next draw Vulkan can take, as many
+// times as it was given; one without leaves GL the rest.
 //
-// A colour clear while a run is open (ql_vulkan_clear) is Vulkan's too: carried by the next draw into that target, or
-// made by a draw of nothing that clears, so that it lands where it stands among the draws.
+// A run is not handed over when a stage ends: it stays open until GL next needs the GPU (qlBeforeGLWork, called by
+// llrender before every draw, clear, copy, readback and dispatch), so stages with nothing of GL's between them run as
+// one. A colour clear in an open run is carried by the next draw into its target, or made by a draw of nothing that
+// clears, so that it lands where it stands among the draws.
 namespace
 {
     struct QLStage
     {
-        bool            open = false;
-        bool            active = false;  // begun and wanted: its draws may open a run again
-        bool            counted = false;  // the main view's: its draws are counted (a probe's or a bake's are not)
-        U32             reopens = 0;
-        U32             recorded = 0;
-        U32             runs = 0;
-        const char*     name = "";
-        LLRenderTarget* pending_clear = nullptr;
-        LLColor4        pending_color;
+        bool        active = false;   // begun and wanted: its draws may be Vulkan's
+        bool        counted = false;  // the main view's: its draws are counted (a probe's or a bake's are not)
+        U32         reopens = 0;      // runs it may still open
+        U32         recorded = 0;
+        U32         runs = 0;
+        const char* name = "";
     };
     QLStage sQLStage;
+    std::vector<QLStage> sQLStageStack;  // the stages a stage began inside, taken up again as it ends
     struct QLStageStats
     {
         U32 now_vk = 0, now_gl = 0, last_vk = 0, last_gl = 0, frame = 0;
@@ -15300,6 +15538,7 @@ namespace
         std::string why;
     };
     std::unordered_map<std::string, QLStageStats> sQLStageStats;
+    bool sQLSkipDrawHook = false;  // an explicit ql_vulkan_draw_now refused: GL's drawRange next is not offered again
 
     QLStageStats& ql_stage_stats()
     {
@@ -15315,116 +15554,11 @@ namespace
         return stats;
     }
 
-    // A clear Vulkan makes into `target`: a draw of nothing into a pass that clears its colours first.
-    bool ql_clear_draw(LLRenderTarget* target, const LLColor4& color)
-    {
-#if QL_VULKAN_SHADOWS
-        if (!target || !target->getNumTextures())
-        {
-            return false;
-        }
-        static const char vertex[]   = "#version 450\nvoid main() { gl_Position = vec4(0.0); }\n";
-        static const char fragment[] = "#version 450\nvoid main() { }\n";
-        static const QLVulkanPresenter::GpSource sources[2] = {
-            { GL_VERTEX_SHADER, "quasar clear (vertex)", vertex, sizeof(vertex) - 1 },
-            { GL_FRAGMENT_SHADER, "quasar clear (fragment)", fragment, sizeof(fragment) - 1 }
-        };
-        static const U64 key = 0x51C1EA2ull;  // no GL program has this address
-        const int program = QLVulkanPresenter::glProgram(key, 1, "Quasar clear", sources, 2);
-        if (program < 0)
-        {
-            ql_lighting_kept("the clear's program: " + QLVulkanPresenter::glProgramNote(key));
-            return false;
-        }
-        QLVulkanPresenter::GpDraw d;
-        d.program       = program;
-        d.white_texture = ALTextureSlot::sWhiteTexture.load();
-        d.color_count   = llmin(target->getNumTextures(), 4u);
-        for (U32 i = 0; i < d.color_count; ++i)
-        {
-            d.colors[i] = target->getTexture(i);
-        }
-        d.depth  = target->getAttachedDepth();
-        d.width  = target->getWidth();
-        d.height = target->getHeight();
-        d.clear  = true;
-        for (U32 i = 0; i < 4; ++i)
-        {
-            d.clear_color[i] = color.mV[i];
-        }
-        d.vertex_count = 0;
-        if (!QLVulkanPresenter::glDraw(d))
-        {
-            ql_lighting_kept(QLVulkanPresenter::glInfo());
-            return false;
-        }
-        return true;
-#else
-        (void)target;
-        (void)color;
-        return false;
-#endif
-    }
-
-    void ql_stage_hand_over();
-
-    // A clear still to be made (no draw into its target has carried it): Vulkan's where the run is open, GL's otherwise.
-    void ql_stage_settle_clear()
-    {
-        LLRenderTarget* target = sQLStage.pending_clear;
-        if (!target)
-        {
-            return;
-        }
-        sQLStage.pending_clear = nullptr;
-        if (sQLStage.open && ql_clear_draw(target, sQLStage.pending_color))
-        {
-            return;
-        }
-        ql_stage_hand_over();
-        const LLColor4 previous = gGL.getClearColor();
-        gGL.setClearColor(sQLStage.pending_color);
-        const bool bound = LLRenderTarget::getCurrentBoundTarget() == target;
-        if (!bound)
-        {
-            target->bindTarget();
-        }
-        target->clear(GL_COLOR_BUFFER_BIT);
-        if (!bound)
-        {
-            target->flush();
-        }
-        gGL.setClearColor(previous);
-    }
-
-    void ql_stage_hand_over()
-    {
-#if QL_VULKAN_SHADOWS
-        if (!sQLStage.open)
-        {
-            return;
-        }
-        if (sQLStage.pending_clear)
-        {
-            ql_stage_settle_clear();  // in the run, before it goes
-            if (!sQLStage.open)
-            {
-                return;  // the clear could not be Vulkan's: handed over for GL's
-            }
-        }
-        sQLStage.open = false;
-        if (!QLVulkanPresenter::glPassEnd())
-        {
-            ql_lighting_kept("the hand-over failed: " + QLVulkanPresenter::glInfo());
-        }
-#endif
-    }
-
-    // The run open for a draw: as it stands, or again where the stage has reopens left.
+    // The run for a draw of the stage: the one open, or a new one where the stage has reopens left.
     bool ql_stage_run()
     {
 #if QL_VULKAN_SHADOWS
-        if (sQLStage.open)
+        if (ql_run_is_open())
         {
             return true;
         }
@@ -15433,15 +15567,13 @@ namespace
             return false;
         }
         --sQLStage.reopens;
-        sQLStage.open = QLVulkanPresenter::glPassBegin();
-        if (sQLStage.open)
+        if (ql_run_begin())
         {
             ++sQLStage.runs;
+            return true;
         }
-        return sQLStage.open;
-#else
-        return false;
 #endif
+        return false;
     }
 
     // After a draw: counted, and where GL drew it, the run handed over first (the caller draws once this returns).
@@ -15454,50 +15586,36 @@ namespace
             ++stats.now_vk;
             return true;
         }
-        ql_stage_hand_over();
-        ql_stage_settle_clear();  // GL's draw comes after the clear GL now makes
+        ql_run_hand_over();  // and any clear still to be made, GL's after it
         ++stats.now_gl;
+#if QL_VULKAN_SHADOWS
         stats.why = sQLLightingWhy;
+#endif
         return false;
-    }
-
-    // Where a draw into `target` takes the pending clear with it: its colour, and the clear consumed. A pending clear of
-    // another target is made first, where it stands.
-    bool ql_stage_take_clear(LLRenderTarget* target, LLColor4& color)
-    {
-        if (!sQLStage.pending_clear)
-        {
-            return false;
-        }
-        if (sQLStage.pending_clear != target)
-        {
-            ql_stage_settle_clear();
-            return false;
-        }
-        color = sQLStage.pending_color;
-        sQLStage.pending_clear = nullptr;
-        return true;
     }
 }
 
 bool ql_vulkan_stage_begin_reopening(const char* name, U32 reopens)
 {
-#if QL_VULKAN_SHADOWS
-    ql_stage_hand_over();
+    if (sQLStage.active || (sQLStage.name && *sQLStage.name))
+    {
+        sQLStageStack.push_back(sQLStage);  // taken up again when this one ends
+    }
     sQLStage = QLStage();
     sQLStage.name = name;
+#if QL_VULKAN_SHADOWS
     sQLStage.counted = gPipeline.mRT == &gPipeline.mMainRT && !LLPipeline::sImpostorRender &&
                        !LLPipeline::sCutoutRender && !LLPipeline::sRenderingHUDs && !LLPipeline::sShadowRender &&
                        !gCubeSnapshot;
     if (!ql_lighting_wanted() || !sQLStage.counted)
     {
+        ql_run_hand_over();  // another view's draws are GL's, after what Vulkan recorded
         return false;
     }
     sQLStage.active  = true;
     sQLStage.reopens = reopens + 1;  // the first run counts as one
     return ql_stage_run();
 #else
-    (void)name;
     (void)reopens;
     return false;
 #endif
@@ -15509,53 +15627,51 @@ bool ql_vulkan_stage_begin(const char* name)
     return ql_vulkan_stage_begin_reopening(name, 0);
 }
 
-// GL is about to do something of its own (a copy, a clear, a draw it keeps): what Vulkan recorded goes first.
+// GL is about to do something of its own outside llrender's draws (which hand over by themselves): what Vulkan recorded
+// goes first.
 void ql_vulkan_stage_gl()
 {
-    ql_stage_hand_over();
-    ql_stage_settle_clear();
+    ql_run_hand_over();
 }
 
+// The stage's draws are GL's from here; the run stays open for whatever Vulkan takes next, until GL needs the GPU.
 void ql_vulkan_stage_end()
 {
-#if QL_VULKAN_SHADOWS
     if (sQLStage.active)
     {
-        ql_stage_hand_over();
-        ql_stage_settle_clear();
         ql_stage_stats().now_runs += sQLStage.runs;
     }
-#endif
     sQLStage = QLStage();
+    if (!sQLStageStack.empty())
+    {
+        sQLStage = sQLStageStack.back();
+        sQLStageStack.pop_back();
+    }
 }
 
-// A clear of the bound target's colours (GL_COLOR_BUFFER_BIT, at GL's clear colour) where the stage's run is open: made
-// where it stands among Vulkan's draws. Anything else, or no run, is GL's clear (after a hand-over).
+// Whether a stage is taking GL's draws for Vulkan now.
+bool ql_vulkan_stage_active()
+{
+    return sQLStage.active;
+}
+
+// A clear of the bound target's colours (GL_COLOR_BUFFER_BIT, at GL's clear colour) where a run is open: made where it
+// stands among Vulkan's draws. Anything else, or no run, is GL's clear (after a hand-over).
 void ql_vulkan_clear(LLRenderTarget* target, U32 mask)
 {
     // The default mask is the colours alone where the target has no depth of its own or shared.
     const bool colours_only = mask == GL_COLOR_BUFFER_BIT ||
                               (mask == 0xFFFFFFFF && target && !target->getDepth() && !target->getAttachedDepth());
-    if (sQLStage.open && target && colours_only && target->getNumTextures())
+    if (sQLStage.active && ql_run_is_open() && target && colours_only && target->getNumTextures() &&
+        ql_run_defer_clear(target, gGL.getClearColor()))
     {
-        if (sQLStage.pending_clear && sQLStage.pending_clear != target)
-        {
-            ql_stage_settle_clear();
-        }
-        if (sQLStage.open)
-        {
-            sQLStage.pending_clear = target;
-            sQLStage.pending_color = gGL.getClearColor();
-            return;
-        }
+        return;
     }
-    ql_vulkan_stage_gl();
-    target->clear(mask);
+    target->clear(mask);  // llrender hands the run over first
 }
 
 // A draw of `vb` as GL would make it now (drawRange's arguments), recorded for Vulkan while the stage's run is open.
-// False: GL draws it (and the run is handed over first, where it was open).
-bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset)
+static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset)
 {
 #if QL_VULKAN_SHADOWS
     (void)start;
@@ -15571,8 +15687,19 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
     LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
     LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
     bool drawn = false;
-    if (shader && target && vb && count && LLNavShapeVBOManager::shortIndices(vb) &&
-        vb->hasDataType(LLVertexBuffer::TYPE_VERTEX) && !LLGLState::qlEnabled(GL_STENCIL_TEST) && ql_stage_run())
+    if (!shader || !target)
+    {
+        ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
+    }
+    else if (LLGLState::qlEnabled(GL_STENCIL_TEST))
+    {
+        ql_lighting_kept(shader->mName + ": tests the stencil (not yet in Vulkan)");
+    }
+    else if (!vb || !count || !LLNavShapeVBOManager::shortIndices(vb) || !vb->hasDataType(LLVertexBuffer::TYPE_VERTEX))
+    {
+        ql_lighting_kept(shader->mName + ": a buffer of 32-bit indices or no positions");
+    }
+    else if (ql_stage_run())
     {
         QLVulkanPresenter::GpMesh mesh;
         mesh.stamp         = vb->getContentStamp();
@@ -15596,20 +15723,44 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
         mesh.first_index = offset;
         mesh.index_count = count;
         QLGLState state = ql_gl_state_now();
-        LLColor4 clear_color;
-        const bool clear = ql_stage_take_clear(target, clear_color);
-        drawn = ql_gl_program_draw(*shader, target, clear, clear_color, state, nullptr, 0, &mesh);
-        if (!drawn && clear)
-        {
-            sQLStage.pending_clear = target;  // still to be made: GL's, before its draw
-            sQLStage.pending_color = clear_color;
-        }
+        drawn = ql_run_draw(*shader, target, state, nullptr, 0, &mesh);
     }
     return ql_stage_drawn(drawn);
 #else
     (void)vb; (void)start; (void)end; (void)count; (void)offset;
     return false;
 #endif
+}
+
+// For a draw site that asks first (the alpha pool's): false, and GL's drawRange after it is not offered again.
+bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset)
+{
+    const bool drawn = ql_vulkan_draw_now_impl(vb, start, end, count, offset);
+    sQLSkipDrawHook = !drawn && sQLStage.active;
+    return drawn;
+}
+
+// llrender's offer of every indexed draw (gQLVulkanDrawRange): Vulkan's while a stage is active, triangles alone.
+[[maybe_unused]] static bool ql_vulkan_draw_range_hook(const LLVertexBuffer* vb, unsigned mode, unsigned start, unsigned end,
+                                      unsigned count, unsigned indices_offset)
+{
+    if (sQLSkipDrawHook)
+    {
+        sQLSkipDrawHook = false;
+        return false;
+    }
+    if (!sQLStage.active || !on_main_thread())
+    {
+        return false;
+    }
+    if (mode != LLRender::TRIANGLES)
+    {
+#if QL_VULKAN_SHADOWS
+        ql_lighting_kept("a draw of other than triangles");
+#endif
+        return ql_stage_drawn(false);
+    }
+    return ql_vulkan_draw_now_impl(const_cast<LLVertexBuffer*>(vb), start, end, count, indices_offset);
 }
 
 // The pipeline's full-screen triangle (mScreenTriangleVB) drawn with what GL has bound now: Vulkan's where a stage is
@@ -15634,14 +15785,7 @@ void ql_vulkan_screen_triangle()
         {
             static const F32 triangle[9] = { -1.f, 1.f, 0.f, -1.f, -3.f, 0.f, 3.f, 1.f, 0.f };
             QLGLState state = ql_gl_state_now();
-            LLColor4 clear_color;
-            const bool clear = ql_stage_take_clear(target, clear_color);
-            drawn = ql_gl_program_draw(*shader, target, clear, clear_color, state, triangle, 3);
-            if (!drawn && clear)
-            {
-                sQLStage.pending_clear = target;
-                sQLStage.pending_color = clear_color;
-            }
+            drawn = ql_run_draw(*shader, target, state, triangle, 3);
         }
         if (ql_stage_drawn(drawn))
         {
@@ -15652,6 +15796,16 @@ void ql_vulkan_screen_triangle()
     gPipeline.mScreenTriangleVB->setBuffer();
     gPipeline.mScreenTriangleVB->drawArrays(LLRender::TRIANGLES, 0, 3);
 }
+
+// The hooks llrender calls (qlglwork.h), set once.
+static const bool sQLHooksSet = []()
+{
+#if QL_VULKAN_SHADOWS
+    gQLBeforeGLWork    = &ql_run_before_gl_work;
+    gQLVulkanDrawRange = &ql_vulkan_draw_range_hook;
+#endif
+    return true;
+}();
 
 std::string ql_vulkan_stages_info()
 {
@@ -15884,6 +16038,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
         return false;
     }
     // Under reverse-Z GL's clip space already holds depth from 0 to 1 (glClipControl) and the test is GREATER.
+    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan first
     if (!QLVulkanPresenter::shadowBegin(target->getWidth(), target->getHeight(), depth_clamp, LLRender::sReverseZ,
                                         !LLRender::sReverseZ))
     {
@@ -16274,6 +16429,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
     }
 
     gGL.flush();
+    ql_vulkan_stage_gl();  // Quasar: an open run of GL's draws in Vulkan first
     if (!QLVulkanPresenter::shadowEnd(target->getDepth()))
     {
         leftovers.clear();

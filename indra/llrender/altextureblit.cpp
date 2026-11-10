@@ -29,6 +29,7 @@
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
+#include "qlglwork.h"
 
 ALTextureBlit::~ALTextureBlit()
 {
@@ -57,6 +58,7 @@ void ALTextureBlit::blit(U32 src_target, U32 src, U32 dst, S32 width, S32 height
     {
         // glBlitFramebuffer writes only where the scissor test passes.
         LLGLDisable scissor(GL_SCISSOR_TEST);
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glBlitFramebuffer(0, 0, width, height,
                           0, flip_y ? height : 0, width, flip_y ? 0 : height,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);

@@ -47,6 +47,7 @@
 #include <optional>
 
 #include <fmt/format.h>
+#include "qlglwork.h"
 
 LLRenderTarget* LLRenderTarget::sBoundTarget = NULL;
 U64 LLRenderTarget::sLastDepthSerial = 0;
@@ -908,6 +909,7 @@ void LLRenderTarget::clear(U32 mask_in)
         }
         if (mask != 0)
         {
+            qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
             glClear(mask);
         }
         stop_glerror();
@@ -916,12 +918,14 @@ void LLRenderTarget::clear(U32 mask_in)
     {
         LLGLSScissor scissor(0, 0, mResX, mResY);
         stop_glerror();
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glClear(mask);
     }
 }
 
 void LLRenderTarget::clearColorBuffers()
 {
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     const LLColor4& colour = gGL.getClearColor();
     GLint  signed_value[4];
     GLuint unsigned_value[4];
@@ -1087,6 +1091,7 @@ void LLRenderTarget::copyContents(LLRenderTarget& source, S32 srcX0, S32 srcY0, 
         // glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height):
         // xoffset/yoffset are the destination texel offset, x/y the source framebuffer
         // origin, and the last two are dimensions (not endpoints).
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glCopyTexSubImage2D(ALTextureSlot::getInternalType(mUsage), 0, dstX0, dstY0, srcX0, srcY0, srcX1 - srcX0, srcY1 - srcY0);
         stop_glerror();
         glBindFramebuffer(GL_FRAMEBUFFER, sCurFBO);
@@ -1100,6 +1105,7 @@ void LLRenderTarget::copyContents(LLRenderTarget& source, S32 srcX0, S32 srcY0, 
         stop_glerror();
         check_framebuffer_status();
         stop_glerror();
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
         stop_glerror();
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -1166,6 +1172,7 @@ void LLRenderTarget::copyContentsToFramebuffer(LLRenderTarget& source, S32 srcX0
         stop_glerror();
         check_framebuffer_status();
         stop_glerror();
+        qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
         glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
         stop_glerror();
         glBindFramebuffer(GL_FRAMEBUFFER, sCurFBO);
@@ -1190,6 +1197,7 @@ void LLRenderTarget::copyFromBound(S32 srcX0, S32 srcY0, S32 srcX1, S32 srcY1, S
     LLGLDisable scissor(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, sCurFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, mFBO);
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, GL_COLOR_BUFFER_BIT, filter);
     stop_glerror();
     glBindFramebuffer(GL_FRAMEBUFFER, sCurFBO);
@@ -1209,6 +1217,7 @@ void LLRenderTarget::copyFromWindow(S32 x, S32 y, S32 width, S32 height)
     LL_PROFILE_GPU_ZONE("LLRenderTarget::copyFromWindow");
     gGL.getTextureSlot(0)->bind(this);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glCopyTexSubImage2D(ALTextureSlot::getInternalType(mUsage), 0, 0, 0, x, y, width, height);
     stop_glerror();
     glBindFramebuffer(GL_FRAMEBUFFER, sCurFBO);

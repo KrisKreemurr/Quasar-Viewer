@@ -40,6 +40,7 @@
 #include "llglslshader.h"
 
 #include "llglheaders.h"
+#include "qlglwork.h"
 
 //#pragma optimize("", off)
 
@@ -127,6 +128,7 @@ LLCubeMapArray::LLCubeMapArray(LLCubeMapArray& lhs, U32 width, U32 count) : mTex
     std::vector<U8> src_layers(face_bytes * 6 * min_count);
 
     gGL.getTextureSlot(0)->bindManual(ALTextureSlot::TT_CUBE_MAP_ARRAY, lhs.getGLName());
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glGetTexImage(GL_TEXTURE_CUBE_MAP_ARRAY, 0, format, GL_UNSIGNED_BYTE, src_layers.data());
 
     bind(0);
@@ -222,6 +224,7 @@ void LLCubeMapArray::unbind()
 void LLCubeMapArray::copyFaceFromFramebuffer(S32 mip, S32 cube_index, S32 face, S32 res)
 {
     // Sub-image write, so this stays legal now that the array has immutable storage.
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glCopyTexSubImage3D(GL_TEXTURE_CUBE_MAP_ARRAY, mip, 0, 0, cube_index * 6 + face, 0, 0, res, res);
     stop_glerror();
 }

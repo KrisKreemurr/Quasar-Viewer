@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstring>
 #include <utility>
+#include "qlglwork.h"
 
 namespace
 {
@@ -100,6 +101,7 @@ ALTextureReadback::Ticket ALTextureReadback::request(U32 target, S32 level, U32 
     // have it.
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer.mStore.getGLName());
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glGetTexImage(target, level, format, type, nullptr);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     // Behind this read and the buffer's reads before it.

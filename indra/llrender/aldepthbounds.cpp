@@ -33,6 +33,8 @@
 #include <limits>
 
 bool ALDepthBounds::sActive = false;
+F64  ALDepthBounds::sQLMin  = 0.0;
+F64  ALDepthBounds::sQLMax  = 1.0;
 bool ALDepthBounds::sEnabled = true;
 
 ALDepthBounds::ALDepthBounds(F64 zmin, F64 zmax)
@@ -40,6 +42,8 @@ ALDepthBounds::ALDepthBounds(F64 zmin, F64 zmax)
 {
     llassert(available() && !sActive);
     sActive = true;
+    sQLMin  = zmin;
+    sQLMax  = zmax;
     gGL.flush();
     glDepthBoundsEXT(zmin, zmax);
     glEnable(GL_DEPTH_BOUNDS_TEST_EXT);
@@ -58,6 +62,8 @@ void ALDepthBounds::set(F64 zmin, F64 zmax)
     {
         gGL.flush();
         glDepthBoundsEXT(zmin, zmax);
+        sQLMin = zmin;
+        sQLMax = zmax;
         mMin = zmin;
         mMax = zmax;
     }

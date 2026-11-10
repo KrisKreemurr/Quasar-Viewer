@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include "qlglwork.h"
 
 U64 ALGPUBuffer::sBytesAllocated = 0;
 
@@ -351,6 +352,7 @@ void ALGPUBuffer::clearRange(size_t offset, size_t bytes, U32 value)
     }
 
     // Each word R32UI, filled from one GL_RED_INTEGER uint: the value's bits as they are, whatever the store holds.
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     if (gGLManager.mHasDirectStateAccess && glClearNamedBufferSubData)
     {
         glClearNamedBufferSubData(mName, GL_R32UI, (GLintptr)offset, (GLsizeiptr)bytes, GL_RED_INTEGER,
@@ -540,6 +542,7 @@ bool ALGPUReadback::requestPixels(S32 x, S32 y, S32 width, S32 height, U32 forma
     // buffer is bound there, a read writes into it at the offset it is given in place of a pointer.
     const uintptr_t offset = (uintptr_t)mNext * mSlotStride;
     glBindBuffer(GL_PIXEL_PACK_BUFFER, mStore.getGLName());
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glReadPixels(x, y, width, height, format, type, reinterpret_cast<void*>(offset));
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     issueNext(bytes);

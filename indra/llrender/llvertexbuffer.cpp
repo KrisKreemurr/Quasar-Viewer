@@ -28,6 +28,7 @@
 
 #include "llsys.h"
 #include "llvertexbuffer.h"
+#include "qlglwork.h"
 // #include "llrender.h"
 #include "llglheaders.h"
 #include "llrender.h"
@@ -1113,14 +1114,22 @@ void LLVertexBuffer::clone(LLVertexBuffer& target) const
     }
 }
 
+bool (*gQLVulkanDrawRange)(const LLVertexBuffer* vb, unsigned mode, unsigned start, unsigned end, unsigned count,
+                           unsigned indices_offset) = nullptr;
+
 void LLVertexBuffer::drawRange(U32 mode, U32 start, U32 end, U32 count, U32 indices_offset) const
 {
+    if (gQLVulkanDrawRange && gQLVulkanDrawRange(this, mode, start, end, count, indices_offset))
+    {
+        return;  // Quasar: Vulkan's (qlglwork.h)
+    }
     llassert(validateRange(start, end, count, indices_offset));
     llassert(validate_bound_samplers());
     llassert(mGLBuffer == sGLRenderBuffer);
     llassert(mGLIndices == sGLRenderIndices);
     gGL.syncMatrices();
     STOP_GLERROR;
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawRangeElements(sGLMode[mode], start, end, count, mIndicesType,
         (GLvoid*) (indices_offset * (size_t) mIndicesStride));
     STOP_GLERROR;
@@ -1130,6 +1139,11 @@ void LLVertexBuffer::drawRange(U32 mode, U32 start, U32 end, U32 count, U32 indi
 
 void LLVertexBuffer::drawRangeFast(U32 mode, U32 start, U32 end, U32 count, U32 indices_offset) const
 {
+    if (gQLVulkanDrawRange && gQLVulkanDrawRange(this, mode, start, end, count, indices_offset))
+    {
+        return;  // Quasar: Vulkan's (qlglwork.h)
+    }
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawRangeElements(sGLMode[mode], start, end, count, mIndicesType,
         (GLvoid*)(indices_offset * (size_t)mIndicesStride));
     ++LLRender::sDrawCalls;
@@ -1152,6 +1166,7 @@ void LLVertexBuffer::drawArrays(U32 mode, U32 first, U32 count) const
 
     gGL.syncMatrices();
     STOP_GLERROR;
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawArrays(sGLMode[mode], first, count);
     STOP_GLERROR;
     ++LLRender::sDrawCalls;
@@ -1170,6 +1185,7 @@ void LLVertexBuffer::drawMultiArrays(U32 mode, const S32* first, const S32* coun
 
     gGL.syncMatrices();
     STOP_GLERROR;
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glMultiDrawArrays(sGLMode[mode], first, count, draws);
     STOP_GLERROR;
     ++LLRender::sDrawCalls;

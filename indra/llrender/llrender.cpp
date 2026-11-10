@@ -43,6 +43,9 @@
 #include "llthread.h"
 
 #include <algorithm>
+#include "qlglwork.h"
+
+void (*gQLBeforeGLWork)() = nullptr;
 
 #if GL_ARB_debug_output
 #ifndef APIENTRY
@@ -2036,6 +2039,7 @@ void LLRender::setClearColor(const LLColor4& color)
 void LLRender::clear(U32 mask)
 {
     flush();
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glClear(mask);
 }
 
@@ -2165,6 +2169,7 @@ void LLRender::applyDepthConvention()
 void LLRender::readPixels(S32 x, S32 y, S32 width, S32 height, U32 format, U32 type, void* data)
 {
     flush();
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glReadPixels(x, y, width, height, format, type, data);
 }
 
@@ -2176,6 +2181,7 @@ void LLRender::drawArraysInstanced(eGeomModes mode, U32 first, U32 count, U32 in
     syncMatrices();
     llassert(validate_bound_samplers());
     STOP_GLERROR;
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawArraysInstanced(LLVertexBuffer::sGLMode[mode], first, count, instances);
     STOP_GLERROR;
     ++sDrawCalls;
@@ -2198,6 +2204,7 @@ void LLRender::drawArraysIndirect(eGeomModes mode, const ALGPUBuffer& buffer, si
     llassert(validate_bound_samplers());
     STOP_GLERROR;
     bindIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, mDrawIndirectBuffer, buffer.getGLName());
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawArraysIndirect(LLVertexBuffer::sGLMode[mode], reinterpret_cast<const void*>(offset));
     STOP_GLERROR;
     ++sDrawCalls; // its count is the GPU's to know
@@ -2266,6 +2273,7 @@ void LLRender::dispatchCompute(U32 groups_x, U32 groups_y, U32 groups_z)
 
     llassert(validate_bound_samplers());
     STOP_GLERROR;
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDispatchCompute(groups_x, groups_y, groups_z);
     STOP_GLERROR;
 }
@@ -2289,6 +2297,7 @@ void LLRender::dispatchComputeIndirect(const ALGPUBuffer& buffer, size_t offset)
     llassert(validate_bound_samplers());
     STOP_GLERROR;
     bindIndirectBuffer(GL_DISPATCH_INDIRECT_BUFFER, mDispatchIndirectBuffer, buffer.getGLName());
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDispatchComputeIndirect(static_cast<GLintptr>(offset));
     STOP_GLERROR;
 }

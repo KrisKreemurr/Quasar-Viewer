@@ -61,6 +61,15 @@ public:
     F64 getMin() const { return mMin; }
     F64 getMax() const { return mMax; }
 
+    /// Quasar: the bounds a scope holds now, for Vulkan's copy of the draw GL would make (QuasarVulkanLighting): false
+    /// where none stands.
+    static bool qlCurrent(F64& zmin, F64& zmax)
+    {
+        zmin = sQLMin;
+        zmax = sQLMax;
+        return sActive;
+    }
+
     /// Every stored depth but the clear's, under the current convention: what the world drew, and not the sky.
     static void drawn(F64& zmin, F64& zmax);
 
@@ -73,6 +82,7 @@ private:
     F64 mMin;
     F64 mMax;
     static bool sActive;
+    static F64  sQLMin, sQLMax;
 };
 
 /// A far-plane triangle that shades only what the world drew (sunLightV.glsl, softenLightV.glsl, hazeV.glsl and the

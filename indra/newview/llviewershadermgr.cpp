@@ -566,6 +566,12 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         {
             program.mQLWanted = ql_lighting;
         }
+        // The pools after the lighting, before and between the alpha pools, and the haze.
+        for (LLGLSLShader* program : { &gDeferredFullbrightProgram, &gDeferredFullbrightShinyProgram, &gHazeProgram,
+                                       &gHazeOnWaterProgram, &gDeferredAvatarAlphaProgram })
+        {
+            program->mQLWanted = ql_lighting;
+        }
         // The post chain's (renderFinalize), up to the final blit, which draws into the window and stays GL's.
         for (LLGLSLShader* program :
              { &gLuminanceProgram, &gExposureProgram, &gExposureProgramNoFade, &gExposureHistogramProgram,
@@ -573,7 +579,7 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
                &gBloomExtractProgram, &gBloomDownsampleProgram, &gBloomDownsampleFirstProgram, &gBloomUpsampleProgram,
                &gBloomCompositeProgram, &gCrossFilterProgram, &gDeferredPostProgram, &gDeferredPostProgramNoNear,
                &gDeferredPostProgramShaped, &gDeferredPostProgramNoNearShaped, &gDeferredDoFCombineProgram,
-               &gDeferredDoFCombineProgramNoNear, &gDeferredPostNoDoFProgram, &gCASProgram, &gCopyProgram,
+               &gDeferredDoFCombineProgramNoNear, &gDeferredPostNoDoFProgram, &gCASProgram, &gCopyProgram, &gCopyDepthProgram,
                &gCGGammaProgram, &gCGLegacyGammaProgram, &gCGTonemapProgram, &gCGTonemapLegacyGammaProgram,
                &gCGColorgradeGammaProgram, &gCGColorgradeLegacyGammaProgram, &gCGTonemapColorgradeProgram,
                &gCGTonemapColorgradeLegacyGammaProgram })

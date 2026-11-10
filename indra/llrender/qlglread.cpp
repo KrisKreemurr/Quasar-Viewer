@@ -28,6 +28,7 @@
 #include "llgl.h"
 #include "llrender.h"
 #include "llrendertarget.h"
+#include "qlglwork.h"
 
 bool ql_read_target_rgba(LLRenderTarget& target, std::vector<U8>& out)
 {
@@ -55,6 +56,7 @@ bool ql_read_target_rgba(LLRenderTarget& target, std::vector<U8>& out)
     // Into client memory: no pack buffer may be bound.
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
     glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pack_buffer);
