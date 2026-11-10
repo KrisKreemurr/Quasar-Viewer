@@ -10372,6 +10372,12 @@ void LLPipeline::copyColor(LLRenderTarget& dst, LLRenderTarget& src, const LLRec
 {
     LL_PROFILE_GPU_ZONE("color rect copy");
     llassert(dst.getWidth() == src.getWidth() && dst.getHeight() == src.getHeight());
+    // Quasar: Vulkan draws the copy through the screen triangle, whole (the rest of the target is the pool's anyway).
+    if (ql_vulkan_stage_active() && gCopyProgram.isComplete())
+    {
+        copyColor(dst, src);
+        return;
+    }
     if (!gCopyProgram.isComplete())
     {
         dst.copyContents(src, rect.mLeft, rect.mBottom, rect.mRight, rect.mTop, rect.mLeft, rect.mBottom, rect.mRight,
@@ -12736,6 +12742,7 @@ namespace
         U32  topology = GL_TRIANGLES;
         S32  viewport[4] = {};  // width 0: the whole target
         U32  instances = 1;
+        U32  patch_vertices = 3;  // GL_PATCHES' size
         // The stencil test (LLRender's), and a clear of the stencil first (to 0, GL's clear value here).
         bool stencil_test = false;
         U32  stencil_func = GL_ALWAYS, stencil_read_mask = 0xFF, stencil_write_mask = 0xFF;
@@ -13027,6 +13034,7 @@ namespace
         d.vertex_count    = vertex_count;
         d.topology        = state.topology;
         d.instances       = llmax(state.instances, 1u);
+        d.patch_vertices  = state.patch_vertices;
         for (int i = 0; i < 4; ++i)
         {
             d.viewport[i] = state.viewport[i];
@@ -15902,12 +15910,50 @@ bool ql_vulkan_draw_positions(const F32* positions, U32 count, U32 gl_mode)
 #endif
 }
 
+// llrender's offer of each draw with no vertex buffer (gQLVulkanDrawInstanced): the water's field and patches, placed
+// from gl_VertexID and gl_InstanceID. Vulkan's while a stage is active, from the first vertex alone.
+[[maybe_unused]] static bool ql_vulkan_draw_instanced_hook(unsigned mode, unsigned first, unsigned count,
+                                                           unsigned instances, unsigned patch_vertices)
+{
+#if QL_VULKAN_SHADOWS
+    if (!sQLStage.active || !on_main_thread())
+    {
+        return false;
+    }
+    if (first != 0 || (mode != LLRender::TRIANGLES && mode != LLRender::TRIANGLE_STRIP && mode != LLRender::PATCHES))
+    {
+        ql_lighting_kept("an instanced draw of another kind");
+        return ql_stage_drawn(false);
+    }
+    LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
+    LLRenderTarget* target = LLRenderTarget::getCurrentBoundTarget();
+    bool drawn = false;
+    if (!shader || !target)
+    {
+        ql_lighting_kept(shader ? shader->mName + ": into the window or no target" : std::string("no program bound"));
+    }
+    else if (ql_stage_run())
+    {
+        QLGLState state      = ql_gl_state_now();
+        state.topology       = LLVertexBuffer::sGLMode[mode];
+        state.instances      = instances;
+        state.patch_vertices = patch_vertices;
+        drawn = ql_run_draw(*shader, target, state, nullptr, count);
+    }
+    return ql_stage_drawn(drawn);
+#else
+    (void)mode; (void)first; (void)count; (void)instances; (void)patch_vertices;
+    return false;
+#endif
+}
+
 // The hooks llrender calls (qlglwork.h), set once.
 static const bool sQLHooksSet = []()
 {
 #if QL_VULKAN_SHADOWS
     gQLBeforeGLWork    = &ql_run_before_gl_work;
     gQLVulkanDrawRange = &ql_vulkan_draw_range_hook;
+    gQLVulkanDrawInstanced = &ql_vulkan_draw_instanced_hook;
 #endif
     return true;
 }();

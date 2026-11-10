@@ -470,8 +470,9 @@ public:
         // from gl_VertexID, as the water's field does): vertex_count of them with no positions.
         const float*      positions = nullptr;
         unsigned          vertex_count = 0;
-        unsigned          topology = 0x0004;  // GL_TRIANGLES
+        unsigned          topology = 0x0004;  // GL_TRIANGLES; GL_POINTS, and GL_PATCHES of patch_vertices each
         unsigned          instances = 1;
+        unsigned          patch_vertices = 3;
         // Or a GL vertex buffer's (LLVertexBuffer: GL's buffer names, each attribute's offset in it, ~0u where it has
         // none), copied once into the G-buffer's arena under its content stamp and drawn indexed (16-bit indices):
         // index_count indices from first_index, as GL's drawRange.

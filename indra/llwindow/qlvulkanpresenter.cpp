@@ -8901,9 +8901,10 @@ struct QLVulkanPresenter::Impl
             LL_WARNS("Vulkan") << "GL program " << p.name << " " << p.note << "\n" << p.refl.log << LL_ENDL;
             return -1;
         }
-        if (p.refl.stage_mask & ((1u << ql_glsl::STAGE_TESS_CONTROL) | (1u << ql_glsl::STAGE_TESS_EVALUATION)))
+        if ((p.refl.stage_mask & ((1u << ql_glsl::STAGE_TESS_CONTROL) | (1u << ql_glsl::STAGE_TESS_EVALUATION))) &&
+            !mHasTessellation)
         {
-            p.note = "is tessellated (not yet drawn by Vulkan)";
+            p.note = "is tessellated, and the device has no tessellation";
             return -1;
         }
         for (U32 st = 0; st < ql_glsl::STAGE_COUNT; ++st)
@@ -9231,6 +9232,7 @@ struct QLVulkanPresenter::Impl
                   ((U64)(d.cull_back ? 1 : 0) << 22) + ((U64)d.topology << 24) + ((U64)t.colors << 40) +
                   ((U64)(mesh ? 1 : 0) << 44) + ((U64)(d.cull_front ? 1 : 0) << 45) + ((U64)(d.color_mask & 0xF) << 46);
         const bool stencil = d.stencil_test && t.stencil;  // GL's test passes everything where there is no stencil
+        key = key * 33 + llclamp(d.patch_vertices, 1u, 32u);
         if (stencil)
         {
             key = key * 1000003ull + 1;
@@ -9258,9 +9260,10 @@ struct QLVulkanPresenter::Impl
                 return pipe.pipeline;
             }
         }
-        VkPipelineShaderStageCreateInfo stages[2] = {};
+        VkPipelineShaderStageCreateInfo stages[4] = {};
         U32 stage_count = 0;
-        for (U32 st : { (U32)ql_glsl::STAGE_VERTEX, (U32)ql_glsl::STAGE_FRAGMENT })
+        for (U32 st : { (U32)ql_glsl::STAGE_VERTEX, (U32)ql_glsl::STAGE_TESS_CONTROL, (U32)ql_glsl::STAGE_TESS_EVALUATION,
+                        (U32)ql_glsl::STAGE_FRAGMENT })
         {
             if (!p.modules[st])
             {
@@ -9268,10 +9271,22 @@ struct QLVulkanPresenter::Impl
             }
             VkPipelineShaderStageCreateInfo& s = stages[stage_count++];
             s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            s.stage  = st == ql_glsl::STAGE_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+            s.stage  = st == ql_glsl::STAGE_VERTEX            ? VK_SHADER_STAGE_VERTEX_BIT
+                       : st == ql_glsl::STAGE_TESS_CONTROL    ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+                       : st == ql_glsl::STAGE_TESS_EVALUATION ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+                                                              : VK_SHADER_STAGE_FRAGMENT_BIT;
             s.module = p.modules[st];
             s.pName  = "main";
         }
+        const bool tessellated = p.modules[ql_glsl::STAGE_TESS_CONTROL] && p.modules[ql_glsl::STAGE_TESS_EVALUATION];
+        // GL's tessellation domain: its origin the lower left, as GL's (the windings the evaluation stage asks for
+        // then come out as GL's).
+        VkPipelineTessellationDomainOriginStateCreateInfo domain_origin = {
+            VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO };
+        domain_origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+        VkPipelineTessellationStateCreateInfo tessellation = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+        tessellation.pNext              = &domain_origin;
+        tessellation.patchControlPoints = llclamp(d.patch_vertices, 1u, 32u);
         VkVertexInputBindingDescription binding = { 0, 12, VK_VERTEX_INPUT_RATE_VERTEX };
         VkVertexInputAttributeDescription attribute = { (U32)llmax(p.position, 0), 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
         VkPipelineVertexInputStateCreateInfo vertex_input = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -9298,7 +9313,8 @@ struct QLVulkanPresenter::Impl
             vertex_input.pVertexAttributeDescriptions    = &attribute;
         }
         VkPipelineInputAssemblyStateCreateInfo assembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-        assembly.topology = d.topology == GL_TRIANGLE_STRIP ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+        assembly.topology = tessellated                     ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST
+                            : d.topology == GL_TRIANGLE_STRIP ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
                             : d.topology == GL_TRIANGLE_FAN ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN
                             : d.topology == GL_POINTS       ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                                                             : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -9399,6 +9415,7 @@ struct QLVulkanPresenter::Impl
         info.pStages             = stages;
         info.pVertexInputState   = &vertex_input;
         info.pInputAssemblyState = &assembly;
+        info.pTessellationState  = tessellated ? &tessellation : nullptr;
         info.pViewportState      = &viewport_state;
         info.pRasterizationState = &raster;
         info.pMultisampleState   = &multisample;

@@ -111,6 +111,8 @@ void LLDrawPoolWater::endPostDeferredPass(S32 pass)
     }
 }
 
+bool ql_vulkan_stage_active();  // Quasar (pipeline.cpp): Vulkan records this pass's draws
+
 void LLDrawPoolWater::renderPostDeferred(S32 pass)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_DRAWPOOL;
@@ -206,11 +208,15 @@ void LLDrawPoolWater::renderPostDeferred(S32 pass)
     // (beginPostDeferredPass) rather than the one it is drawn into. While the main view culls none, the pyramid is let
     // go.
     const bool main_view = gPipeline.mRT == &gPipeline.mMainRT;
+    // Quasar: where Vulkan records the water, GL's queries would count nothing of it, and the pyramid's dispatch would
+    // hand the run over mid-pass: the patches are drawn unculled, the haze on water unconditionally, nothing plotted.
+    const bool in_vulkan = ql_vulkan_stage_active();
+    const bool plots     = main_view && !in_vulkan;
     static LLCachedControl<bool> occlusion_cull(gSavedSettings, "AlchemyRenderWaterOcclusionCull", true);
     bool occlusion = false;
     if (main_view)
     {
-        if (waves && occlusion_cull && LLRender::sCompute)
+        if (waves && occlusion_cull && LLRender::sCompute && !in_vulkan)
         {
             LLRenderTarget& depth = gPipeline.waterDepthCopy() ? *gPipeline.waterDepthCopy() : gPipeline.mRT->deferredScreen;
             occlusion = gPipeline.mDepthPyramid.build(gDepthPyramidProgram, depth);
@@ -324,7 +330,7 @@ void LLDrawPoolWater::renderPostDeferred(S32 pass)
     // The main view's surface from above, counted for the haze's draw on the water's pixels (LLPipeline::mWaterSeen):
     // every pixel that draw shades is one the surface drew here, so where none passed the depth test it is skipped.
     std::optional<ALQueryScope> seen;
-    if (main_view && !underwater)
+    if (plots && !underwater)
     {
         seen.emplace(gGL.queries(), ALQueryKind::Occlusion);
         gPipeline.mWaterSeen      = seen->ticket();
@@ -337,7 +343,7 @@ void LLDrawPoolWater::renderPostDeferred(S32 pass)
     if (waves)
     {
         LL_PROFILE_GPU_ZONE("water waves");
-        if (main_view)
+        if (plots)
         {
             gPipeline.mWaterPatchPrimitives.begin();
         }
@@ -345,13 +351,13 @@ void LLDrawPoolWater::renderPostDeferred(S32 pass)
         setup(patches, true);
         draw(patches, true);
         gPipeline.unbindDeferredShader(*patches);
-        if (main_view)
+        if (plots)
         {
             gPipeline.mWaterPatchPrimitives.end();
         }
     }
 
-    if (main_view)
+    if (plots)
     {
         gPipeline.mWaterPrimitives.begin();
     }
@@ -366,7 +372,7 @@ void LLDrawPoolWater::renderPostDeferred(S32 pass)
     draw(flat, false);
     gPipeline.unbindDeferredShader(*flat);
 
-    if (main_view)
+    if (plots)
     {
         gPipeline.mWaterPrimitives.end();
     }

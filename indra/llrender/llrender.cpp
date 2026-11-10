@@ -46,6 +46,7 @@
 #include "qlglwork.h"
 
 void (*gQLBeforeGLWork)() = nullptr;
+bool (*gQLVulkanDrawInstanced)(unsigned, unsigned, unsigned, unsigned, unsigned) = nullptr;
 
 #if GL_ARB_debug_output
 #ifndef APIENTRY
@@ -2181,6 +2182,12 @@ void LLRender::drawArraysInstanced(eGeomModes mode, U32 first, U32 count, U32 in
     syncMatrices();
     llassert(validate_bound_samplers());
     STOP_GLERROR;
+    if (gQLVulkanDrawInstanced && gQLVulkanDrawInstanced(mode, first, count, instances, mPatchVertices))
+    {
+        ++sDrawCalls;  // Quasar: Vulkan recorded it
+        sDrawElements += (U64)count * instances;
+        return;
+    }
     qlBeforeGLWork();  // Quasar: Vulkan's recorded draws first
     glDrawArraysInstanced(LLVertexBuffer::sGLMode[mode], first, count, instances);
     STOP_GLERROR;

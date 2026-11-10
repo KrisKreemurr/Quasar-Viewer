@@ -570,7 +570,11 @@ bool LLViewerShaderMgr::setShaders(const ALShaderInputs& inputs, const ALRenderA
         for (LLGLSLShader* program : { &gDeferredFullbrightProgram, &gDeferredFullbrightShinyProgram, &gHazeProgram,
                                        &gHazeOnWaterProgram, &gDeferredAvatarAlphaProgram,
                                        // the multi-material batches' glow, after the lighting as the scalar ones
-                                       &gPBRGlowIndexedProgram, &gDeferredEmissiveIndexedProgram })
+                                       &gPBRGlowIndexedProgram, &gDeferredEmissiveIndexedProgram,
+                                       // the water's, its waves' tessellated patches among them, and its haze
+                                       &gWaterProgram, &gUnderWaterProgram, &gWaterOpaqueProgram,
+                                       &gUnderWaterOpaqueProgram, &gWaterWavesProgram, &gUnderWaterWavesProgram,
+                                       &gWaterExclusionProgram, &gHazeWaterProgram })
         {
             program->mQLWanted = ql_lighting;
         }

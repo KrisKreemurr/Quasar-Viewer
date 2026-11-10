@@ -35,6 +35,11 @@ class LLVertexBuffer;
 extern bool (*gQLVulkanDrawRange)(const LLVertexBuffer* vb, unsigned mode, unsigned start, unsigned end, unsigned count,
                                   unsigned indices_offset);
 
+// And a draw with no vertex buffer (LLRender::drawArraysInstanced: the program places its vertices from gl_VertexID, as
+// the water's field does), with LLRender's mode and GL's patch size: true where Vulkan recorded it.
+extern bool (*gQLVulkanDrawInstanced)(unsigned mode, unsigned first, unsigned count, unsigned instances,
+                                      unsigned patch_vertices);
+
 inline void qlBeforeGLWork()
 {
     if (gQLBeforeGLWork)
