@@ -32,7 +32,16 @@ fi
 [ -d ~/.xwin ] || xwin --accept-license splat --output ~/.xwin
 [ -d ~/quasar-slipstream ] || git clone --branch quasar/slipstream --single-branch https://github.com/KrisKreemurr/Quasar-Viewer.git ~/quasar-slipstream
 cd ~/quasar-slipstream
-git pull
+# Follow the branch exactly (it may be rebuilt on a newer Slipstream, which a plain pull refuses)
+git fetch origin quasar/slipstream
+git reset --hard FETCH_HEAD
+# A different Slipstream version under the same build folder starts its configure fresh
+# (downloaded libraries and compiled files that still match are kept)
+VER=$(cat indra/newview/VIEWER_VERSION.txt)
+if [ -f build-windows-x86_64/.quasar-version ] && [ "$(cat build-windows-x86_64/.quasar-version)" != "$VER" ]; then
+  rm -rf build-windows-x86_64/CMakeCache.txt build-windows-x86_64/CMakeFiles
+fi
+mkdir -p build-windows-x86_64 && echo "$VER" > build-windows-x86_64/.quasar-version
 # WSL gets half the PC's memory, and Slipstream's biggest files need several GB each to
 # compile, so one job per ~3 GB (a crash with no error message was the compiler running out)
 MEM_GB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1048576 ))
