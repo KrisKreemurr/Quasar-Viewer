@@ -8436,6 +8436,9 @@ struct QLVulkanPresenter::Impl
         std::unordered_map<std::string, U32> members;  // the default block's, by name
         S32                   position = -1;            // the "position" attribute's location
         bool                  reads_emissive = false;   // diffuse_color then reads the emissive stream, as GL feeds it
+        // Its blocks bound at dynamic offsets (where the device allows as many), so a set names its textures alone and
+        // draws with the same textures share one: each draw's blocks are where its bytes are, given at the bind.
+        bool                  dynamic_blocks = false;
         U32                   outputs = 0;              // colour outputs (the highest location + 1)
         // Its attributes, each a stream of a mesh in the arena (GpStream): where a draw gives positions alone, only
         // "position" may be read.
@@ -8495,6 +8498,11 @@ struct QLVulkanPresenter::Impl
     U32                                mGpBlocksReusedLast = 0, mGpBlocksWrittenLast = 0;
     VkDeviceSize                       mGpHostPeak = 0, mGpHostPeakLast = 0;
     VkDeviceSize     mGpAlign = 256;
+    U32              mGpMaxDynamic = 0;  // maxDescriptorSetUniformBuffersDynamic
+    // The pass's sets by what they name (program, then each resource's views and samplers, or its block's size):
+    // a draw naming what an earlier one of the pass did binds that one's set.
+    std::unordered_map<U64, std::vector<std::pair<std::vector<U64>, VkDescriptorSet>>> mGpSetCache;
+    U32              mGpSetsMadeNow = 0, mGpSetsReusedNow = 0, mGpSetsMadeLast = 0, mGpSetsReusedLast = 0;
     VkSemaphore      mGpGLDoneVK = VK_NULL_HANDLE, mGpVKDoneVK = VK_NULL_HANDLE;
     GLuint           mGpGLDoneGL = 0, mGpVKDoneGL = 0;
     HANDLE           mGpGLDoneHandle = nullptr, mGpVKDoneHandle = nullptr;
@@ -8617,6 +8625,7 @@ struct QLVulkanPresenter::Impl
         VkPhysicalDeviceProperties props = {};
         vkGetPhysicalDeviceProperties(mPhysical, &props);
         mGpAlign = llmax((VkDeviceSize)props.limits.minUniformBufferOffsetAlignment, (VkDeviceSize)16);
+        mGpMaxDynamic = props.limits.maxDescriptorSetUniformBuffersDynamic;
         VkBufferCreateInfo host_info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         host_info.size        = GP_SLOT_BYTES * GP_SLOTS;
         host_info.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -8998,6 +9007,12 @@ struct QLVulkanPresenter::Impl
             }
         }
         std::vector<VkDescriptorSetLayoutBinding> bindings;
+        U32 block_count = 0;
+        for (const ql_glsl::Resource& r : p.refl.resources)
+        {
+            block_count += r.kind == ql_glsl::RES_UNIFORM_BLOCK ? 1 : 0;
+        }
+        p.dynamic_blocks = block_count <= mGpMaxDynamic;
         for (const ql_glsl::Resource& r : p.refl.resources)
         {
             if (r.set != 0)
@@ -9012,7 +9027,11 @@ struct QLVulkanPresenter::Impl
             b.stageFlags      = gpStages(r.stages ? r.stages : p.refl.stage_mask);
             switch (r.kind)
             {
-                case ql_glsl::RES_UNIFORM_BLOCK: b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b.descriptorCount = 1; break;
+                case ql_glsl::RES_UNIFORM_BLOCK:
+                    b.descriptorType  = p.dynamic_blocks ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                                         : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    b.descriptorCount = 1;
+                    break;
                 case ql_glsl::RES_SAMPLER: b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; break;
                 case ql_glsl::RES_STORAGE_IMAGE: b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; break;
                 default:
@@ -9671,12 +9690,13 @@ struct QLVulkanPresenter::Impl
     // A descriptor pool for a run's sets: a slot's own, or one more where a run filled it.
     VkDescriptorPool gpMakePool()
     {
-        const VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GP_SETS * 6 },
+        const VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GP_SETS * 6 },
+                                                { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, GP_SETS * 6 },
                                                 { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GP_SETS * 16 },
                                                 { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64 } };
         VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pool_info.maxSets       = GP_SETS;
-        pool_info.poolSizeCount = 3;
+        pool_info.poolSizeCount = 4;
         pool_info.pPoolSizes    = sizes;
         VkDescriptorPool pool = VK_NULL_HANDLE;
         if (vkCreateDescriptorPool(mDevice, &pool_info, nullptr, &pool) != VK_SUCCESS)
@@ -9895,6 +9915,7 @@ struct QLVulkanPresenter::Impl
         mGpTop      = 0;
         mGpBlocksDone.clear();
         vkResetDescriptorPool(mDevice, slot.pool, 0);
+        mGpSetCache.clear();
         for (VkDescriptorPool extra : slot.extra)
         {
             vkResetDescriptorPool(mDevice, extra, 0);
@@ -10069,6 +10090,7 @@ struct QLVulkanPresenter::Impl
         {
             const ql_glsl::Resource* r;
             VkDescriptorBufferInfo   buffer;
+            VkDescriptorBufferInfo   dyn_buffer;  // a dynamic block's: its offset given at the bind
             VkDescriptorImageInfo    images[16];
             GLuint                   names[16];
             VkImage                  vk_images[16];
@@ -10160,7 +10182,8 @@ struct QLVulkanPresenter::Impl
                     written.bytes = mGpBlockScratch;
                     ++mGpBlocksWritten;
                 }
-                b.buffer = { mGpHost, written.at, bytes };
+                b.buffer     = { mGpHost, written.at, bytes };
+                b.dyn_buffer = { mGpHost, 0, bytes };
             }
             else if (r.kind == ql_glsl::RES_SAMPLER)
             {
@@ -10332,9 +10355,64 @@ struct QLVulkanPresenter::Impl
             memcpy(mGpMapped + vertices_at, d.positions, (size_t)d.vertex_count * 12);
         }
         VkDescriptorSet set = VK_NULL_HANDLE;
+        // What the set names, and its blocks' offsets in binding order where they are dynamic.
+        static std::vector<U64> set_content;
+        set_content.clear();
+        set_content.push_back((U64)(U32)d.program);
+        std::vector<std::pair<U32, U32>> dynamic_offsets;
+        for (const Bound& b : bound)
+        {
+            set_content.push_back((U64)b.r->binding);
+            if (b.r->kind == ql_glsl::RES_UNIFORM_BLOCK)
+            {
+                if (p.dynamic_blocks)
+                {
+                    set_content.push_back((U64)b.buffer.range);
+                    dynamic_offsets.emplace_back(b.r->binding, (U32)b.buffer.offset);
+                }
+                else
+                {
+                    set_content.push_back((U64)b.buffer.offset * 0x100000000ull + b.buffer.range);
+                }
+            }
+            else
+            {
+                for (U32 e = 0; e < llmin(b.r->count, 16u); ++e)
+                {
+                    set_content.push_back((U64)(uintptr_t)b.images[e].imageView);
+                    set_content.push_back((U64)(uintptr_t)b.images[e].sampler);
+                }
+            }
+        }
+        std::sort(dynamic_offsets.begin(), dynamic_offsets.end());
+        U32 offsets[32];
+        const U32 offset_count = (U32)llmin(dynamic_offsets.size(), (size_t)32);
+        for (U32 i = 0; i < offset_count; ++i)
+        {
+            offsets[i] = dynamic_offsets[i].second;
+        }
+        U64 set_hash = 1469598103934665603ull;
+        for (U64 v : set_content)
+        {
+            set_hash = (set_hash ^ v) * 1099511628211ull;
+        }
+        auto& same_hash = mGpSetCache[set_hash];
+        for (const auto& [content, cached] : same_hash)
+        {
+            if (content == set_content)
+            {
+                set = cached;
+                break;
+            }
+        }
         VkDescriptorSetAllocateInfo set_alloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         set_alloc.descriptorSetCount = 1;
         set_alloc.pSetLayouts        = &p.setLayout;
+        if (set)
+        {
+            ++mGpSetsReusedNow;
+        }
+        else
         {
             // The slot's pool, then as many more as the run fills (a draw with many samplers takes many descriptors).
             GpSlot& slot = mGpSlots[mGpSlot];
@@ -10364,7 +10442,6 @@ struct QLVulkanPresenter::Impl
                 gpWhy("the pass's descriptor pools are full");
                 return false;
             }
-        }
         std::vector<VkWriteDescriptorSet> writes;
         writes.reserve(bound.size());
         for (const Bound& b : bound)
@@ -10375,8 +10452,9 @@ struct QLVulkanPresenter::Impl
             if (b.r->kind == ql_glsl::RES_UNIFORM_BLOCK)
             {
                 w.descriptorCount = 1;
-                w.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                w.pBufferInfo     = &b.buffer;
+                w.descriptorType  = p.dynamic_blocks ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                                     : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                w.pBufferInfo     = p.dynamic_blocks ? &b.dyn_buffer : &b.buffer;
             }
             else
             {
@@ -10387,6 +10465,9 @@ struct QLVulkanPresenter::Impl
             writes.push_back(w);
         }
         vkUpdateDescriptorSets(mDevice, (U32)writes.size(), writes.data(), 0, nullptr);
+        same_hash.emplace_back(set_content, set);
+        ++mGpSetsMadeNow;
+        }
 
         // Recorded from here: GL's images taken over, a barrier where this draw reads what an earlier one wrote (or
         // writes what one read), then the render pass.
@@ -10484,7 +10565,8 @@ struct QLVulkanPresenter::Impl
         {
             vkCmdSetDepthBounds(cmd, d.bounds_min, d.bounds_max);
         }
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &set,
+                                p.dynamic_blocks ? offset_count : 0, p.dynamic_blocks ? offsets : nullptr);
         if (mesh)
         {
             VkBuffer buffers[GP_STREAMS];
@@ -10710,6 +10792,9 @@ struct QLVulkanPresenter::Impl
         mGpHostPeak     = 0;
         mGpDrawNanosLast = mGpDrawNanosNow;
         mGpDrawNanosNow  = 0;
+        mGpSetsMadeLast   = mGpSetsMadeNow;
+        mGpSetsReusedLast = mGpSetsReusedNow;
+        mGpSetsMadeNow = mGpSetsReusedNow = 0;
     }
 
     std::string gpInfo() const
@@ -10723,11 +10808,12 @@ struct QLVulkanPresenter::Impl
         {
             programs += p.ok ? 1 : 0;
         }
-        return llformat("%u draws in %u passes last frame, %u kept by GL, Vulkan's part %.1f ms (%.1f us a draw) | %u of "
-                        "%u programs compiled | blocks %u written, %u reused, fullest pass %.1f of %u MB",
+        return llformat("%u draws in %u passes last frame, %u kept by GL, Vulkan's part %.1f ms (%.1f us a draw), "
+                        "sets %u made, %u reused | %u of %u programs compiled | blocks %u written, %u reused, fullest "
+                        "pass %.1f of %u MB",
                         mGpDrawsLast, mGpPassesLast, mGpKeptLast, (double)mGpDrawNanosLast / 1e6,
-                        mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0, programs,
-                        (U32)mGpPrograms.size(),
+                        mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0, mGpSetsMadeLast,
+                        mGpSetsReusedLast, programs, (U32)mGpPrograms.size(),
                         mGpBlocksWrittenLast, mGpBlocksReusedLast, (double)mGpHostPeakLast / (1 << 20),
                         (U32)(GP_SLOT_BYTES >> 20)) +
                (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);
