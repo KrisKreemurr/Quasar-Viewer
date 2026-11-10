@@ -205,6 +205,7 @@ std::string ql_vulkan_probe_draws_info();  // pipeline.cpp (QuasarVulkanProbeDra
 std::string ql_vulkan_main_draws_info();   // pipeline.cpp (QuasarVulkanMainDraws)
 std::string ql_vulkan_pbr_draws_info();    // pipeline.cpp (QuasarVulkanPBRDraws)
 std::string ql_vulkan_material_draws_info();  // pipeline.cpp (QuasarVulkanMaterialDraws)
+std::string ql_frame_phases_info();           // llviewerdisplay.cpp
 std::string ql_vulkan_mask_draws_info();  // pipeline.cpp (QuasarVulkanMaskDraws)
 std::string ql_vulkan_bump_draws_info();  // pipeline.cpp (QuasarVulkanBumpDraws)
 std::string ql_vulkan_lighting_info();    // pipeline.cpp (QuasarVulkanLighting)
@@ -640,6 +641,10 @@ public:
             addText(xpos + 200, ypos, llformat("Flycam"));
             ypos += y_inc;
         }*/
+
+        // Quasar: where the frame's CPU time goes, at the bottom so the screen's top never cuts it.
+        addText(xpos, ypos, "Quasar frame (CPU, ms): " + ql_frame_phases_info());
+        ypos += y_inc;
 
         // Quasar: what the Hi-Z object cull is doing (QLHiZCull).
         static LLCachedControl<bool> show_hiz_info(gSavedSettings, "QuasarShowHiZInfo", true);

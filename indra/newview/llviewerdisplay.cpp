@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llviewerdisplay.h"
+#include <chrono>
 
 #include "alfarplane.h"
 #include "alfloaterprogressview.h"
@@ -500,6 +501,61 @@ void display_end_frame()
 }
 
 // Paint the display!
+
+// Quasar: where a frame's CPU time goes, by phase, for the debug text (ql_frame_phases_info). ql_frame_mark(p) gives
+// the time since the last mark to phase p; the main loop marks QL_PHASE_REST at the top of each frame, which takes
+// whatever no other mark did (the sleep, the pacing wait). Averaged over the last half second.
+enum EQLFramePhase : int
+{
+    QL_PHASE_IDLE, QL_PHASE_CULL, QL_PHASE_SHADOWS, QL_PHASE_STATESORT, QL_PHASE_SCENE, QL_PHASE_LIGHTING,
+    QL_PHASE_POST_UI, QL_PHASE_SWAP, QL_PHASE_PROBES, QL_PHASE_REST, QL_PHASE_UPDATE, QL_PHASE_COUNT
+};
+static std::chrono::steady_clock::time_point sQLPhaseMark = std::chrono::steady_clock::now();
+static double sQLPhaseSum[QL_PHASE_COUNT] = {}, sQLPhaseShown[QL_PHASE_COUNT] = {};
+static U32 sQLPhaseFrames = 0;
+static std::chrono::steady_clock::time_point sQLPhaseWindow = std::chrono::steady_clock::now();
+
+void ql_frame_mark(int phase)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (phase >= 0 && phase < QL_PHASE_COUNT)
+    {
+        sQLPhaseSum[phase] += std::chrono::duration<double, std::milli>(now - sQLPhaseMark).count();
+    }
+    sQLPhaseMark = now;
+    if (phase == QL_PHASE_REST)
+    {
+        ++sQLPhaseFrames;
+        if (now - sQLPhaseWindow > std::chrono::milliseconds(500))
+        {
+            for (int i = 0; i < QL_PHASE_COUNT; ++i)
+            {
+                sQLPhaseShown[i] = sQLPhaseFrames ? sQLPhaseSum[i] / sQLPhaseFrames : 0.0;
+                sQLPhaseSum[i]   = 0.0;
+            }
+            sQLPhaseFrames = 0;
+            sQLPhaseWindow = now;
+        }
+    }
+}
+
+std::string ql_frame_phases_info()
+{
+    static const char* const names[QL_PHASE_COUNT] = { "idle", "cull", "shadows", "sort", "scene", "lighting+water+alpha",
+                                                       "post+UI", "swap+pacing", "probes", "sleep", "updates" };
+    double total = 0.0;
+    for (double ms : sQLPhaseShown)
+    {
+        total += ms;
+    }
+    std::string info = llformat("%.1f ms |", total);
+    for (int i = 0; i < QL_PHASE_COUNT; ++i)
+    {
+        info += llformat(" %s %.1f", names[i], sQLPhaseShown[i]);
+    }
+    return info;
+}
+
 void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
 {
     LL_PROFILE_ZONE_NAMED_CATEGORY_DISPLAY("Render");
@@ -907,8 +963,10 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
         static LLCullResult result;
         LLViewerCamera::sCurCameraID = LLViewerCamera::CAMERA_WORLD;
         LLPipeline::sUnderWaterRender = LLViewerCamera::getInstance()->cameraUnderWater();
+        ql_frame_mark(QL_PHASE_UPDATE);  // what display() does before the cull: the objects' and the scene's updates
         gPipeline.updateCull(*LLViewerCamera::getInstance(), result);
         stop_glerror();
+        ql_frame_mark(QL_PHASE_CULL);
 
         LLGLState::checkStates();
 
@@ -928,6 +986,7 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
                   //try to generate a shadow before the first frame is through
                     gPipeline.generateSunShadow(*LLViewerCamera::getInstance());
                 }
+                ql_frame_mark(QL_PHASE_SHADOWS);
 
                 LLVertexBuffer::unbind();
 
@@ -1001,6 +1060,7 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
             LLViewerCamera::sCurCameraID = LLViewerCamera::CAMERA_WORLD;
             gPipeline.stateSort(*LLViewerCamera::getInstance(), result);
             stop_glerror();
+            ql_frame_mark(QL_PHASE_STATESORT);
 
             if (rebuild)
             {
@@ -1127,7 +1187,9 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
             }
 
             gGL.setColorMask(true, true);
+            ql_frame_mark(QL_PHASE_STATESORT);  // the rebuild and setup since the sort
             gPipeline.renderGeomDeferred(*LLViewerCamera::getInstance(), true);
+            ql_frame_mark(QL_PHASE_SCENE);
 
             // Quasar: the G-buffer's depth now holds every opaque surface of the main view; read a pyramid of it back for
             // the Hi-Z object cull of a frame a few from now.
@@ -1151,6 +1213,7 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
         {
             gPipeline.renderDeferredLighting();
         }
+        ql_frame_mark(QL_PHASE_LIGHTING);
 
         LLPipeline::sUnderWaterRender = false;
 
@@ -1163,6 +1226,7 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
         if (!for_snapshot)
         {
             render_ui();
+            ql_frame_mark(QL_PHASE_POST_UI);
             presented = gDisplaySwapBuffers;
             // Quasar: the frame as it is shown, for the generated frame that follows it.
             if (presented)
@@ -1173,6 +1237,7 @@ void display(bool rebuild, F32 zoom_factor, int subfield, bool for_snapshot)
             if (!presented || !QLFrameWarp::instance().swapInstead())
             {
                 swap();
+                ql_frame_mark(QL_PHASE_SWAP);
             }
             QLFrameWarp::instance().noteRealSwap(presented);
         }

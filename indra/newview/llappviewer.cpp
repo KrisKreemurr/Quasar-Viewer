@@ -1384,6 +1384,8 @@ void LLAppViewer::initMaxHeapSize()
 
 
 // externally visible timers
+void ql_frame_mark(int phase);  // Quasar (llviewerdisplay.cpp): the frame's CPU time by phase
+
 bool LLAppViewer::frame()
 {
     bool ret = false;
@@ -1561,7 +1563,9 @@ bool LLAppViewer::doFrame()
                 {
                     LLPerfStats::RecordSceneTime T (LLPerfStats::StatType_t::RENDER_IDLE);
                     LL_PROFILE_ZONE_NAMED_CATEGORY_APP("df idle");
+                    ql_frame_mark(9);  // Quasar: QL_PHASE_REST, the frame's start (llviewerdisplay.cpp)
                     idle();
+                    ql_frame_mark(0);  // QL_PHASE_IDLE
                 }
 #if QL_VULKAN_PRESENTER
                 QLVulkanPresenter::latencyMark(QLVulkanPresenter::SIMULATION_END);
@@ -1610,10 +1614,12 @@ bool LLAppViewer::doFrame()
                     pingMainloopTimeout("Main:Snapshot");
                     // Probes are captured only while the world is drawn: a hidden or minimized window shows none of
                     // them, so their captures would be GPU work for nothing.
+                    ql_frame_mark(7);  // Quasar: QL_PHASE_SWAP, the frame's end (display_end_frame's pacing wait)
                     if (!display_window_hidden())
                     {
                         gPipeline.mReflectionMapManager.update();
                     }
+                    ql_frame_mark(8);  // QL_PHASE_PROBES
                     LLFloaterSnapshot::update(); // take snapshots
                     LLFloaterSimpleSnapshot::update();
                     gGLActive = false;
