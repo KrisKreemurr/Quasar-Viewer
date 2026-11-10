@@ -33,11 +33,17 @@ fi
 [ -d ~/quasar-slipstream ] || git clone --branch quasar/slipstream --single-branch https://github.com/KrisKreemurr/Quasar-Viewer.git ~/quasar-slipstream
 cd ~/quasar-slipstream
 git pull
+# WSL gets half the PC's memory, and Slipstream's biggest files need several GB each to
+# compile, so one job per ~3 GB (a crash with no error message was the compiler running out)
+MEM_GB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1048576 ))
+JOBS=$(( MEM_GB / 3 )); [ "$JOBS" -lt 2 ] && JOBS=2; [ "$JOBS" -gt "$(nproc)" ] && JOBS=$(nproc)
+export NINJA_JOBS=${NINJA_JOBS:-$JOBS}
+echo "Building with $NINJA_JOBS jobs ($MEM_GB GB for Linux)"
 # The whole log is kept (also on C:), and a failure prints only the real errors
 if ! make windows 2>&1 | tee ~/quasar-build.log; then
   cp ~/quasar-build.log /mnt/c/dev/quasar-build.log 2>/dev/null || true
   echo; echo "===== BUILD FAILED: the errors (full log in C:\\dev\\quasar-build.log) ====="
-  grep -E -B2 -A10 "error:|Error [0-9]|FAILED:|CMake Error" ~/quasar-build.log | grep -v "warning:" | head -80
+  grep -E -A3 " error:|Killed|signal|CMake Error" ~/quasar-build.log | grep -v -E "warning:|^/usr/lib/llvm" | head -60 || echo "(no error message: the compiler was most likely out of memory; run: NINJA_JOBS=2 bash setup.sh)"
   exit 1
 fi
 rm -rf /mnt/c/dev/QuasarSlipstream
