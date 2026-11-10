@@ -514,6 +514,11 @@ static std::chrono::steady_clock::time_point sQLPhaseMark = std::chrono::steady_
 static double sQLPhaseSum[QL_PHASE_COUNT] = {}, sQLPhaseShown[QL_PHASE_COUNT] = {};
 static U32 sQLPhaseFrames = 0;
 static std::chrono::steady_clock::time_point sQLPhaseWindow = std::chrono::steady_clock::now();
+// Every frame's length over the last ten seconds, for a steady reading: the average FPS and the 1% low (the FPS the
+// slowest 1% of frames ran at), worked out with the phases every half second.
+static std::chrono::steady_clock::time_point sQLFrameStart = std::chrono::steady_clock::now();
+static std::vector<std::pair<std::chrono::steady_clock::time_point, float>> sQLFrameTimes;
+static double sQLAvgFPS = 0.0, sQLLowFPS = 0.0, sQLSpan = 0.0;
 
 void ql_frame_mark(int phase)
 {
@@ -525,6 +530,9 @@ void ql_frame_mark(int phase)
     sQLPhaseMark = now;
     if (phase == QL_PHASE_REST)
     {
+        const float frame_ms = std::chrono::duration<float, std::milli>(now - sQLFrameStart).count();
+        sQLFrameStart = now;
+        sQLFrameTimes.emplace_back(now, frame_ms);
         ++sQLPhaseFrames;
         if (now - sQLPhaseWindow > std::chrono::milliseconds(500))
         {
@@ -535,6 +543,31 @@ void ql_frame_mark(int phase)
             }
             sQLPhaseFrames = 0;
             sQLPhaseWindow = now;
+
+            const auto oldest = now - std::chrono::seconds(10);
+            size_t drop = 0;
+            while (drop < sQLFrameTimes.size() && sQLFrameTimes[drop].first < oldest)
+            {
+                ++drop;
+            }
+            sQLFrameTimes.erase(sQLFrameTimes.begin(), sQLFrameTimes.begin() + (std::ptrdiff_t)drop);
+            if (!sQLFrameTimes.empty())
+            {
+                std::vector<float> ms;
+                ms.reserve(sQLFrameTimes.size());
+                double total = 0.0;
+                for (const auto& f : sQLFrameTimes)
+                {
+                    ms.push_back(f.second);
+                    total += f.second;
+                }
+                // The slowest 1%: the frame length the 99th percentile reaches.
+                const size_t at = llmin(ms.size() - 1, (size_t)((double)ms.size() * 0.99));
+                std::nth_element(ms.begin(), ms.begin() + (std::ptrdiff_t)at, ms.end());
+                sQLAvgFPS = total > 0.0 ? 1000.0 * (double)ms.size() / total : 0.0;
+                sQLLowFPS = ms[at] > 0.f ? 1000.0 / ms[at] : 0.0;
+                sQLSpan   = std::chrono::duration<double>(now - sQLFrameTimes.front().first).count();
+            }
         }
     }
 }
@@ -548,7 +581,8 @@ std::string ql_frame_phases_info()
     {
         total += ms;
     }
-    std::string info = llformat("%.1f ms |", total);
+    std::string info = llformat("last %.0f s: average %.1f FPS, 1%% low %.1f FPS | %.1f ms |", sQLSpan, sQLAvgFPS,
+                                sQLLowFPS, total);
     for (int i = 0; i < QL_PHASE_COUNT; ++i)
     {
         info += llformat(" %s %.1f", names[i], sQLPhaseShown[i]);
