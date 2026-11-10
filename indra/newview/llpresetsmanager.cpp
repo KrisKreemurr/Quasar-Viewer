@@ -748,6 +748,11 @@ void LLPresetsManager::getLooksControlNames(std::vector<std::string>& names)
         "RenderFilmGrainTint",
         // Sharpen
         "RenderCASSharpness",
+        // PS1 look (Quasar)
+        "QuasarPS1Filter",
+        "QuasarPS1Lines",
+        "QuasarPS1ColorBits",
+        "QuasarPS1Dither",
     };
     names = looks_controls;
 }

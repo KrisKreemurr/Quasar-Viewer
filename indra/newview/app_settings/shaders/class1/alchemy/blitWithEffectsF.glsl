@@ -57,6 +57,11 @@ uniform sampler2D uReferenceStill;
 uniform int       uRefWipeMode;     // 0 off, 1 wipe, 2 side by side.
 uniform float     uRefWipePos;      // Seam position, 0..1 across the frame.
 
+// Quasar: the PS1 look (QuasarPS1Filter). 0 lines is off.
+uniform int       uPS1Lines;        // The lines the picture is drawn at, top to bottom.
+uniform int       uPS1Bits;         // Bits a colour channel keeps.
+uniform int       uPS1Dither;       // The dither pattern's strength, in hundredths.
+
 // =============================================================================
 // Forward Declarations
 // =============================================================================
@@ -192,20 +197,85 @@ vec3 applyWipeSeam(vec3 color, vec2 uv)
 }
 
 // =============================================================================
+// PS1 look (Quasar)
+// =============================================================================
+//
+// The frame as the PlayStation put it out: drawn at a few hundred lines (each
+// low-resolution pixel one sample of the frame, square, its centre's), then
+// each colour channel cut to a few bits -- 5, its 15-bit colour -- with its
+// GPU's 4x4 ordered dither added first. The dither is the console's own table,
+// in 8-bit steps, added before the low bits are dropped, and laid on the
+// low-resolution grid: that is the pattern of dots and crosses its shading
+// showed across every gradient.
+
+// The low-resolution pixel `uv` falls in, and the frame coordinate of its centre.
+vec2 ps1Snap(vec2 uv, out ivec2 cell)
+{
+    vec2  size  = vec2(textureSize(diffuseRect, 0));
+    float lines = float(uPS1Lines);
+    vec2  grid  = vec2(max(1.0, floor(lines * size.x / size.y + 0.5)), lines);
+    vec2  c     = floor(uv * grid);
+    cell = ivec2(c);
+    return (c + 0.5) / grid;
+}
+
+vec3 ps1Quantize(vec3 color, ivec2 cell)
+{
+    // The PlayStation GPU's dither matrix, in 8-bit units, rows top to bottom.
+    const float ps1_dither[16] = float[16](-4.0,  0.0, -3.0,  1.0,
+                                            2.0, -2.0,  3.0, -1.0,
+                                           -3.0,  1.0, -4.0,  0.0,
+                                            3.0, -1.0,  2.0, -2.0);
+    // GL's rows run bottom up: the cell's row counted from the top, so the
+    // pattern is the console's way up.
+    int   lines = max(uPS1Lines, 1);
+    int   row   = (lines - 1 - cell.y) & 3;
+    float d     = ps1_dither[row * 4 + (cell.x & 3)];
+
+    int   bits   = clamp(uPS1Bits, 1, 8);
+    float levels = exp2(float(bits));      // 32 for 5 bits
+    float step8  = 256.0 / levels;         // 8 for 5 bits
+    float amount = float(uPS1Dither) * 0.01;
+
+    // As the GPU did it: the 8-bit value, plus the table's offset (scaled to the
+    // step, so fewer bits dither as visibly), with the low bits dropped.
+    vec3 c8 = clamp(color, 0.0, 1.0) * 255.0 + d * (step8 / 8.0) * amount;
+    vec3 q  = floor(clamp(c8, 0.0, 255.0) / step8);
+    return q / (levels - 1.0);
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 void main()
 {
     // === DISPLAY SPACE =======================================================
 
-    vec4 diff = sampleWithReference(vary_fragcoord.xy);
+    vec2  uv       = vary_fragcoord.xy;
+    ivec2 ps1_cell = ivec2(0);
+    bool  ps1      = uPS1Lines > 0;
+    if (ps1)
+    {
+        uv = ps1Snap(uv, ps1_cell);
+    }
+
+    vec4 diff = sampleWithReference(uv);
 
     diff.rgb = applyVignette(diff.rgb, vary_fragcoord.xy);
     diff.rgb = applyCVDCompensation(diff.rgb);
     diff.rgb = applyFilmGrain(diff.rgb, gl_FragCoord.xy);
 #ifdef DITHER
-    diff.rgb = applyDither(diff.rgb, gl_FragCoord.xy);
+    if (!ps1)
+    {
+        diff.rgb = applyDither(diff.rgb, gl_FragCoord.xy);
+    }
 #endif
+    if (ps1)
+    {
+        // Its own dither is the quantisation's; the grain and vignette are cut
+        // with the rest, as anything on its screen was.
+        diff.rgb = ps1Quantize(diff.rgb, ps1_cell);
+    }
     diff.rgb = applyPreview(diff.rgb);   // debug only — no-op when uPreviewMode == 0
     diff.rgb = applyWipeSeam(diff.rgb, vary_fragcoord.xy);
 

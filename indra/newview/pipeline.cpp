@@ -12137,6 +12137,21 @@ void LLPipeline::renderFinalize()
         blit.uniform1i(LLShaderMgr::CVD_MODE, suppress_effects ? 0 : llclamp(cvd_mode(), 0, 3));
         blit.uniform1f(LLShaderMgr::CVD_AMOUNT, suppress_effects ? 0.0f : llclamp(cvd_amount(), 0.0f, 1.0f));
 
+        // Quasar: the PS1 look (blitWithEffectsF.glsl's ps1Snap and ps1Quantize), a print effect like the rest.
+        {
+            static LLCachedControl<bool> ps1_on(gSavedSettings, "QuasarPS1Filter", false);
+            static LLCachedControl<F32>  ps1_lines(gSavedSettings, "QuasarPS1Lines", 240.f);
+            static LLCachedControl<F32>  ps1_bits(gSavedSettings, "QuasarPS1ColorBits", 5.f);
+            static LLCachedControl<F32>  ps1_dither(gSavedSettings, "QuasarPS1Dither", 1.f);
+            static const LLStaticHashedString ps1_lines_name("uPS1Lines");
+            static const LLStaticHashedString ps1_bits_name("uPS1Bits");
+            static const LLStaticHashedString ps1_dither_name("uPS1Dither");
+            const bool ps1 = ps1_on && !suppress_effects;
+            blit.uniform1i(ps1_lines_name, ps1 ? llclamp(ll_round(ps1_lines()), 60, 2160) : 0);
+            blit.uniform1i(ps1_bits_name, llclamp(ll_round(ps1_bits()), 1, 8));
+            blit.uniform1i(ps1_dither_name, llclamp(ll_round(ps1_dither() * 100.f), 0, 400));
+        }
+
         // Film Grain
         static LLCachedControl<bool>     film_grain_animated(gSavedSettings, "RenderFilmGrainAnimated", true);
         static LLCachedControl<F32>      film_grain_amount(gSavedSettings, "RenderFilmGrainAmount", 0.0f);

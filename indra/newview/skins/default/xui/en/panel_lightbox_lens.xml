@@ -3129,5 +3129,99 @@ wired.)
 				</button>
 			</panel>
 		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="167"
+		 name="atab_sec_ps1"
+		 title="PS1 Look"
+		 header_tool_tip="The frame as a PlayStation drew it: a low resolution, colour cut to a few bits a channel, and the console's dither pattern of dots and crosses over every gradient."
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="138"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_ps1">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 height="16"
+				 label="PS1 look"
+				 name="ps1_enabled"
+				 tool_tip="Draws the frame as a PlayStation did: low resolution, few colours, ordered dither"
+				 control_name="QuasarPS1Filter" />
+				<setting_row
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-8"
+				 height="18"
+				 label="Resolution (lines)"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="120"
+				 max_val="720"
+				 name="ps1_lines"
+				 tool_tip="The lines the picture is drawn at, top to bottom; 240 is the PlayStation's. Pixels stay square."
+				 enabled_control="QuasarPS1Filter"
+				 control_name="QuasarPS1Lines" />
+				<setting_row
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-8"
+				 height="18"
+				 label="Color depth (bits)"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="2"
+				 max_val="8"
+				 name="ps1_bits"
+				 tool_tip="Bits each color channel keeps; 5 is the PlayStation's 15-bit color, fewer bands harder."
+				 enabled_control="QuasarPS1Filter"
+				 control_name="QuasarPS1ColorBits" />
+				<setting_row
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-8"
+				 height="18"
+				 label="Dither"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 name="ps1_dither"
+				 tool_tip="Strength of the PlayStation's 4x4 dither pattern over the color steps; 1 as the console did it, 0 plain banding."
+				 enabled_control="QuasarPS1Filter"
+				 control_name="QuasarPS1Dither" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_ps1_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="LightBox.ResetSection"
+					 parameter="sec_ps1" />
+				</button>
+			</panel>
+		</accordion_tab>
 	</accordion>
 </panel>

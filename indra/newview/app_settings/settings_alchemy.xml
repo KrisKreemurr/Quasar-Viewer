@@ -2718,6 +2718,50 @@
             <key>Value</key>
             <integer>0</integer>
         </map>
+        <key>QuasarPS1Filter</key>
+        <map>
+            <key>Comment</key>
+            <string>Quasar: the PS1 look over the finished frame: the picture drawn at a low resolution, its colours cut to a few bits a channel and dithered with the PlayStation's own 4x4 pattern. Off by default.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>QuasarPS1Lines</key>
+        <map>
+            <key>Comment</key>
+            <string>[120, 720] Quasar PS1 look: the lines the picture is drawn at, top to bottom (240 is the PlayStation's); the pixels stay square.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>240</real>
+        </map>
+        <key>QuasarPS1ColorBits</key>
+        <map>
+            <key>Comment</key>
+            <string>[2, 8] Quasar PS1 look: bits a colour channel keeps (5 is the PlayStation's 15-bit colour; fewer bands harder).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>5</real>
+        </map>
+        <key>QuasarPS1Dither</key>
+        <map>
+            <key>Comment</key>
+            <string>[0, 2] Quasar PS1 look: how strongly the PlayStation's 4x4 dither pattern is laid over the colour steps (1 as the console did it, 0 none: plain banding).</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>1</real>
+        </map>
         <key>QuasarVulkanKeepGL</key>
         <map>
             <key>Comment</key>
