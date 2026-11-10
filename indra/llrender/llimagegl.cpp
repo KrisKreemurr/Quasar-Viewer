@@ -4279,6 +4279,8 @@ namespace
 }
 
 // static
+const char* gQLCopyWhy = "";
+
 U32 LLImageGL::qlVulkanCopyOf(U32 name)
 {
     if (!name || !gQLExternalStorage)
@@ -4316,6 +4318,7 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
     {
         if (c.mMissFrame == LLImageGL::sFrameCount + 1)
         {
+            gQLCopyWhy = "no image of its own found for it";
             return 0;
         }
         ql_drop_copy(c);
@@ -4331,13 +4334,24 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
         if (!c.mImage)
         {
             c.mMissFrame = LLImageGL::sFrameCount + 1;
+            gQLCopyWhy   = "no image of its own found for it (not an LLImageGL with storage, or not 2D)";
             return 0;
         }
     }
-    const StorageDesc& storage = c.mImage->mStorage;
+    // What its owner allocated where it was not allocateTextureStorage (markStorageAllocated: the bump maps the bump
+    // list draws into): the image's own size, format and whole mip chain where it mips, as those owners allocate.
+    StorageDesc storage = c.mImage->mStorage;
+    if (storage.mWidth <= 0 || storage.mHeight <= 0 || storage.mLevels <= 0 || storage.mFormat == 0)
+    {
+        storage.mWidth  = c.mImage->getWidth(0);
+        storage.mHeight = c.mImage->getHeight(0);
+        storage.mLevels = c.mImage->getUseMipMaps() ? calcMipLevelCount(storage.mWidth, storage.mHeight) : 1;
+        storage.mFormat = c.mImage->getStorageInternalFormat();
+    }
     const U64 stamp = c.mImage->getContentStamp();
     if (!c.mCopy && stamp && c.mFailedStamp == stamp)
     {
+        gQLCopyWhy = "Vulkan's memory had no room for its copy (or not its format)";
         return 0;  // no storage for it in Vulkan's memory last time: not asked again every frame
     }
     const bool same_shape = c.mCopy && c.mWidth == storage.mWidth && c.mHeight == storage.mHeight &&
@@ -4368,6 +4382,7 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
         ql_drop_copy(c);
         if (storage.mWidth <= 0 || storage.mHeight <= 0 || storage.mLevels <= 0)
         {
+            gQLCopyWhy = "its storage has no size";
             return 0;
         }
         LLImageGL::generateTextures(1, &c.mCopy);
@@ -4379,6 +4394,7 @@ U32 LLImageGL::qlVulkanCopyOf(U32 name)
             restore();
             c.mMissFrame   = LLImageGL::sFrameCount + 1;
             c.mFailedStamp = stamp;
+            gQLCopyWhy     = "Vulkan's memory had no room for its copy (or not its format)";
             return 0;
         }
         c.mWidth  = storage.mWidth;

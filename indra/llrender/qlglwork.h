@@ -40,6 +40,9 @@ extern bool (*gQLVulkanDrawRange)(const LLVertexBuffer* vb, unsigned mode, unsig
 extern bool (*gQLVulkanDrawInstanced)(unsigned mode, unsigned first, unsigned count, unsigned instances,
                                       unsigned patch_vertices);
 
+// Why LLImageGL::qlVulkanCopyOf last gave no copy (for the status line); set by llimagegl.cpp.
+extern const char* gQLCopyWhy;
+
 inline void qlBeforeGLWork()
 {
     if (gQLBeforeGLWork)

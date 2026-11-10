@@ -12971,6 +12971,12 @@ namespace
                         {
                             t.texture = 0;  // black, as above: no copy of what a batch left there
                         }
+                        else
+                        {
+                            ql_lighting_kept(llformat("%s: %s (GL name %u) has no copy in Vulkan's memory: %s",
+                                                      shader.mName.c_str(), t.name, t.texture, gQLCopyWhy));
+                            return false;
+                        }
                     }
                     ALSamplerDesc desc;
                     if (!gGL.describeSampler(slot->getCurrSampler(), desc))
@@ -15778,7 +15784,8 @@ void ql_vulkan_clear(LLRenderTarget* target, U32 mask)
 }
 
 // A draw of `vb` as GL would make it now (drawRange's arguments), recorded for Vulkan while the stage's run is open.
-static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset)
+static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 offset,
+                                    U32 gl_mode = GL_TRIANGLES)
 {
 #if QL_VULKAN_SHADOWS
     (void)start;
@@ -15827,6 +15834,7 @@ static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 
         mesh.first_index = offset;
         mesh.index_count = count;
         QLGLState state = ql_gl_state_now();
+        state.topology  = gl_mode;
         drawn = ql_run_draw(*shader, target, state, nullptr, 0, &mesh);
     }
     return ql_stage_drawn(drawn);
@@ -15857,14 +15865,19 @@ bool ql_vulkan_draw_now(LLVertexBuffer* vb, U32 start, U32 end, U32 count, U32 o
     {
         return false;
     }
-    if (mode != LLRender::TRIANGLES)
+    if (mode != LLRender::TRIANGLES && mode != LLRender::TRIANGLE_STRIP && mode != LLRender::TRIANGLE_FAN)
     {
 #if QL_VULKAN_SHADOWS
-        ql_lighting_kept("a draw of other than triangles");
+        static const char* const MODE_NAMES[] = { "triangles", "triangle strip", "triangle fan", "points", "lines",
+                                                  "line strip", "line loop" };
+        const LLGLSLShader* shader = LLGLSLShader::sCurBoundShaderPtr;
+        ql_lighting_kept(llformat("%s: a draw of %s", shader ? shader->mName.c_str() : "no program",
+                                  mode < sizeof(MODE_NAMES) / sizeof(MODE_NAMES[0]) ? MODE_NAMES[mode] : "patches"));
 #endif
         return ql_stage_drawn(false);
     }
-    return ql_vulkan_draw_now_impl(const_cast<LLVertexBuffer*>(vb), start, end, count, indices_offset);
+    return ql_vulkan_draw_now_impl(const_cast<LLVertexBuffer*>(vb), start, end, count, indices_offset,
+                                   LLVertexBuffer::sGLMode[mode]);
 }
 
 // The pipeline's full-screen triangle (mScreenTriangleVB) drawn with what GL has bound now: Vulkan's where a stage is
