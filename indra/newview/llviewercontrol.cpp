@@ -964,6 +964,8 @@ void settings_setup_listeners()
     LL_PROFILE_ZONE_SCOPED;
     setting_setup_signal_listener(gSavedSettings, "FirstPersonAvatarVisible", handleRenderAvatarMouselookChanged);
     setting_setup_signal_listener(gSavedSettings, "NumpadControl", handleNumpadControlChanged);
+    // The preferences slider asks for this itself; typing the number in Debug Settings did not, so the UI kept its size until a resize
+    setting_setup_signal_listener(gSavedSettings, "UIScaleFactor", []() { if (gViewerWindow) gViewerWindow->requestResolutionUpdate(); });
     setting_setup_signal_listener(gSavedSettings, "RenderFarClip", handleRenderFarClipChanged);
     setting_setup_signal_listener(gSavedSettings, "AlchemyRenderMemoryDrawDistanceLimit", handleMemoryDrawDistanceLimitChanged);
     // Listeners only fire on change, so hand LLMemory the starting value.
