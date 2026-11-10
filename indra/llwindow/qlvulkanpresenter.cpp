@@ -29,6 +29,9 @@
 
 #include "llglheaders.h"
 #include "llstring.h"
+#include "lldir.h"  // the pipeline cache's file
+#include "lltimer.h"
+#include "llfile.h"
 
 #define VK_NO_PROTOTYPES
 #ifndef VK_USE_PLATFORM_WIN32_KHR
@@ -450,6 +453,9 @@ struct QLVulkanPresenter::Impl
     QL_VK_FN(vkCreateFramebuffer);
     QL_VK_FN(vkDestroyFramebuffer);
     QL_VK_FN(vkCreateGraphicsPipelines);
+    QL_VK_FN(vkCreatePipelineCache);
+    QL_VK_FN(vkGetPipelineCacheData);
+    QL_VK_FN(vkDestroyPipelineCache);
     QL_VK_FN(vkCmdBeginRenderPass);
     QL_VK_FN(vkCmdEndRenderPass);
     QL_VK_FN(vkCmdDraw);
@@ -638,6 +644,92 @@ struct QLVulkanPresenter::Impl
         return true;
     }
 
+    // The pipelines' cache, on disk between sessions (the cache folder's quasar_vk_pipelines.bin): a pipeline built
+    // before is taken from it rather than compiled again, so a view's first sight of a material does not stall the
+    // frame on the driver's compiler. The driver checks the data's header and ignores data not its own.
+    VkPipelineCache mPipelineCache = VK_NULL_HANDLE;
+    U32  mPipelinesSinceSave = 0;
+    F64  mPipelineSavedAt = 0.0;
+    U32  mPipelinesMadeNow = 0, mPipelinesMadeLast = 0;
+    U64  mPipelineNanosNow = 0, mPipelineNanosLast = 0;
+
+    static std::string pipelineCachePath()
+    {
+        return gDirUtilp ? gDirUtilp->getExpandedFilename(LL_PATH_CACHE, "quasar_vk_pipelines.bin") : std::string();
+    }
+
+    void pipelineCacheLoad()
+    {
+        std::vector<char> data;
+        const std::string path = pipelineCachePath();
+        if (!path.empty())
+        {
+            llifstream in(path.c_str(), std::ios::binary);
+            if (in.is_open())
+            {
+                data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+        }
+        VkPipelineCacheCreateInfo info = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+        info.initialDataSize = data.size();
+        info.pInitialData    = data.empty() ? nullptr : data.data();
+        if (vkCreatePipelineCache(mDevice, &info, nullptr, &mPipelineCache) != VK_SUCCESS)
+        {
+            // Data the driver will not take: an empty cache instead.
+            info.initialDataSize = 0;
+            info.pInitialData    = nullptr;
+            if (vkCreatePipelineCache(mDevice, &info, nullptr, &mPipelineCache) != VK_SUCCESS)
+            {
+                mPipelineCache = VK_NULL_HANDLE;
+            }
+        }
+        LL_INFOS("Vulkan") << "Pipeline cache: " << data.size() << " bytes read from " << path << LL_ENDL;
+    }
+
+    void pipelineCacheSave()
+    {
+        if (!mPipelineCache || !mDevice)
+        {
+            return;
+        }
+        size_t size = 0;
+        if (vkGetPipelineCacheData(mDevice, mPipelineCache, &size, nullptr) != VK_SUCCESS || size == 0)
+        {
+            return;
+        }
+        std::vector<char> data(size);
+        if (vkGetPipelineCacheData(mDevice, mPipelineCache, &size, data.data()) != VK_SUCCESS)
+        {
+            return;
+        }
+        const std::string path = pipelineCachePath();
+        if (path.empty())
+        {
+            return;
+        }
+        llofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+        if (out.is_open())
+        {
+            out.write(data.data(), (std::streamsize)size);
+        }
+        mPipelinesSinceSave = 0;
+    }
+
+    // Once a frame: the pipelines made since the last save written out a minute on (a crash keeps most of them).
+    void pipelineCacheFrame()
+    {
+        mPipelinesMadeLast = mPipelinesMadeNow;
+        mPipelineNanosLast = mPipelineNanosNow;
+        mPipelinesMadeNow  = 0;
+        mPipelineNanosNow  = 0;
+        const F64 now = LLTimer::getTotalSeconds();
+        if (mPipelinesSinceSave && now - mPipelineSavedAt > 60.0)
+        {
+            pipelineCacheSave();
+            mPipelineSavedAt = now;
+        }
+    }
+
     bool loadDeviceFunctions()
     {
 #define QL_VK_DEVICE(name) name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(mDevice, #name)); \
@@ -715,6 +807,9 @@ struct QLVulkanPresenter::Impl
         QL_VK_DEVICE(vkCreateFramebuffer);
         QL_VK_DEVICE(vkDestroyFramebuffer);
         QL_VK_DEVICE(vkCreateGraphicsPipelines);
+        QL_VK_DEVICE(vkCreatePipelineCache);
+        QL_VK_DEVICE(vkGetPipelineCacheData);
+        QL_VK_DEVICE(vkDestroyPipelineCache);
         QL_VK_DEVICE(vkCmdBeginRenderPass);
         QL_VK_DEVICE(vkCmdEndRenderPass);
         QL_VK_DEVICE(vkCmdDraw);
@@ -1230,6 +1325,7 @@ struct QLVulkanPresenter::Impl
             return false;
         }
         vkGetDeviceQueue(mDevice, mQueueFamily, 0, &mQueue);
+        pipelineCacheLoad();
 
         VkFormatProperties format = {};
         vkGetPhysicalDeviceFormatProperties(mPhysical, VK_FORMAT_R8G8B8A8_UNORM, &format);
@@ -2648,7 +2744,7 @@ struct QLVulkanPresenter::Impl
         pipeline_info.layout              = layout;
         pipeline_info.renderPass          = pass;
         pipeline_info.subpass             = 0;
-        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        if (vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
             return fail("vkCreateGraphicsPipelines (depth only)");
@@ -4816,7 +4912,7 @@ struct QLVulkanPresenter::Impl
         pipeline_info.pDynamicState       = &dynamic;
         pipeline_info.layout              = mShLayout;
         pipeline_info.renderPass          = mShPass;
-        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        if (vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
             if (masked)
@@ -7436,7 +7532,7 @@ struct QLVulkanPresenter::Impl
         pipeline_info.pDynamicState       = &dynamic;
         pipeline_info.layout              = mGbLayout;
         pipeline_info.renderPass          = t.pass;
-        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        if (vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
             LL_WARNS("Vulkan") << "Probe draws in Vulkan: vkCreateGraphicsPipelines failed" << LL_ENDL;
@@ -7844,7 +7940,7 @@ struct QLVulkanPresenter::Impl
         pipeline_info.pDynamicState       = &dynamic;
         pipeline_info.layout              = mTrLayout;
         pipeline_info.renderPass          = t.pass;
-        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
+        if (vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS)
         {
             pipeline = VK_NULL_HANDLE;
             mTrNote = "its pipeline could not be made";
@@ -9520,7 +9616,13 @@ struct QLVulkanPresenter::Impl
         info.renderPass          = t.load;
         VkPipeline pipeline = VK_NULL_HANDLE;
         LL_PROFILE_ZONE_NAMED("vulkan gl program pipeline");
-        if (vkCreateGraphicsPipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS)
+        const auto made_from = std::chrono::steady_clock::now();
+        const VkResult made = vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &info, nullptr, &pipeline);
+        mPipelineNanosNow += (U64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                                       made_from).count();
+        ++mPipelinesMadeNow;
+        ++mPipelinesSinceSave;
+        if (made != VK_SUCCESS)
         {
             return VK_NULL_HANDLE;
         }
@@ -10835,6 +10937,7 @@ struct QLVulkanPresenter::Impl
         mGpHostPeak     = 0;
         mGpDrawNanosLast = mGpDrawNanosNow;
         mGpDrawNanosNow  = 0;
+        pipelineCacheFrame();
         memcpy(mGpPhaseLast, mGpPhaseNow, sizeof(mGpPhaseNow));
         memset(mGpPhaseNow, 0, sizeof(mGpPhaseNow));
         mGpSetsMadeLast   = mGpSetsMadeNow;
@@ -10854,15 +10957,17 @@ struct QLVulkanPresenter::Impl
             programs += p.ok ? 1 : 0;
         }
         return llformat("%u draws in %u passes last frame, %u kept by GL, Vulkan's part %.1f ms (%.1f us a draw), "
-                        "(checks %.1f, resources %.1f, set %.1f, record %.1f us), sets %u made, %u reused | %u of %u "
-                        "programs compiled | blocks %u written, %u reused, fullest pass %.1f of %u MB",
+                        "(checks %.1f, resources %.1f, set %.1f, record %.1f us), sets %u made, %u reused, pipelines %u "
+                        "made (%.1f ms) | %u of %u programs compiled | blocks %u written, %u reused, fullest pass %.1f "
+                        "of %u MB",
                         mGpDrawsLast, mGpPassesLast, mGpKeptLast, (double)mGpDrawNanosLast / 1e6,
                         mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0,
                         mGpDrawsLast ? (double)mGpPhaseLast[0] / 1e3 / mGpDrawsLast : 0.0,
                         mGpDrawsLast ? (double)mGpPhaseLast[1] / 1e3 / mGpDrawsLast : 0.0,
                         mGpDrawsLast ? (double)mGpPhaseLast[2] / 1e3 / mGpDrawsLast : 0.0,
                         mGpDrawsLast ? (double)mGpPhaseLast[3] / 1e3 / mGpDrawsLast : 0.0, mGpSetsMadeLast,
-                        mGpSetsReusedLast, programs, (U32)mGpPrograms.size(),
+                        mGpSetsReusedLast, mPipelinesMadeLast, (double)mPipelineNanosLast / 1e6, programs,
+                        (U32)mGpPrograms.size(),
                         mGpBlocksWrittenLast, mGpBlocksReusedLast, (double)mGpHostPeakLast / (1 << 20),
                         (U32)(GP_SLOT_BYTES >> 20)) +
                (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);
@@ -11761,6 +11866,12 @@ struct QLVulkanPresenter::Impl
             }
             else
             {
+                pipelineCacheSave();
+                if (mPipelineCache)
+                {
+                    vkDestroyPipelineCache(mDevice, mPipelineCache, nullptr);
+                    mPipelineCache = VK_NULL_HANDLE;
+                }
                 vkDestroyDevice(mDevice, nullptr);
             }
             mDevice = VK_NULL_HANDLE;
