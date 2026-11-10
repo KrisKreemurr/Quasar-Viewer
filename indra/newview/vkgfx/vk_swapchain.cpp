@@ -1,9 +1,11 @@
 #include "vk_swapchain.h"
+#include "ql_queue_lock.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <new>
+#include <thread>
 
 bool VkSwapchain::init(VkDeviceContext& ctx, VkSurfaceKHR surface,
                        uint32_t width, uint32_t height, uint32_t framesInFlight) {
@@ -37,11 +39,22 @@ bool VkSwapchain::init(VkDeviceContext& ctx, VkSurfaceKHR surface,
         VK_CHECK(vkCreateSemaphore(ctx.device(), &sci, nullptr, &mImageAvailable[i]));
         VK_CHECK(vkCreateFence(ctx.device(), &fci, nullptr, &mInFlight[i]));
     }
+    // Quasar frame generation: the generated image's own acquire semaphore and fence per
+    // frame-in-flight slot (always made: a handful of objects).
+    mImageAvailableGen.resize(mFramesInFlight);
+    mGenFence.resize(mFramesInFlight);
+    mGenSlotBusy = std::vector<std::atomic<bool>>(mFramesInFlight);
+    for (uint32_t i = 0; i < mFramesInFlight; ++i) {
+        VK_CHECK(vkCreateSemaphore(ctx.device(), &sci, nullptr, &mImageAvailableGen[i]));
+        VK_CHECK(vkCreateFence(ctx.device(), &fci, nullptr, &mGenFence[i]));
+        mGenSlotBusy[i].store(false);
+    }
     return true;
 }
 
 bool VkSwapchain::sVSync = true;
 uint32_t VkSwapchain::sNoVsyncMode = 0;
+bool VkSwapchain::sFrameGen = false;
 
 bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
                                          uint32_t height) {
@@ -119,7 +132,9 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
             mailbox   |= (m == VK_PRESENT_MODE_MAILBOX_KHR);
             immediate |= (m == VK_PRESENT_MODE_IMMEDIATE_KHR);
         }
-        if (sNoVsyncMode == 1)
+        // Quasar frame generation: MAILBOX may replace the generated frame with the real one
+        // before it is shown, so without vsync it presents IMMEDIATE when it can.
+        if (sNoVsyncMode == 1 || sFrameGen)
         {
             if (immediate)    mPresentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
             else if (mailbox) mPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
@@ -142,7 +157,9 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
         return false;
     }
 
-    uint32_t imageCount = caps.minImageCount + 1;
+    // Quasar frame generation: two images a frame (the generated one and the real one) for
+    // every frame in flight, plus the ones the presentation engine holds.
+    uint32_t imageCount = caps.minImageCount + (sFrameGen ? 3u : 1u);
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount) {
         imageCount = caps.maxImageCount;
     }
@@ -333,6 +350,7 @@ void VkSwapchain::destroySwapchainObjects(VkDeviceContext& ctx) {
 
 bool VkSwapchain::recreate(VkDeviceContext& ctx, uint32_t width, uint32_t height) {
     if (vkDeviceIsLost()) return false;   // #135
+    pacerFlush();   // Quasar: no paced present may reach the retired chain
     const auto idleStart = std::chrono::steady_clock::now();
     vkDeviceWaitIdle(ctx.device());
     mLastDeviceIdleWaitMs = std::chrono::duration<double, std::milli>(
@@ -342,8 +360,13 @@ bool VkSwapchain::recreate(VkDeviceContext& ctx, uint32_t width, uint32_t height
 }
 
 void VkSwapchain::destroy(VkDeviceContext& ctx) {
+    pacerStop();    // Quasar: the pacing thread ends before anything it presents goes
     if (vkDeviceIsLost()) return;   // #135: leak to process exit, never touch the lost device
     if (ctx.device()) vkDeviceWaitIdle(ctx.device());
+    for (VkSemaphore s : mImageAvailableGen) if (s) vkDestroySemaphore(ctx.device(), s, nullptr);
+    for (VkFence f : mGenFence) if (f) vkDestroyFence(ctx.device(), f, nullptr);
+    mImageAvailableGen.clear();
+    mGenFence.clear();
     // Per-frame-in-flight objects (image-available semaphores + fences).
     for (VkSemaphore s : mImageAvailable) if (s) vkDestroySemaphore(ctx.device(), s, nullptr);
     for (VkFence f : mInFlight) if (f) vkDestroyFence(ctx.device(), f, nullptr);
@@ -383,9 +406,7 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
     if (vkDeviceIsLost()) return false;
     vkAddrFrameTick();
 
-    VkResult r = vkAcquireNextImageKHR(ctx.device(), mSwapchain, UINT64_MAX,
-                                       mImageAvailable[mFrame], VK_NULL_HANDLE,
-                                       outImageIndex);
+    VkResult r = lockedAcquire(ctx, mImageAvailable[mFrame], outImageIndex);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
         // No image delivered and the semaphore was NOT signaled: skip the frame
         // and recreate. Do not reset the fence (no submit this frame).
@@ -435,7 +456,10 @@ bool VkSwapchain::present(VkDeviceContext& ctx, uint32_t imageIndex,
     if (vkSimulateDeviceLostTake(VK_SIM_LOST_PRESENT))
         r = VK_ERROR_DEVICE_LOST;          // RenderVKDebugSimulateDeviceLost 3: not presented
     else
+    {
+        std::lock_guard<std::mutex> ql(qlQueueMutex());   // Quasar: see ql_queue_lock.h
         r = vkQueuePresentKHR(ctx.queue(), &pi);
+    }
     mFrame = (mFrame + 1) % mFramesInFlight;
 
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
@@ -453,4 +477,179 @@ bool VkSwapchain::present(VkDeviceContext& ctx, uint32_t imageIndex,
         return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Quasar frame generation: the second acquire and the paced presents
+// ---------------------------------------------------------------------------
+VkResult VkSwapchain::lockedAcquire(VkDeviceContext& ctx, VkSemaphore sem, uint32_t* outImageIndex)
+{
+    // While the pacing thread presents, an acquire that blocks under the lock could wait
+    // for an image only its next present frees: poll instead, releasing the lock between
+    // tries. Without the thread it is the plain blocking acquire (under the lock, which is
+    // then uncontended).
+    if (!mPacer.joinable())
+    {
+        std::lock_guard<std::mutex> ql(qlQueueMutex());
+        return vkAcquireNextImageKHR(ctx.device(), mSwapchain, UINT64_MAX, sem, VK_NULL_HANDLE, outImageIndex);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (;;)
+    {
+        VkResult r;
+        {
+            std::lock_guard<std::mutex> ql(qlQueueMutex());
+            r = vkAcquireNextImageKHR(ctx.device(), mSwapchain, 0, sem, VK_NULL_HANDLE, outImageIndex);
+        }
+        if (r != VK_NOT_READY && r != VK_TIMEOUT) return r;
+        if (vkDeviceIsLost()) return VK_ERROR_DEVICE_LOST;
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(10))
+        {
+            std::fprintf(stderr, "[vkgfx] Quasar frame generation: no swapchain image for 10 s\n");
+            return VK_ERROR_OUT_OF_DATE_KHR;   // rebuild the chain rather than hang
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+}
+
+bool VkSwapchain::acquireGen(VkDeviceContext& ctx, uint32_t* outImageIndex, bool* outNeedsRecreate)
+{
+    if (outNeedsRecreate) *outNeedsRecreate = false;
+    if (vkDeviceIsLost() || !mSwapchain || mFrame >= mGenFence.size()) return false;
+    // This slot's last paced presents are done with its fence before it is reset.
+    while (mGenSlotBusy[mFrame].load(std::memory_order_acquire))
+    {
+        if (vkDeviceIsLost()) return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    VK_CHECK(vkWaitForFences(ctx.device(), 1, &mGenFence[mFrame], VK_TRUE, UINT64_MAX));
+    if (vkDeviceIsLost()) return false;
+    const VkResult r = lockedAcquire(ctx, mImageAvailableGen[mFrame], outImageIndex);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
+    {
+        if (r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) mExclusiveLost = true;
+        else if (outNeedsRecreate) *outNeedsRecreate = true;
+        return false;
+    }
+    if (r == VK_SUBOPTIMAL_KHR) { if (outNeedsRecreate) *outNeedsRecreate = true; }
+    else if (r != VK_SUCCESS)
+    {
+        std::fprintf(stderr, "[vkgfx] Quasar frame generation: vkAcquireNextImageKHR = %s\n", vkResultString(r));
+        if (r == VK_ERROR_DEVICE_LOST || r == VK_ERROR_SURFACE_LOST_KHR)
+            vkDeviceLostRaise("vkAcquireNextImageKHR", r, "graphics", __FILE__, __LINE__);
+        return false;
+    }
+    VK_CHECK(vkResetFences(ctx.device(), 1, &mGenFence[mFrame]));
+    return true;
+}
+
+void VkSwapchain::presentPaced(VkDeviceContext& ctx, uint32_t genIndex, uint32_t realIndex)
+{
+    PacedJob job;
+    job.ctx = &ctx;
+    job.slot = mFrame;
+    job.fence = mGenFence[mFrame];
+    job.genIndex = genIndex;
+    job.realIndex = realIndex;
+    mGenSlotBusy[mFrame].store(true, std::memory_order_release);
+    {
+        std::unique_lock<std::mutex> lk(mPacerMutex);
+        if (!mPacer.joinable())
+        {
+            mPacerQuit = false;
+            mPacer = std::thread([this] { pacerLoop(); });
+        }
+        // At most one frame waiting behind the one being shown: the main thread never
+        // runs more than a frame ahead of what is on screen.
+        mPacerCv.wait(lk, [this] { return mPacerJobs.size() < 2; });
+        mPacerJobs.push_back(job);
+    }
+    mPacerCv.notify_all();
+    mFrame = (mFrame + 1) % mFramesInFlight;
+}
+
+void VkSwapchain::pacerLoop()
+{
+    using clock = std::chrono::steady_clock;
+    clock::time_point lastReady{};
+    double intervalMs = 16.6;   // smoothed time between real frames
+    for (;;)
+    {
+        PacedJob job;
+        {
+            std::unique_lock<std::mutex> lk(mPacerMutex);
+            mPacerCv.wait(lk, [this] { return mPacerQuit || !mPacerJobs.empty(); });
+            if (mPacerJobs.empty()) return;   // quit with nothing left to show
+            job = mPacerJobs.front();
+            mPacerBusy = true;
+        }
+        // The frame is ready when its last submission (the generated image's) has finished.
+        // (The driver's own wait, not the hooked one: those hooks keep main-thread
+        // statistics. In slices, so a lost device never parks this thread for good.)
+        while (!vkDeviceIsLost())
+        {
+            const VkResult wr = (vkWaitForFences)(job.ctx->device(), 1, &job.fence, VK_TRUE, 100000000ull);
+            if (wr != VK_TIMEOUT) break;
+        }
+        const clock::time_point ready = clock::now();
+        if (lastReady.time_since_epoch().count() != 0)
+        {
+            const double dt = std::chrono::duration<double, std::milli>(ready - lastReady).count();
+            if (dt > 1.0 && dt < 100.0) intervalMs += (dt - intervalMs) * 0.1;
+            else if (dt >= 100.0) intervalMs = 16.6;   // a hitch: don't let it set the pace
+        }
+        lastReady = ready;
+
+        auto presentOne = [&](uint32_t idx) -> VkResult
+        {
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.waitSemaphoreCount = 1;
+            pi.pWaitSemaphores = &mRenderFinished[idx];
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &mSwapchain;
+            pi.pImageIndices = &idx;
+            if (vkDeviceIsLost()) return VK_ERROR_DEVICE_LOST;
+            std::lock_guard<std::mutex> ql(qlQueueMutex());
+            return vkQueuePresentKHR(job.ctx->queue(), &pi);
+        };
+        auto note = [&](VkResult r)
+        {
+            if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) mPacerNeedsRecreate.store(true);
+            else if (r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) mExclusiveLost = true;
+            else if (r == VK_ERROR_DEVICE_LOST || r == VK_ERROR_SURFACE_LOST_KHR)
+                vkDeviceLostRaise("vkQueuePresentKHR (Quasar frame generation)", r, "graphics", __FILE__, __LINE__);
+        };
+        // The generated frame now, the real one half a frame later.
+        note(presentOne(job.genIndex));
+        const clock::time_point due = ready + std::chrono::microseconds((int64_t)(intervalMs * 500.0));
+        if (due > clock::now()) std::this_thread::sleep_until(due);
+        note(presentOne(job.realIndex));
+        mPacedPresents.fetch_add(2, std::memory_order_relaxed);
+
+        mGenSlotBusy[job.slot].store(false, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lk(mPacerMutex);
+            mPacerJobs.pop_front();
+            mPacerBusy = false;
+        }
+        mPacerCv.notify_all();
+    }
+}
+
+void VkSwapchain::pacerFlush()
+{
+    if (!mPacer.joinable()) return;
+    std::unique_lock<std::mutex> lk(mPacerMutex);
+    mPacerCv.wait(lk, [this] { return mPacerJobs.empty() && !mPacerBusy; });
+}
+
+void VkSwapchain::pacerStop()
+{
+    if (!mPacer.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(mPacerMutex);
+        mPacerQuit = true;
+    }
+    mPacerCv.notify_all();
+    mPacer.join();
 }

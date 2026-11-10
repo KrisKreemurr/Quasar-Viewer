@@ -64,6 +64,17 @@ if [ -n "$EXE" ]; then
   powershell.exe -NoProfile -Command "\$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\\Quasar (Slipstream build).lnk'); \$s.TargetPath='$WEXE'; \$s.WorkingDirectory=(Split-Path '$WEXE'); \$s.Save()" >/dev/null 2>&1 || true
   echo "Viewer: $WEXE  (shortcut on your desktop: Quasar (Slipstream build))"
 fi
+# A "Quasar" shortcut on the Windows desktop to the built viewer (best effort)
+cat > /mnt/c/dev/make-quasar-shortcut.ps1 <<'PS1'
+$exe = Get-ChildItem 'C:\dev\QuasarSlipstream' -Recurse -Filter 'SlipstreamViewer.exe' | Select-Object -First 1
+if ($exe) {
+  $s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Quasar.lnk')
+  $s.TargetPath = $exe.FullName
+  $s.WorkingDirectory = $exe.DirectoryName
+  $s.Save()
+}
+PS1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\dev\make-quasar-shortcut.ps1' >/dev/null 2>&1 || true
 # A double-click rebuild for Windows, so Linux never has to be opened again
 printf '@echo off\r\nwsl -d Ubuntu-24.04 -- bash -lc "~/quasar-slipstream/setup.sh"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
 echo "Done: C:\\dev\\QuasarSlipstream  (next time, double-click C:\\dev\\Build-Quasar.bat)"

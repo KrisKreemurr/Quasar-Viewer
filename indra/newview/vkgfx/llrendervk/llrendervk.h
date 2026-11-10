@@ -306,6 +306,10 @@ public:
     // recordFrame(). The format was fixed at beginFrameToView() (all swapchain
     // images share it) so pipelines built during UI buffering stay valid.
     void setFrameColorView(VkImageView colorView) { mFrameColorView = colorView; }
+    // Quasar frame generation: the next recordFrame() also replays the UI into this view
+    // (COLOR_ATTACHMENT_OPTIMAL, the swapchain's format and size) in this command buffer:
+    // the generated frame gets the same UI as the real one. Cleared by recordFrame().
+    void setFrameExtraTarget(VkCommandBuffer cmd, VkImageView colorView) { mExtraCmd = cmd; mExtraView = colorView; }
     // flush + record draws into cmd, uploading this frame's vertices into the VBO
     // ring slot `frameSlot` (0..framesInFlight-1). The caller guarantees that slot
     // is retired (its in-flight fence was waited) before calling, so the previous
@@ -535,6 +539,8 @@ private:
     // key their color/depth attachment formats off these, so pipelineFor() no
     // longer reaches into mTarget directly.
     VkImageView mFrameColorView = VK_NULL_HANDLE; // swapchain path only
+    VkCommandBuffer mExtraCmd = VK_NULL_HANDLE;   // Quasar frame generation (setFrameExtraTarget)
+    VkImageView mExtraView = VK_NULL_HANDLE;
     VkFormat mFrameColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
     bool     mFrameHasDepth = false;
     VkFormat mFrameDepthFormat = VK_FORMAT_UNDEFINED;

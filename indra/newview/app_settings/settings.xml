@@ -12467,6 +12467,61 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarFrameGen</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar frame generation: each real frame is followed by a generated in-between frame, shown half a frame later, so the screen gets twice the frames. Built from the motion vectors, so it needs RenderVKTAA (or an upscaler) on; without motion vectors the extra frame is a copy. SDR output only (off while HDR output is on). Uses vsync FIFO, or IMMEDIATE without vsync. Read at startup (restart after changing).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFrameGenMotionScale</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar frame generation, diagnostic: multiplies the motion vectors the in-between frame is warped along (1 = as the renderer writes them). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>QuasarFrameGenFlipMotionY</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar frame generation, diagnostic: flips the motion vectors vertically (if the generated frame moves the wrong way when looking up and down). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFrameGenBlend</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar frame generation: blend the previous frame into the in-between frame where both agree (smoother); off = the current frame warped back alone. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarFrameGenShowGenerated</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar frame generation, diagnostic: off = the extra frame is an exact copy of the real one (the pacing and the doubled presents without any warping, to compare against). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>RenderVKNoVsyncPresentMode</key>
   <map>
     <key>Comment</key>

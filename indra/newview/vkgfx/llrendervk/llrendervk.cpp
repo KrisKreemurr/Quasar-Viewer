@@ -1501,6 +1501,24 @@ void LLRenderVK::recordFrame(VkCommandBuffer cmd, uint32_t frameSlot) {
 
     vkCmdEndRendering(cmd);
 
+    // Quasar frame generation: the same UI over the generated frame.
+    if (mExtraCmd && mExtraView)
+    {
+        color.imageView = mExtraView;
+        vkCmdBeginRendering(mExtraCmd, &ri);
+        recordDraws(mExtraCmd, mSwapW, mSwapH, vbo, 0, mOverlayBegin);
+        if (mPreHudRecorded)
+        {
+            recordDraws(mExtraCmd, mSwapW, mSwapH, vbo, mOverlayEnd, mPreHudBegin);
+            recordDraws(mExtraCmd, mSwapW, mSwapH, vbo, mPreHudEnd, (size_t)-1);
+        }
+        else
+            recordDraws(mExtraCmd, mSwapW, mSwapH, vbo, mOverlayEnd, (size_t)-1);
+        vkCmdEndRendering(mExtraCmd);
+    }
+    mExtraCmd = VK_NULL_HANDLE;
+    mExtraView = VK_NULL_HANDLE;
+
     mPending.clear();
     mInFrame = false;
     mOverlayBegin = mOverlayEnd = 0;

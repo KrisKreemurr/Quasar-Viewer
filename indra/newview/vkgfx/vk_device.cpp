@@ -4,6 +4,7 @@
 #include "vk_pipeline.h"   // vkSetPipelineStatsCapture (RenderVKPipelineStats)
 #include "vk_vma.h"
 #include "slenv.h"
+#include "ql_queue_lock.h"
 
 #include <algorithm>
 #include <atomic>
@@ -352,7 +353,8 @@ VkResult vkqDeviceWaitIdle(VkDevice dev, const char* file, int line)
         return VK_SUCCESS;
     }
     const double t0 = vkNowMs();
-    const VkResult r = vkDeviceWaitIdle(dev);
+    VkResult r;
+    { std::lock_guard<std::mutex> ql(qlQueueMutex()); r = vkDeviceWaitIdle(dev); }   // Quasar: see ql_queue_lock.h
     vkWaitNote("deviceIdle", file, line, vkNowMs() - t0, false);
     if (r == VK_SUCCESS) sIdleSeq.store(seq, std::memory_order_release);
     if (r == VK_ERROR_DEVICE_LOST)
@@ -6580,7 +6582,9 @@ VkResult vkqQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo* si, VkFence f
         return vkLostCheck(VK_ERROR_DEVICE_LOST, "vkQueueSubmit (simulated)", vkQueueName(q), file, line);
     sSubmitSeq.fetch_add(1, std::memory_order_acq_rel);   // #699 (before the driver call: see vkqDeviceWaitIdle)
     vkSubmitLogNote(q, "vkQueueSubmit", file, line);       // #845 / #917
-    return vkLostCheck(vkQueueSubmit(q, n, si, f), "vkQueueSubmit", vkQueueName(q), file, line);
+    VkResult r;
+    { std::lock_guard<std::mutex> ql(qlQueueMutex()); r = vkQueueSubmit(q, n, si, f); }   // Quasar: see ql_queue_lock.h
+    return vkLostCheck(r, "vkQueueSubmit", vkQueueName(q), file, line);
 }
 
 VkResult vkqQueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2* si, VkFence f, const char* file, int line)
@@ -6590,7 +6594,9 @@ VkResult vkqQueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2* si, VkFence
         return vkLostCheck(VK_ERROR_DEVICE_LOST, "vkQueueSubmit2 (simulated)", vkQueueName(q), file, line);
     sSubmitSeq.fetch_add(1, std::memory_order_acq_rel);   // #699 (before the driver call: see vkqDeviceWaitIdle)
     vkSubmitLogNote(q, "vkQueueSubmit2", file, line);      // #845 / #917
-    return vkLostCheck(gVkCompat.QueueSubmit2(q, n, si, f), "vkQueueSubmit2", vkQueueName(q), file, line);
+    VkResult r;
+    { std::lock_guard<std::mutex> ql(qlQueueMutex()); r = gVkCompat.QueueSubmit2(q, n, si, f); }   // Quasar: see ql_queue_lock.h
+    return vkLostCheck(r, "vkQueueSubmit2", vkQueueName(q), file, line);
 }
 
 VkResult vkqWaitForFences(VkDevice d, uint32_t n, const VkFence* f, VkBool32 all, uint64_t timeout,
@@ -6636,7 +6642,9 @@ VkResult vkqQueueWaitIdle(VkQueue q, const char* file, int line)
 {
     if (vkDeviceIsLost()) return VK_ERROR_DEVICE_LOST;
     const double t0 = vkNowMs();
-    const VkResult r = vkLostCheck(vkQueueWaitIdle(q), "vkQueueWaitIdle", vkQueueName(q), file, line);
+    VkResult qr;
+    { std::lock_guard<std::mutex> ql(qlQueueMutex()); qr = vkQueueWaitIdle(q); }   // Quasar: see ql_queue_lock.h
+    const VkResult r = vkLostCheck(qr, "vkQueueWaitIdle", vkQueueName(q), file, line);
     vkWaitNote("queueIdle", file, line, vkNowMs() - t0, false);   // #699
     return r;
 }
@@ -6778,4 +6786,11 @@ void vkqCmdDispatchIndirect(VkCommandBuffer cmd, VkBuffer b, VkDeviceSize o)
 {
     if (nullSkip(cmd, false)) return;
     vkCmdDispatchIndirect(cmd, b, o);
+}
+
+// Quasar (ql_queue_lock.h)
+std::mutex& qlQueueMutex()
+{
+    static std::mutex m;
+    return m;
 }

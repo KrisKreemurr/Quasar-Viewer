@@ -12,6 +12,7 @@
 #include "vk_device.h"
 #include "vk_requirements.h"                 // #526 device requirements + user message
 #include "vk_swapchain.h"
+#include "qlframegenvk.h"          // Quasar frame generation
 #include "vk_display_frame.h"
 #include "vk_display_encode.h"
 #include "vk_display_mode_transaction.h"
@@ -217,6 +218,11 @@ struct LLVulkanContext::Impl
     // got its clear+UI (black / stale-VRAM static, rotating through the images).
     // Per-slot buffers are re-recorded only after acquire() waits that slot's fence.
     std::vector<VkCommandBuffer> mCmds;
+    // Quasar frame generation (QuasarFrameGen): the in-between frame's images + pipeline,
+    // and a second command buffer per slot for the generated swapchain image.
+    QLFrameGenVK mFg;
+    std::vector<VkCommandBuffer> mFgCmds;
+    uint64_t mFgFrames = 0;
 
     uint32_t mWidth  = 0;
     uint32_t mHeight = 0;
@@ -1227,6 +1233,7 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
     setDisplayHdr(mDisplayHdrRequested, gSavedSettings.getF32("RenderVKDisplayPaperWhiteNits"),
                   gSavedSettings.getF32("RenderVKDisplayPeakNits"));
     refreshDisplayHdrPolicy();
+    VkSwapchain::sFrameGen = qlFrameGenWanted();   // Quasar: image count + present mode
     if (!mImpl->mSwapchain.init(mImpl->mDevice, mImpl->mSurface, width, height))
     {
         return failWith("swapchain init", "swapchain: the chosen GPU can't present to this window "
@@ -1244,6 +1251,14 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
     ai.commandBufferCount = framesInFlight;
     VK_CHECK(vkAllocateCommandBuffers(mImpl->mDevice.device(), &ai,
                                       mImpl->mCmds.data()));
+    if (VkSwapchain::sFrameGen)
+    {
+        mImpl->mFgCmds.resize(framesInFlight, VK_NULL_HANDLE);
+        VK_CHECK(vkAllocateCommandBuffers(mImpl->mDevice.device(), &ai, mImpl->mFgCmds.data()));
+    }
+    LL_INFOS("Vulkan") << "Quasar frame generation: " << (VkSwapchain::sFrameGen ? "ON" : "off")
+                       << " (QuasarFrameGen, read at startup); swapchain images " << mImpl->mSwapchain.imageCount()
+                       << ", present mode " << vkPresentModeName(mImpl->mSwapchain.presentMode()) << LL_ENDL;
 
     mInitialized = true;
     LL_INFOS("Vulkan") << "RT: requested=" << mRayTracingRequested
@@ -3638,6 +3653,39 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     VkCommandBuffer cmd = mImpl->mCmds[slot];
     VkImage img = mImpl->mSwapchain.image(imageIndex);
 
+    // Quasar frame generation: this frame also presents a generated in-between image (its
+    // own swapchain image, its own command buffer; see qlframegenvk.h). World frames on
+    // the SDR swapchain only.
+    uint32_t genIndex = 0;
+    bool fgOn = false;
+    VkCommandBuffer fgCmd = VK_NULL_HANDLE;
+    if (VkSwapchain::sFrameGen && doWorld && !mImpl->mHdrOutputActive && slot < mImpl->mFgCmds.size())
+    {
+        static LLCachedControl<F32> fgScale(gSavedSettings, "QuasarFrameGenMotionScale", 1.f);
+        static LLCachedControl<bool> fgFlipY(gSavedSettings, "QuasarFrameGenFlipMotionY", false);
+        static LLCachedControl<bool> fgBlend(gSavedSettings, "QuasarFrameGenBlend", true);
+        static LLCachedControl<bool> fgShow(gSavedSettings, "QuasarFrameGenShowGenerated", true);
+        QLFrameGenTuning tun;
+        tun.motionScale = fgScale;
+        tun.flipMotionY = fgFlipY;
+        tun.blendPrev = fgBlend;
+        tun.showGenerated = fgShow;
+        qlSetFrameGenTuning(tun);
+        const VkExtent2D fext = mImpl->mSwapchain.extent();
+        if (mImpl->mFg.ensure(mImpl->mDevice, fext.width, fext.height, mImpl->mSwapchain.format()))
+        {
+            bool genRecreate = false;
+            fgOn = mImpl->mSwapchain.acquireGen(mImpl->mDevice, &genIndex, &genRecreate);
+            if (genRecreate)
+            {
+                mImpl->mNeedsRecreate = true;
+                mImpl->mOutputPreviewValid = false;
+            }
+        }
+        if (fgOn) fgCmd = mImpl->mFgCmds[slot];
+    }
+    if (!fgOn) mImpl->mSwapchain.pacerFlush();   // (frame generation just went off: keep present order)
+
     // Record: UNDEFINED -> TRANSFER_DST, clear, (UI pass), -> PRESENT_SRC.
     beginTexturePrepRecording();
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -3793,6 +3841,18 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             // user snapshot, world + HUD (before the UI replay)
             mImpl->mWorld->recordCaptureAt(cmd, 2, ext.width, ext.height);
             mImpl->mWorld->recordLiveSnap(cmd, 2, ext.width, ext.height);   // #873
+            if (fgOn)
+            {
+                VK_HITCH_SCOPE("ql_frameGen");
+                QLFrameGenVK::Inputs fin;
+                if (!mImpl->mWorld->frameGenMotion(&fin.motionView, &fin.motionW, &fin.motionH))
+                    fin = QLFrameGenVK::Inputs{};
+                mImpl->mFg.recordCaptureAndGenerate(cmd, slot, img, fin);
+                VkCommandBufferBeginInfo fbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                fbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                VK_CHECK(vkBeginCommandBuffer(fgCmd, &fbi));
+                mImpl->mFg.recordToSwap(fgCmd, mImpl->mSwapchain.image(genIndex));
+            }
         }
 
         // UI ON TOP: replay the buffered UI batches over the (cleared + world)
@@ -3802,6 +3862,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             VK_HITCH_SCOPE("vk_uiRecord");
             vkBreadcrumb(cmd, "f_ui");
             gVK.setFrameColorView(view);
+            if (fgOn) gVK.setFrameExtraTarget(fgCmd, mImpl->mSwapchain.imageView(genIndex));   // Quasar: same UI
             gVK.recordFrame(cmd, slot);
             if (mImpl->mHdrOutputActive && !gVK.displayLinearFrameComplete())
                 hdrCompositionComplete = false;
@@ -3886,6 +3947,16 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+        if (fgOn)
+        {
+            imageBarrier(fgCmd, mImpl->mSwapchain.image(genIndex),
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+            VK_CHECK(vkEndCommandBuffer(fgCmd));
+        }
     }
     else
     {
@@ -3993,11 +4064,45 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // #873 live snapshot: a shot whose last frame was recorded this frame waits on this
     // frame's fence (never a device idle). (A dropped frame already failed the shot.)
     if (doWorld) mImpl->mWorld->liveSnapSubmitted(wsi.fence);
+    if (fgOn)
+    {
+        // Quasar frame generation: the generated image's submission, after the frame's (it
+        // copies the in-between image the frame rendered; same queue, submission order).
+        VkSemaphoreSubmitInfo gw{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        gw.semaphore = mImpl->mSwapchain.imageAvailableGenSemaphore();
+        gw.stageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        VkSemaphoreSubmitInfo gs{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        gs.semaphore = mImpl->mSwapchain.renderFinishedSemaphore(genIndex);
+        gs.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo gc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        gc.commandBuffer = fgCmd;
+        VkSubmitInfo2 gsub{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        gsub.waitSemaphoreInfoCount = 1;
+        gsub.pWaitSemaphoreInfos = &gw;
+        gsub.commandBufferInfoCount = 1;
+        gsub.pCommandBufferInfos = &gc;
+        gsub.signalSemaphoreInfoCount = 1;
+        gsub.pSignalSemaphoreInfos = &gs;
+        VK_HITCH_SCOPE("ql_frameGenSubmit");
+        VK_CHECK(vkQueueSubmit2(mImpl->mDevice.queue(), 1, &gsub, mImpl->mSwapchain.genFence()));
+        ++mImpl->mFgFrames;
+        if (mImpl->mFgFrames == 1 || mImpl->mFgFrames % 3600 == 0)
+            LL_INFOS("Vulkan") << "Quasar frame generation: " << mImpl->mFgFrames << " generated frames, "
+                               << mImpl->mSwapchain.pacedPresents() << " paced presents" << LL_ENDL;
+    }
     LLVKHitch::timelineSubmitted();   // (frame timeline: frame start -> submit)
     bool presentNeedsRecreate = false;
     {
         const auto t0 = std::chrono::steady_clock::now();
+        if (fgOn)
+        {
+            // The generated image, then the real one half a frame later (pacing thread).
+            VK_HITCH_SCOPE("vk_present");
+            mImpl->mSwapchain.presentPaced(mImpl->mDevice, genIndex, imageIndex);
+        }
+        else
         { VK_HITCH_SCOPE("vk_present"); mImpl->mSwapchain.present(mImpl->mDevice, imageIndex, &presentNeedsRecreate); }
+        if (mImpl->mSwapchain.takePacerRecreate()) presentNeedsRecreate = true;
         LLVKHitch::timelinePresent(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     if (presentNeedsRecreate)
@@ -4114,7 +4219,8 @@ void LLVulkanContext::shutdown()
 #if LL_WINDOWS
     mImpl->fseRelease("shutdown");   // #919: before its swapchain goes
 #endif
-    mImpl->mSwapchain.destroy(mImpl->mDevice);
+    mImpl->mSwapchain.destroy(mImpl->mDevice);   // (stops the frame generation pacing thread first)
+    mImpl->mFg.destroy(mImpl->mDevice);          // Quasar frame generation
     if (mImpl->mSurface && mImpl->mDevice.instance())
     {
         // SDL created the surface; SDL owns the destroy on this Vulkan instance.

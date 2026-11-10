@@ -20,7 +20,12 @@
 #include "vk_device.h"
 #include "vk_display_hdr.h"
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +52,27 @@ public:
     // then IMMEDIATE, then FIFO), 1 = IMMEDIATE first (then MAILBOX, then FIFO). A
     // diagnostic: some Windows compositors pace MAILBOX unevenly. Read at (re)creation.
     static uint32_t sNoVsyncMode;
+
+    // QuasarFrameGen (read at startup): each frame presents a generated in-between image,
+    // then the real one half a frame later, from a pacing thread. Read at (re)creation for
+    // the image count and the present mode.
+    static bool sFrameGen;
+    // Frame generation, per frame: after acquire() (the real image), acquireGen() takes the
+    // generated image (waits this slot's generated-frame fence, acquires with its own
+    // semaphore, resets the fence). The frame's LAST submission waits
+    // imageAvailableGenSemaphore(), signals renderFinishedSemaphore(genIndex) and genFence();
+    // then presentPaced() hands both images to the pacing thread and advances the frame slot
+    // (in place of present()).
+    bool acquireGen(VkDeviceContext& ctx, uint32_t* outImageIndex, bool* outNeedsRecreate);
+    VkSemaphore imageAvailableGenSemaphore() const { return mImageAvailableGen[mFrame]; }
+    VkFence     genFence() const { return mGenFence[mFrame]; }
+    void presentPaced(VkDeviceContext& ctx, uint32_t genIndex, uint32_t realIndex);
+    // A paced present asked for a rebuild (OUT_OF_DATE / SUBOPTIMAL); cleared by the call.
+    bool takePacerRecreate() { return mPacerNeedsRecreate.exchange(false); }
+    // Presents made by the pacing thread so far (generated + real).
+    uint64_t pacedPresents() const { return mPacedPresents.load(std::memory_order_relaxed); }
+    // Waits until the pacing thread has shown everything handed to it.
+    void pacerFlush();
 
     // FRAME PACING: waits the current frame-in-flight slot's fence only (no reset, no
     // acquire), so the main loop can block at the TOP of its frame -- before input and
@@ -163,6 +189,28 @@ private:
 
     uint32_t mFramesInFlight = 2;
     uint32_t mFrame = 0;
+    // Quasar frame generation (see acquireGen / presentPaced).
+    struct PacedJob {
+        VkDeviceContext* ctx = nullptr;
+        uint32_t slot = 0;
+        VkFence  fence = VK_NULL_HANDLE;
+        uint32_t genIndex = 0, realIndex = 0;
+    };
+    VkResult lockedAcquire(VkDeviceContext& ctx, VkSemaphore sem, uint32_t* outImageIndex);
+    void pacerLoop();
+    void pacerStop();
+    std::vector<VkSemaphore> mImageAvailableGen;
+    std::vector<VkFence>     mGenFence;
+    std::vector<std::atomic<bool>> mGenSlotBusy;   // the pacing thread still owns the slot's fence
+    std::thread              mPacer;
+    std::mutex               mPacerMutex;
+    std::condition_variable  mPacerCv;
+    std::deque<PacedJob>     mPacerJobs;
+    bool                     mPacerQuit = false;
+    bool                     mPacerBusy = false;
+    std::atomic<bool>        mPacerNeedsRecreate{false};
+    std::atomic<uint64_t>    mPacedPresents{0};
+
     std::vector<VkSemaphore> mImageAvailable; // size == framesInFlight
     std::vector<VkSemaphore> mRenderFinished;
     std::vector<VkFence>     mInFlight;

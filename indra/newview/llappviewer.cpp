@@ -106,6 +106,7 @@
 #include "llviewerwindow.h"
 #include "llfloater.h"
 #include "vkgfx/llvulkancontext.h"
+#include "vkgfx/qlframegen_settings.h"   // Quasar frame generation (QuasarFrameGen)
 #include "vkgfx/llradiancesnapshot.h"    // EXPERIMENTAL Vulkan integration
 #include "vkgfx/vk_pipeline.h"         // #462 vkSetPipelineCompileThreads
 #include "vk_world_shaders_hash.h"  // embedded shader content hash (pipeline-cache build tag; generated at build time)
@@ -5000,6 +5001,7 @@ static bool initVulkanForRealUI()
         LL_WARNS("VKPipe") << "RenderVKDebugSimulatePipelineOOM " << sim_oom << ": the next " << sim_oom
                            << " batch pipeline compiles report VK_ERROR_OUT_OF_HOST_MEMORY (testing aid)" << LL_ENDL;
     }
+    qlSetFrameGenWanted(gSavedSettings.getBOOL("QuasarFrameGen"));   // Quasar: read at startup
     LLVulkanContext::instance().setVSync(gSavedSettings.getBOOL("RenderVSyncEnable"));
     LLVulkanContext::instance().setNoVsyncPresentMode(gSavedSettings.getU32("RenderVKNoVsyncPresentMode"));
     if (!LLVulkanContext::instance().init(sdlwin->getSDLWindow(), w, h, enableValidation))

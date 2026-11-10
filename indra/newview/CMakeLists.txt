@@ -1971,6 +1971,7 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/vk_display_frame.cpp
     vkgfx/vk_display_encode.cpp
     vkgfx/vk_swapchain.cpp
+    vkgfx/qlframegenvk.cpp            # Quasar frame generation (QuasarFrameGen)
     vkgfx/vk_pipeline.cpp             # graphics/compute pipeline helpers (world pass)
     vkgfx/vk_descpool.cpp             # layout-derived descriptor pools + allocation accounting
     vkgfx/vk_pipecache.cpp            # persistent (disk) VkPipelineCache: load / validate / save

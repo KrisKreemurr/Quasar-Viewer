@@ -1754,6 +1754,14 @@ public:
         VkFence fence = VK_NULL_HANDLE;                 // last graphics submission
     };
     bool asyncAvailable() const { return mAsyncAvail; }
+    // Quasar frame generation: this frame's motion vectors (render size, cur - prev in UV,
+    // SHADER_READ_ONLY_OPTIMAL once the world is recorded). false = none this frame.
+    bool frameGenMotion(VkImageView* view, uint32_t* w, uint32_t* h) const
+    {
+        if (mOffscreen || !mTemporalOn || !mMotion.image || !mMotionW || !mMotionH) return false;
+        *view = mMotion.view; *w = mMotionW; *h = mMotionH;
+        return true;
+    }
     void asyncBeginFrame(VkCommandBuffer cmd);
     // Opted-in frames: a separate graphics command buffer (begun; the caller ends it) for
     // the swapchain image's clear + transition. asyncSubmitFrame submits it first and it
