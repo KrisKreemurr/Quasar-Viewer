@@ -4330,6 +4330,7 @@ struct QLVulkanPresenter::Impl
                        indexBytes = 0;
         VkDeviceSize   extraUvBytes = 0;  // each of the second and third texture coordinates (legacy materials' maps)
         VkDeviceSize   emissiveBytes = 0;  // the emissive colours (4 bytes), beside the extra coordinates
+        VkDeviceSize   weight1Bytes = 0;   // the system avatar's joint weights (one float), beside those
         VkDeviceSize   vertexTop = 0, indexTop = 0;
         U32            resets = 0;
         std::unordered_map<U64, ShArenaEntry> entries;
@@ -4341,13 +4342,14 @@ struct QLVulkanPresenter::Impl
         VkDeviceSize uv2Start() const { return uv1Start() + extraUvBytes; }
         VkDeviceSize colorStart() const { return uv2Start() + extraUvBytes; }
         VkDeviceSize emissiveStart() const { return colorStart() + colorBytes; }
-        VkDeviceSize indexStart() const { return emissiveStart() + emissiveBytes; }
+        VkDeviceSize weight1Start() const { return emissiveStart() + emissiveBytes; }
+        VkDeviceSize indexStart() const { return weight1Start() + weight1Bytes; }
         VkDeviceSize totalBytes() const { return indexStart() + indexBytes; }
         VkDeviceSize used() const
         {
             return vertexTop * (1 + (weightBytes ? 1 : 0) + (normalBytes ? 1 : 0) + (tangentBytes ? 1 : 0)) +
                    (uvBytes ? vertexTop / 2 + vertexTop / 4 : 0) + (extraUvBytes ? vertexTop : 0) +
-                   (emissiveBytes ? vertexTop / 4 : 0) + indexTop;
+                   (emissiveBytes ? vertexTop / 4 : 0) + (weight1Bytes ? vertexTop / 4 : 0) + indexTop;
         }
     };
     // A texture's place in the alpha atlas: which texture, as it held what (its content stamp), and the last map that
@@ -5450,7 +5452,7 @@ struct QLVulkanPresenter::Impl
                     U32 vertex_count, GLuint index_buffer, U32 index_count, U32& base_vertex, U32& base_index,
                     U32 uv_offset = 0, U32 color_offset = U32_MAX, U32 normal_offset = 0, bool any_pass = false,
                     U32 tangent_offset = U32_MAX, U32 uv1_offset = U32_MAX, U32 uv2_offset = U32_MAX,
-                    U32 emissive_offset = U32_MAX)
+                    U32 emissive_offset = U32_MAX, U32 weight1_offset = U32_MAX)
     {
         if (!mShInPass && !any_pass)
         {
@@ -5509,6 +5511,12 @@ struct QLVulkanPresenter::Impl
         {
             gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)uv2_offset,
                                       (GLintptr)(arena.uv2Start() + arena.vertexTop / 2), (GLsizeiptr)vertex_count * 8);
+        }
+        if (arena.weight1Bytes && weight1_offset != U32_MAX)
+        {
+            gl.CopyNamedBufferSubData(vertex_buffer, arena.gl, (GLintptr)weight1_offset,
+                                      (GLintptr)(arena.weight1Start() + arena.vertexTop / 4),
+                                      (GLsizeiptr)vertex_count * 4);
         }
         if (arena.emissiveBytes && emissive_offset != U32_MAX)
         {
@@ -5738,6 +5746,7 @@ struct QLVulkanPresenter::Impl
         arena.tangentBytes = tangents ? vertex_bytes : 0;
         arena.extraUvBytes = extra_uvs ? vertex_bytes / 2 : 0;
         arena.emissiveBytes = extra_uvs ? vertex_bytes / 4 : 0;
+        arena.weight1Bytes  = extra_uvs ? vertex_bytes / 4 : 0;
         arena.uvBytes     = masked ? vertex_bytes / 2 : 0;
         arena.colorBytes  = masked ? vertex_bytes / 4 : 0;
         arena.indexBytes  = index_bytes;
@@ -8782,13 +8791,14 @@ struct QLVulkanPresenter::Impl
         GP_POSITION = 0, GP_NORMAL, GP_TEXCOORD0, GP_TEXCOORD1, GP_TEXCOORD2, GP_COLOR, GP_TANGENT, GP_WEIGHT4,
         GP_TEXTURE_INDEX,  // GL keeps it as position.w, read as an int: the positions' stream, 12 bytes in
         GP_EMISSIVE,       // LLColor4U; GL feeds it to diffuse_color as well where a program reads both
+        GP_WEIGHT,         // one float: the system avatar's joint index and blend (LLViewerJointMesh)
         GP_STREAMS
     };
     static S32 gpStreamOf(const std::string& name)
     {
         static const char* const names[GP_STREAMS] = { "position", "normal", "texcoord0", "texcoord1",
                                                        "texcoord2", "diffuse_color", "tangent", "weight4",
-                                                       "texture_index", "emissive" };
+                                                       "texture_index", "emissive", "weight" };
         for (U32 i = 0; i < GP_STREAMS; ++i)
         {
             if (name == names[i])
@@ -8803,7 +8813,7 @@ struct QLVulkanPresenter::Impl
         switch (stream)
         {
             case GP_TEXCOORD0: case GP_TEXCOORD1: case GP_TEXCOORD2: return 8;
-            case GP_COLOR: case GP_EMISSIVE: return 4;
+            case GP_COLOR: case GP_EMISSIVE: case GP_WEIGHT: return 4;
             default: return 16;
         }
     }
@@ -8819,6 +8829,7 @@ struct QLVulkanPresenter::Impl
             case GP_TEXCOORD2: return mGbArena.uv2Start();
             case GP_COLOR: return mGbArena.colorStart();
             case GP_EMISSIVE: return mGbArena.emissiveStart();
+            case GP_WEIGHT: return mGbArena.weight1Start();
             case GP_TANGENT: return mGbArena.tangentStart();
             case GP_WEIGHT4: return mGbArena.vertexBytes;
             default: return 0;
@@ -9879,7 +9890,7 @@ struct QLVulkanPresenter::Impl
             // Every attribute the program reads, from the mesh.
             const unsigned offsets[GP_STREAMS] = { d.mesh.position, d.mesh.normal, d.mesh.texcoord0, d.mesh.texcoord1,
                                                    d.mesh.texcoord2, d.mesh.color, d.mesh.tangent, d.mesh.weight4,
-                                                   d.mesh.position, d.mesh.emissive };
+                                                   d.mesh.position, d.mesh.emissive, d.mesh.weight };
             for (const GpProgram::Input& in : p.inputs)
             {
                 const U32 stream = in.stream == GP_COLOR && p.reads_emissive ? (U32)GP_EMISSIVE : in.stream;
@@ -10134,7 +10145,7 @@ struct QLVulkanPresenter::Impl
                             d.mesh.vertex_count, d.mesh.index_buffer, d.mesh.total_indices, base_vertex, base_index,
                             d.mesh.texcoord0 != ~0u ? d.mesh.texcoord0 : 0, d.mesh.color,
                             d.mesh.normal != ~0u ? d.mesh.normal : 0, true, d.mesh.tangent, d.mesh.texcoord1,
-                            d.mesh.texcoord2, d.mesh.emissive))
+                            d.mesh.texcoord2, d.mesh.emissive, d.mesh.weight))
             {
                 give_back();
                 gpWhy("the arena is full");

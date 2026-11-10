@@ -15799,6 +15799,7 @@ static bool ql_vulkan_draw_now_impl(LLVertexBuffer* vb, U32 start, U32 end, U32 
         mesh.tangent     = at(LLVertexBuffer::TYPE_TANGENT);
         mesh.weight4     = at(LLVertexBuffer::TYPE_WEIGHT4);
         mesh.emissive    = at(LLVertexBuffer::TYPE_EMISSIVE);
+        mesh.weight      = at(LLVertexBuffer::TYPE_WEIGHT);
         mesh.first_index = offset;
         mesh.index_count = count;
         QLGLState state = ql_gl_state_now();
