@@ -10151,6 +10151,7 @@ struct QLVulkanPresenter::Impl
 
     bool gpDraw(const QLVulkanPresenter::GpDraw& d)
     {
+        LL_PROFILE_ZONE_NAMED("ql gp draw");
         const auto started = std::chrono::steady_clock::now();
         const bool drawn = gpDrawTimed(d);
         mGpDrawNanosNow += (U64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
@@ -10273,6 +10274,7 @@ struct QLVulkanPresenter::Impl
             b.n = 0;
             if (r.kind == ql_glsl::RES_UNIFORM_BLOCK)
             {
+                LL_PROFILE_ZONE_NAMED("ql gp block");
                 const VkDeviceSize bytes = llmax((VkDeviceSize)r.size, (VkDeviceSize)16);
                 // Filled here first (the host buffer is write-combined: never read back), then written only where no
                 // block of this pass holds the same bytes. An engine block whose stamp says its bytes are those
@@ -10404,6 +10406,7 @@ struct QLVulkanPresenter::Impl
                         }
                     }
                 }
+                LL_PROFILE_ZONE_NAMED("ql gp sampler");
                 const size_t ri = (size_t)(&r - p.refl.resources.data());
                 b.n = llmin(r.count, 16u);
                 for (U32 e = 0; e < r.count && e < 16; ++e)
@@ -10539,6 +10542,7 @@ struct QLVulkanPresenter::Impl
             }
         }
         const auto t_sets = std::chrono::steady_clock::now();
+        LL_PROFILE_ZONE_NAMED("ql gp set and arena");
         U32 base_vertex = 0, base_index = 0;
         if (mesh)
         {
@@ -10683,6 +10687,7 @@ struct QLVulkanPresenter::Impl
         }
 
         const auto t_record = std::chrono::steady_clock::now();
+        LL_PROFILE_ZONE_NAMED_COLOR("ql gp record", 0x80C0FF);
         // Recorded from here: GL's images taken over, a barrier where this draw reads what an earlier one wrote (or
         // writes what one read), then the render pass.
         const U32 attachments = t.colors + (t.depth ? 1 : 0);

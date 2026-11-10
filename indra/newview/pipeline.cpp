@@ -12863,6 +12863,7 @@ namespace
                                   const QLGLState& state, const F32* positions, U32 vertex_count,
                                   const QLVulkanPresenter::GpMesh* mesh)
     {
+        LL_PROFILE_ZONE_NAMED("ql adapter draw");
         // What GL does while the draw is recorded (a flush of LLRender's batches, a texture's copy) is before the run.
         struct Recording
         {
