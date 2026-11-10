@@ -59,6 +59,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "qlexternalstorage.h"  // llrender: render targets in Vulkan's memory
@@ -8446,6 +8447,17 @@ struct QLVulkanPresenter::Impl
         };
         std::vector<Input>    inputs;
         std::vector<GpPipe>   pipes;
+        // What a draw's names resolve to, kept while the viewer hands over the same arrays (their names' storage is
+        // the viewer's per link of the program): the default block's member for each region (-1 none), each sampler
+        // element's texture in the draw (-1 none, by resource * 16 + element), each block's in the draw and its key.
+        const char*           region_first = nullptr;
+        U32                   region_count = U32_MAX;
+        std::vector<S32>      region_member;
+        const char*           texture_first = nullptr;
+        U32                   texture_count = U32_MAX;
+        std::vector<S32>      texture_of;
+        std::vector<S32>      block_of;
+        std::vector<U64>      block_key;
     };
     std::vector<GpProgram> mGpPrograms;
     std::vector<GpProgram> mGpRetiredPrograms;  // relinked while a pass was recorded; destroyed as the next begins
@@ -8518,7 +8530,25 @@ struct QLVulkanPresenter::Impl
         VkFormat           format = VK_FORMAT_UNDEFINED;  // the view's (a linear twin where read undecoded)
         VkImageView        view = VK_NULL_HANDLE;
     };
-    std::vector<GpView> mGpViews;
+    // By name, aspect and format (gpViewKey): every draw looks up each texture it samples, among thousands.
+    std::unordered_map<U64, GpView> mGpViews;
+    std::unordered_map<VkImage, U32> mGpViewImages;  // the images some view is of, and how many
+    static U64 gpViewKey(GLuint name, VkImageAspectFlags aspect, VkFormat format)
+    {
+        return (U64)name | ((U64)(aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? 1 : 0) << 32) | ((U64)(U32)format << 33);
+    }
+    void gpViewImageAdd(VkImage image)
+    {
+        ++mGpViewImages[image];
+    }
+    void gpViewImageDrop(VkImage image)
+    {
+        const auto found = mGpViewImages.find(image);
+        if (found != mGpViewImages.end() && --found->second == 0)
+        {
+            mGpViewImages.erase(found);
+        }
+    }
     std::vector<VkImageView> mGpRetired;  // views of images GL has made again, destroyed as a pass begins
     struct GpSamplerKey
     {
@@ -8542,6 +8572,8 @@ struct QLVulkanPresenter::Impl
         bool               attachment;
     };
     std::vector<GpAcquired> mGpAcquired;
+    std::unordered_map<VkImage, size_t> mGpAcquiredAt;  // each image's place in mGpAcquired
+    std::unordered_set<GLuint> mGpNamed;                // mGpNames, to look up
     std::set<VkImage>    mGpWritten;   // written since the last barrier
     std::set<VkImage>    mGpRead;      // sampled since the last barrier
     U32                  mGpDrawsNow = 0, mGpDrawsLast = 0, mGpPassesNow = 0, mGpPassesLast = 0;
@@ -8720,11 +8752,12 @@ struct QLVulkanPresenter::Impl
             destroyGpTarget(t);
         }
         mGpTargets.clear();
-        for (GpView& v : mGpViews)
+        for (auto& [key, v] : mGpViews)
         {
             if (v.view) vkDestroyImageView(mDevice, v.view, nullptr);
         }
         mGpViews.clear();
+        mGpViewImages.clear();
         for (VkImageView view : mGpRetired)
         {
             if (view) vkDestroyImageView(mDevice, view, nullptr);
@@ -9587,14 +9620,18 @@ struct QLVulkanPresenter::Impl
         is_depth = format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
                    format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
         const VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-        for (GpView& v : mGpViews)
+        const U64 view_key = gpViewKey(name, aspect, format);
+        const auto existing = mGpViews.find(view_key);
+        if (existing != mGpViews.end())
         {
-            if (v.name == name && v.aspect == aspect && v.format == format)
+            GpView& v = existing->second;
             {
                 if (v.image == image)
                 {
                     return v.view;
                 }
+                gpViewImageDrop(v.image);
+                gpViewImageAdd(image);
                 // The name has another image now (GL made it again): the old view goes once nothing reads it (the
                 // pass being recorded may: it goes as the next pass begins, every slot done).
                 mGpRetired.push_back(v.view);
@@ -9626,7 +9663,8 @@ struct QLVulkanPresenter::Impl
         {
             return VK_NULL_HANDLE;
         }
-        mGpViews.push_back(v);
+        mGpViews.emplace(view_key, v);
+        gpViewImageAdd(image);
         return v.view;
     }
 
@@ -9662,22 +9700,33 @@ struct QLVulkanPresenter::Impl
     }
 
     // The default block's bytes, from what GL holds for the program's loose uniforms (std140, as glslang laid it out).
-    void gpFillDefaults(const GpProgram& p, const QLVulkanPresenter::GpDraw& d, U8* out)
+    void gpFillDefaults(GpProgram& p, const QLVulkanPresenter::GpDraw& d, U8* out)
     {
         memset(out, 0, p.refl.default_size);
+        if (p.region_count != d.region_count || (d.region_count && p.region_first != d.regions[0].name))
+        {
+            p.region_count = d.region_count;
+            p.region_first = d.region_count ? d.regions[0].name : nullptr;
+            p.region_member.assign(d.region_count, -1);
+            for (U32 r = 0; r < d.region_count; ++r)
+            {
+                if (d.regions[r].name)
+                {
+                    const auto found = p.members.find(d.regions[r].name);
+                    p.region_member[r] = found == p.members.end() ? -1 : (S32)found->second;
+                }
+            }
+        }
         for (U32 r = 0; r < d.region_count; ++r)
         {
             const QLVulkanPresenter::GpRegion& region = d.regions[r];
-            if (!region.name)
+            // Not read by the program (GL keeps what Vulkan's compiler dropped, and samplers' units): -1.
+            const S32 member = p.region_member[r];
+            if (member < 0)
             {
                 continue;
             }
-            const auto found = p.members.find(region.name);
-            if (found == p.members.end())
-            {
-                continue;  // not read by the program (GL keeps what Vulkan's compiler dropped, and samplers' units)
-            }
-            const ql_glsl::Member& m = p.refl.members[found->second];
+            const ql_glsl::Member& m = p.refl.members[member];
             const U32* words = d.words + region.words;
             const U32 elements = llmin(region.elements, m.count);
             const U32 stride = m.array_stride ? m.array_stride : 16;
@@ -9762,10 +9811,7 @@ struct QLVulkanPresenter::Impl
                 named = named || i == image;
             }
         }
-        for (const GpView& v : mGpViews)
-        {
-            named = named || v.image == image;
-        }
+        named = named || mGpViewImages.count(image) != 0;
         if (!named)
         {
             return;
@@ -9782,15 +9828,19 @@ struct QLVulkanPresenter::Impl
             }
             ++t;
         }
-        for (size_t v = 0; v < mGpViews.size();)
+        if (mGpViewImages.count(image))
         {
-            if (mGpViews[v].image == image)
+            for (auto it = mGpViews.begin(); it != mGpViews.end();)
             {
-                if (mGpViews[v].view) vkDestroyImageView(mDevice, mGpViews[v].view, nullptr);
-                mGpViews.erase(mGpViews.begin() + (std::ptrdiff_t)v);
-                continue;
+                if (it->second.image == image)
+                {
+                    if (it->second.view) vkDestroyImageView(mDevice, it->second.view, nullptr);
+                    it = mGpViews.erase(it);
+                    continue;
+                }
+                ++it;
             }
-            ++v;
+            mGpViewImages.erase(image);
         }
     }
 
@@ -9861,6 +9911,8 @@ struct QLVulkanPresenter::Impl
         mGpArenaAcquired = false;
         mGpNames.clear();
         mGpAcquired.clear();
+        mGpAcquiredAt.clear();
+        mGpNamed.clear();
         mGpWritten.clear();
         mGpRead.clear();
         return true;
@@ -9900,13 +9952,12 @@ struct QLVulkanPresenter::Impl
     // A GL name's image taken from GL's queue the first time the pass touches it (outside a render pass).
     void gpAcquire(GLuint name, VkImage image, VkImageAspectFlags aspect, bool attachment)
     {
-        for (GpAcquired& a : mGpAcquired)
+        const auto taken = mGpAcquiredAt.find(image);
+        if (taken != mGpAcquiredAt.end())
         {
-            if (a.image == image)
-            {
-                a.attachment = a.attachment || attachment;  // its release makes its attachment writes available
-                return;
-            }
+            GpAcquired& a = mGpAcquired[taken->second];
+            a.attachment = a.attachment || attachment;  // its release makes its attachment writes available
+            return;
         }
         gpEndRenderPass();
         VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -9924,14 +9975,26 @@ struct QLVulkanPresenter::Impl
                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &b);
+        mGpAcquiredAt.emplace(image, mGpAcquired.size());
         mGpAcquired.push_back({ image, aspect, attachment });
-        if (std::find(mGpNames.begin(), mGpNames.end(), name) == mGpNames.end())
+        if (mGpNamed.insert(name).second)
         {
             mGpNames.push_back(name);
         }
     }
 
+    U64 mGpDrawNanosNow = 0, mGpDrawNanosLast = 0;  // the CPU time gpDraw took, this frame and the last
+
     bool gpDraw(const QLVulkanPresenter::GpDraw& d)
+    {
+        const auto started = std::chrono::steady_clock::now();
+        const bool drawn = gpDrawTimed(d);
+        mGpDrawNanosNow += (U64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                                     started).count();
+        return drawn;
+    }
+
+    bool gpDrawTimed(const QLVulkanPresenter::GpDraw& d)
     {
         if (!mGpInPass)
         {
@@ -10009,6 +10072,7 @@ struct QLVulkanPresenter::Impl
             VkDescriptorImageInfo    images[16];
             GLuint                   names[16];
             VkImage                  vk_images[16];
+            VkImageAspectFlags       aspects[16];
         };
         std::vector<Bound> bound;
         bound.reserve(p.refl.resources.size());
@@ -10042,13 +10106,30 @@ struct QLVulkanPresenter::Impl
                 }
                 else
                 {
-                    key = std::hash<std::string>()(r.name) & 0x7fffffffffffffffull;
+                    const size_t ri = (size_t)(&r - p.refl.resources.data());
+                    if (p.block_key.size() != p.refl.resources.size())
+                    {
+                        p.block_key.assign(p.refl.resources.size(), 0);
+                        p.block_of.assign(p.refl.resources.size(), -1);
+                    }
+                    if (!p.block_key[ri])
+                    {
+                        p.block_key[ri] = (std::hash<std::string>()(r.name) & 0x7fffffffffffffffull) | 1;
+                    }
+                    key = p.block_key[ri];
+                    // The block found where it was last (the engine's names are the same strings every draw), or by name.
                     const QLVulkanPresenter::GpBlock* block = nullptr;
-                    for (U32 i = 0; i < d.block_count; ++i)
+                    const S32 last = p.block_of[ri];
+                    if (last >= 0 && (U32)last < d.block_count && d.blocks[last].name && r.name == d.blocks[last].name)
+                    {
+                        block = &d.blocks[last];
+                    }
+                    for (U32 i = 0; !block && i < d.block_count; ++i)
                     {
                         if (d.blocks[i].name && r.name == d.blocks[i].name)
                         {
                             block = &d.blocks[i];
+                            p.block_of[ri] = (S32)i;
                         }
                     }
                     if (!block || !block->data)
@@ -10083,17 +10164,40 @@ struct QLVulkanPresenter::Impl
             }
             else if (r.kind == ql_glsl::RES_SAMPLER)
             {
-                for (U32 e = 0; e < r.count && e < 16; ++e)
+                // Each element's texture in the draw, by name, found once while the draw's names are the same strings.
+                if (p.texture_count != d.texture_count || (d.texture_count && p.texture_first != d.textures[0].name) ||
+                    p.texture_of.size() != p.refl.resources.size() * 16)
                 {
-                    const std::string element = r.count > 1 ? llformat("%s[%u]", r.name.c_str(), e) : r.name;
-                    const QLVulkanPresenter::GpTexture* tex = nullptr;
-                    for (U32 i = 0; i < d.texture_count; ++i)
+                    p.texture_count = d.texture_count;
+                    p.texture_first = d.texture_count ? d.textures[0].name : nullptr;
+                    p.texture_of.assign(p.refl.resources.size() * 16, -1);
+                    for (size_t rj = 0; rj < p.refl.resources.size(); ++rj)
                     {
-                        if (d.textures[i].name && (element == d.textures[i].name || (e == 0 && r.name == d.textures[i].name)))
+                        const ql_glsl::Resource& res = p.refl.resources[rj];
+                        if (res.kind != ql_glsl::RES_SAMPLER)
                         {
-                            tex = &d.textures[i];
+                            continue;
+                        }
+                        for (U32 e = 0; e < res.count && e < 16; ++e)
+                        {
+                            const std::string element = res.count > 1 ? llformat("%s[%u]", res.name.c_str(), e) : res.name;
+                            for (U32 i = 0; i < d.texture_count; ++i)
+                            {
+                                if (d.textures[i].name &&
+                                    (element == d.textures[i].name || (e == 0 && res.name == d.textures[i].name)))
+                                {
+                                    p.texture_of[rj * 16 + e] = (S32)i;
+                                }
+                            }
                         }
                     }
+                }
+                const size_t ri = (size_t)(&r - p.refl.resources.data());
+                for (U32 e = 0; e < r.count && e < 16; ++e)
+                {
+                    auto element = [&r, e]() { return r.count > 1 ? llformat("%s[%u]", r.name.c_str(), e) : r.name; };
+                    const S32 texture_index = p.texture_of[ri * 16 + e];
+                    const QLVulkanPresenter::GpTexture* tex = texture_index >= 0 ? &d.textures[texture_index] : nullptr;
                     // A sampler GL has no unit for: GL's compiler found the program never reads it (Vulkan's, which
                     // does not optimize, keeps it). Nothing reads it here either: an empty unit's black stands in.
                     static const QLVulkanPresenter::GpTexture unread = {};
@@ -10104,6 +10208,7 @@ struct QLVulkanPresenter::Impl
                     VkImageView view = VK_NULL_HANDLE;
                     VkImage image = VK_NULL_HANDLE;
                     bool is_depth = false;
+                    bool has_stencil = false;
                     // GL_SAMPLER_CUBE_MAP_ARRAY (and its shadow, int and uint kinds) read a cube array; every other
                     // sampler here a 2D texture.
                     const bool wants_cube = r.gl_type >= 0x900C && r.gl_type <= 0x900F;
@@ -10120,7 +10225,7 @@ struct QLVulkanPresenter::Impl
                     else if ((wants_cube || wants_depth) && (tex->texture == 0 || tex->texture == d.white_texture))
                     {
                         give_back();
-                        gpWhy(p.name + ": " + element + " has nothing of its kind bound");
+                        gpWhy(p.name + ": " + element() + " has nothing of its kind bound");
                         return false;
                     }
                     else if (tex->texture == 0)
@@ -10138,6 +10243,7 @@ struct QLVulkanPresenter::Impl
                         VkFormat format = VK_FORMAT_UNDEFINED;
                         bool cube = false;
                         view = gpView(tex->texture, image, format, is_depth, &cube);
+                        has_stencil = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
                         if (view && gpLinearTwin(format) != VK_FORMAT_UNDEFINED && !tex->srgb_decode)
                         {
                             // Read without decoding, as GL's sampler says (GL_SKIP_DECODE_EXT): its linear twin.
@@ -10145,7 +10251,7 @@ struct QLVulkanPresenter::Impl
                             if (!view)
                             {
                                 give_back();
-                                gpWhy(p.name + ": " + element + " is sRGB, read without decoding, and was made before it "
+                                gpWhy(p.name + ": " + element() + " is sRGB, read without decoding, and was made before it "
                                                "could be viewed so");
                                 return false;
                             }
@@ -10164,14 +10270,14 @@ struct QLVulkanPresenter::Impl
                         {
                             give_back();
                             gpWhy(llformat("%s: %s (GL name %u) is not the kind of texture it reads", p.name.c_str(),
-                                           element.c_str(), tex->texture));
+                                           element().c_str(), tex->texture));
                             return false;
                         }
                         if (!view)
                         {
                             give_back();
                             gpWhy(llformat("%s: %s (GL name %u) is not in Vulkan's memory", p.name.c_str(),
-                                           element.c_str(), tex->texture));
+                                           element().c_str(), tex->texture));
                             return false;
                         }
 
@@ -10186,6 +10292,9 @@ struct QLVulkanPresenter::Impl
                     b.images[e]    = { sampler, view, VK_IMAGE_LAYOUT_GENERAL };
                     b.names[e]     = image ? tex->texture : 0;
                     b.vk_images[e] = image;
+                    b.aspects[e]   = is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                                     (has_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
+                                              : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT;
                 }
             }
             else
@@ -10306,16 +10415,7 @@ struct QLVulkanPresenter::Impl
             {
                 if (b.vk_images[e])
                 {
-                    VkFormat format = VK_FORMAT_UNDEFINED;
-                    VkImage image = VK_NULL_HANDLE;
-                    bool is_depth = false;
-                    gpView(b.names[e], image, format, is_depth);
-                    const bool stencil = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
-                    gpAcquire(b.names[e], b.vk_images[e],
-                              is_depth ? (VkImageAspectFlags)(VK_IMAGE_ASPECT_DEPTH_BIT |
-                                                              (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0))
-                                       : (VkImageAspectFlags)VK_IMAGE_ASPECT_COLOR_BIT,
-                              false);
+                    gpAcquire(b.names[e], b.vk_images[e], b.aspects[e], false);
                     // The depth a draw both tests against and reads (depth bounds, read-only) is no hazard.
                     const bool own_depth = t.depth && b.vk_images[e] == t.images[t.colors] && !d.depth_write;
                     hazard = hazard || (mGpWritten.count(b.vk_images[e]) != 0 && !own_depth);
@@ -10608,6 +10708,8 @@ struct QLVulkanPresenter::Impl
         mGpBlocksReused = mGpBlocksWritten = 0;
         mGpHostPeakLast = mGpHostPeak;
         mGpHostPeak     = 0;
+        mGpDrawNanosLast = mGpDrawNanosNow;
+        mGpDrawNanosNow  = 0;
     }
 
     std::string gpInfo() const
@@ -10621,9 +10723,11 @@ struct QLVulkanPresenter::Impl
         {
             programs += p.ok ? 1 : 0;
         }
-        return llformat("%u draws in %u passes last frame, %u kept by GL | %u of %u programs compiled | blocks %u "
-                        "written, %u reused, fullest pass %.1f of %u MB",
-                        mGpDrawsLast, mGpPassesLast, mGpKeptLast, programs, (U32)mGpPrograms.size(),
+        return llformat("%u draws in %u passes last frame, %u kept by GL, Vulkan's part %.1f ms (%.1f us a draw) | %u of "
+                        "%u programs compiled | blocks %u written, %u reused, fullest pass %.1f of %u MB",
+                        mGpDrawsLast, mGpPassesLast, mGpKeptLast, (double)mGpDrawNanosLast / 1e6,
+                        mGpDrawsLast ? (double)mGpDrawNanosLast / 1e3 / mGpDrawsLast : 0.0, programs,
+                        (U32)mGpPrograms.size(),
                         mGpBlocksWrittenLast, mGpBlocksReusedLast, (double)mGpHostPeakLast / (1 << 20),
                         (U32)(GP_SLOT_BYTES >> 20)) +
                (mGpWhy.empty() ? std::string() : " | last kept by GL: " + mGpWhy);

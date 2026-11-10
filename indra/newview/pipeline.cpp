@@ -32,6 +32,7 @@
 
 #include "pipeline.h"
 #include "qlglwork.h"  // Quasar: llrender's hooks for Vulkan's runs
+#include <chrono>
 #include <algorithm>
 #include <sstream>
 
@@ -12829,9 +12830,38 @@ namespace
     // One draw of a GL program by Vulkan, from what GL holds for it now: bound, its uniforms set, its textures on their
     // units, the engine's blocks bound. Its target is the render target's colours and depth, cleared first (colours)
     // where `clear`. Positions three floats a vertex. False: nothing was recorded, and why is kept for the status line.
+    bool ql_gl_program_draw_timed(LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
+                                  const QLGLState& state, const F32* positions, U32 vertex_count,
+                                  const QLVulkanPresenter::GpMesh* mesh);
+
+    // The CPU time the draws of GL's programs by Vulkan took, all of it (the viewer's part and the presenter's), and
+    // how many: this frame and the last, for the stages' line.
+    U64 sQLDrawNanosNow = 0, sQLDrawNanosLast = 0;
+    U32 sQLDrawsNow = 0, sQLDrawsLast = 0, sQLDrawFrame = 0;
+
     bool ql_gl_program_draw(LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
                             const QLGLState& state, const F32* positions, U32 vertex_count,
                             const QLVulkanPresenter::GpMesh* mesh = nullptr)
+    {
+        if (sQLDrawFrame != LLFrameTimer::getFrameCount())
+        {
+            sQLDrawFrame     = LLFrameTimer::getFrameCount();
+            sQLDrawNanosLast = sQLDrawNanosNow;
+            sQLDrawsLast     = sQLDrawsNow;
+            sQLDrawNanosNow  = 0;
+            sQLDrawsNow      = 0;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        const bool drawn = ql_gl_program_draw_timed(shader, target, clear, clear_color, state, positions, vertex_count, mesh);
+        sQLDrawNanosNow += (U64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                                     started).count();
+        ++sQLDrawsNow;
+        return drawn;
+    }
+
+    bool ql_gl_program_draw_timed(LLGLSLShader& shader, LLRenderTarget* target, bool clear, const LLColor4& clear_color,
+                                  const QLGLState& state, const F32* positions, U32 vertex_count,
+                                  const QLVulkanPresenter::GpMesh* mesh)
     {
         // What GL does while the draw is recorded (a flush of LLRender's batches, a texture's copy) is before the run.
         struct Recording
@@ -12905,34 +12935,52 @@ namespace
         // The matrices' blocks current, as a draw makes them.
         gGL.syncMatrices();
 
-        static std::vector<QLVulkanPresenter::GpRegion>  regions;
+        // The program's regions and its samplers' names, made once a link (the presenter keeps what they resolve to
+        // while they are the same strings); the setters' kinds and transposes, which change, taken every draw.
+        struct QLProgramNames
+        {
+            U32                                      link = U32_MAX;
+            std::vector<QLVulkanPresenter::GpRegion> regions;
+            std::vector<std::string>                 texture_names;
+        };
+        static std::unordered_map<const LLGLSLShader*, QLProgramNames> names_by_program;
         static std::vector<QLVulkanPresenter::GpTexture> textures;
-        static std::vector<std::string>                  texture_names;
         static std::vector<QLVulkanPresenter::GpBlock>   blocks;
-        regions.clear();
         textures.clear();
-        texture_names.clear();
         blocks.clear();
         const U32* words = shader.qlWords();
-        for (const LLGLSLShader::QLRegion& r : shader.qlRegions())
+        QLProgramNames& names = names_by_program[&shader];
+        const std::vector<LLGLSLShader::QLRegion>& shader_regions = shader.qlRegions();
+        if (names.link != shader.qlLinkCount() || names.regions.size() != shader_regions.size())
         {
-            QLVulkanPresenter::GpRegion g;
-            g.name       = r.mName.c_str();
-            g.type       = r.mType;
-            g.elements   = r.mElements;
-            g.components = r.mComponents;
-            g.words      = r.mWords;
-            g.kind       = r.mKind;
-            g.transpose  = r.mTranspose;
-            regions.push_back(g);
-            if (!ql_is_sampler_type(r.mType))
+            names.link = shader.qlLinkCount();
+            names.regions.clear();
+            names.texture_names.clear();
+            for (const LLGLSLShader::QLRegion& r : shader_regions)
             {
-                continue;
+                QLVulkanPresenter::GpRegion g;
+                g.name       = r.mName.c_str();
+                g.type       = r.mType;
+                g.elements   = r.mElements;
+                g.components = r.mComponents;
+                g.words      = r.mWords;
+                names.regions.push_back(g);
+                if (!ql_is_sampler_type(r.mType))
+                {
+                    continue;
+                }
+                for (U32 e = 0; e < r.mElements; ++e)
+                {
+                    names.texture_names.push_back(r.mElements > 1 ? llformat("%s[%u]", r.mName.c_str(), e) : r.mName);
+                }
             }
-            for (U32 e = 0; e < r.mElements; ++e)
-            {
-                texture_names.push_back(r.mElements > 1 ? llformat("%s[%u]", r.mName.c_str(), e) : r.mName);
-            }
+        }
+        std::vector<QLVulkanPresenter::GpRegion>& regions = names.regions;
+        const std::vector<std::string>& texture_names = names.texture_names;
+        for (size_t i = 0; i < regions.size(); ++i)
+        {
+            regions[i].kind      = shader_regions[i].mKind;
+            regions[i].transpose = shader_regions[i].mTranspose;
         }
         // Each sampler's texture and sampling, from the unit GL gave it at link.
         size_t named = 0;
@@ -16027,6 +16075,10 @@ static const bool sQLHooksSet = []()
 std::string ql_vulkan_stages_info()
 {
     std::string info;
+#if QL_VULKAN_SHADOWS
+    info = llformat("draws' CPU time %.1f ms (%.1f us a draw, %u draws) | ", (double)sQLDrawNanosLast / 1e6,
+                    sQLDrawsLast ? (double)sQLDrawNanosLast / 1e3 / sQLDrawsLast : 0.0, sQLDrawsLast);
+#endif
     for (const auto& [name, stats] : sQLStageStats)
     {
         info += llformat("%s%s: %u Vulkan, %u GL", info.empty() ? "" : " | ", name.c_str(), stats.last_vk, stats.last_gl);
