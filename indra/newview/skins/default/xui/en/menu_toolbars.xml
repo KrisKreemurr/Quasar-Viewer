@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<context_menu
+      layout="topleft"
+      name="Toolbars Popup"
+      visible="false">
+  <!-- <GMDX> a pinned inventory button (gmdxtoolbarpins.cpp): wear it, and its look -->
+  <menu_item_call label="Wear (Replace)"
+                  layout="topleft"
+                  name="gmdx_pin_wear">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="wear" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="wear" />
+  </menu_item_call>
+  <menu_item_call label="Wear (Add)"
+                  layout="topleft"
+                  name="gmdx_pin_add">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="add" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="add" />
+  </menu_item_call>
+  <menu_item_call label="Take Off"
+                  layout="topleft"
+                  name="gmdx_pin_take_off">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="take_off" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="take_off" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_click_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="click_default" />
+  </menu_item_separator>
+  <menu_item_check label="Left Click: As in Inventory"
+                   layout="topleft"
+                   name="gmdx_pin_click_default">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_default" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_default" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_default" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Wear (Replace)"
+                   layout="topleft"
+                   name="gmdx_pin_click_replace">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_replace" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_replace" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_replace" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Wear (Add)"
+                   layout="topleft"
+                   name="gmdx_pin_click_add">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_add" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_add" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_add" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Ask Each Time"
+                   layout="topleft"
+                   name="gmdx_pin_click_ask">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_ask" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_ask" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_ask" />
+  </menu_item_check>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_wear_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="separator" />
+  </menu_item_separator>
+  <menu_item_call label="Change Icon..."
+                  layout="topleft"
+                  name="gmdx_pin_icon">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="icon" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="icon" />
+  </menu_item_call>
+  <menu_item_call label="Reset Icon"
+                  layout="topleft"
+                  name="gmdx_pin_reset_icon">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="reset_icon" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="reset_icon" />
+  </menu_item_call>
+  <menu_item_call label="Rename..."
+                  layout="topleft"
+                  name="gmdx_pin_rename">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="rename" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="rename" />
+  </menu_item_call>
+  <menu_item_call label="Reset Name"
+                  layout="topleft"
+                  name="gmdx_pin_reset_name">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="reset_name" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="reset_name" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="separator" />
+  </menu_item_separator>
+  <!-- </GMDX> -->
+  <menu_item_call label="Remove this button"
+                  layout="topleft"
+                  name="Remove button">
+    <menu_item_call.on_click function="Toolbars.RemoveSelectedCommand" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft" />
+  <menu_item_call label="Toolbar buttons..."
+                  layout="topleft"
+                  name="Choose Buttons">
+    <menu_item_call.on_click function="Floater.Show"
+                             parameter="toybox" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft" />
+  <menu_item_check label="Icons and labels"
+                   layout="topleft"
+                   name="icons_with_text">
+    <on_click function="Toolbars.EnableSetting"
+              parameter="icons_with_text" />
+    <on_check function="Toolbars.CheckSetting"
+              parameter="icons_with_text" />
+  </menu_item_check>
+  <menu_item_check label="Icons only"
+                   layout="topleft"
+                   name="icons_only">
+    <on_click function="Toolbars.EnableSetting"
+              parameter="icons_only" />
+    <on_check function="Toolbars.CheckSetting"
+              parameter="icons_only" />
+  </menu_item_check>
+  <menu_item_check label="Small Icons only"
+                   layout="topleft"
+                   name="icons_only_small">
+    <on_click function="Toolbars.EnableSetting"
+              parameter="icons_only_small" />
+    <on_check function="Toolbars.CheckSetting"
+              parameter="icons_only_small" />
+  </menu_item_check>
+  <menu_item_check label="Text only"
+                   layout="topleft"
+                   name="text_only">
+    <on_click function="Toolbars.EnableSetting"
+              parameter="text_only" />
+    <on_check function="Toolbars.CheckSetting"
+              parameter="text_only" />
+  </menu_item_check>
+  <menu_item_separator
+   name="layout_separator" />
+  <menu_item_check label="Buttons auto-layout"
+                   layout="topleft"
+                   name="autolayout">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="none" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="none" />
+  </menu_item_check>
+  <menu_item_check label="Buttons fill width"
+                   layout="topleft"
+                   name="filllayout">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="fill" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="fill" />
+	<on_visible function="Toolbars.CheckOrientation"
+			  parameter="horizontal" />
+  </menu_item_check>
+  <menu_item_check label="Buttons left align"
+                   layout="topleft"
+                   name="left_align">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="left" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="left" />
+    <on_visible function="Toolbars.CheckOrientation"
+          parameter="horizontal" />
+  </menu_item_check>
+  <menu_item_check label="Buttons right align"
+                 layout="topleft"
+                 name="right_align">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="right" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="right" />
+    <on_visible function="Toolbars.CheckOrientation"
+          parameter="horizontal" />
+  </menu_item_check>
+  <menu_item_check label="Buttons top aligned"
+                 layout="topleft"
+                 name="top_align">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="left" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="left" />
+    <on_visible function="Toolbars.CheckOrientation"
+          parameter="vertical" />
+  </menu_item_check>
+  <menu_item_check label="Buttons bottom aligned"
+                 layout="topleft"
+                 name="bottom_align">
+    <on_click function="Toolbars.ChangeLayout"
+              parameter="right" />
+    <on_check function="Toolbars.CheckLayout"
+              parameter="right" />
+    <on_visible function="Toolbars.CheckOrientation"
+          parameter="vertical" />
+  </menu_item_check>
+</context_menu>

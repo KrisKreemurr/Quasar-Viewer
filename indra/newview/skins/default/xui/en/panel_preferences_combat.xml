@@ -1,0 +1,844 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!--
+  Combat preferences. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4,
+  whose panel came from SkoomaStorm's panel_preferences_combat.xml (<SS:Skoomastream>,
+  the over-the-shoulder camera and the reticle) and SoapStorm (ADS, Kill Feed, Hit Marker).
+
+  Slipstream: everything sits behind the one CombatFX checkbox at the top; the sub-tabs
+  only show while it is on.
+
+  Layout grid, kept identical on every tab so the value boxes line up:
+    section header   left 10
+    checkbox         left 12, nested option left 30
+    slider           left 30, label_width 180, width 440 (value box at the same x everywhere)
+-->
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="408"
+ label="Combat"
+ layout="topleft"
+ left="102"
+ name="combat"
+ top="1"
+ width="517">
+
+<check_box
+ control_name="CombatFX"
+ follows="left|top"
+ font="SansSerifBold"
+ height="16"
+ label="Combat features (CombatFX)"
+ layout="topleft"
+ left="12"
+ name="combat_fx_enabled"
+ tool_tip="One switch for every combat feature on this page: the over-the-shoulder aim camera, aim down sights, the custom crosshair, Combat 2.0 hit markers and kill feed, map share and pings, rez effects and loadouts. Off, none of them run, the helper sends no combat traffic and the camera behaves as stock."
+ top="8"
+ width="490" />
+<text
+ type="string"
+ follows="left|top"
+ height="16"
+ layout="topleft"
+ left="30"
+ name="combat_fx_note"
+ invisibility_control="CombatFX"
+ top_pad="6"
+ width="470"
+ wrap="true">
+    Turn this on to use and configure the combat features.
+</text>
+
+<tab_container
+ follows="all"
+ layout="topleft"
+ left="1"
+ right="-1"
+ top="32"
+ bottom="-1"
+ name="combat_sub_tabs"
+ tab_min_width="60"
+ tab_position="top"
+ visibility_control="CombatFX">
+
+    <!-- ============================== Camera ============================== -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Camera"
+     name="combat_camera">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Over-the-Shoulder (OTS) Camera
+        </text>
+        <check_box
+         control_name="OTSEnabled"
+         follows="left|top"
+         height="16"
+         label="Enable OTS mode (M enters the shoulder camera)"
+         layout="topleft"
+         left="12"
+         name="ots_enabled_prefs"
+         top_pad="8"
+         width="470" />
+        <slider
+         control_name="OTSCameraDistance"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         initial_value="3.0"
+         layout="topleft"
+         label="Distance (m):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="10.0"
+         min_val="0.5"
+         name="OTSCameraDistancePref"
+         top_pad="10"
+         width="440" />
+        <slider
+         control_name="OTSCameraSide"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         initial_value="-0.5"
+         layout="topleft"
+         label="Side offset (m):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="2.0"
+         min_val="-2.0"
+         name="OTSCameraSidePref"
+         top_pad="8"
+         width="440" />
+        <slider
+         control_name="OTSCameraHeight"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         initial_value="0.5"
+         layout="topleft"
+         label="Height (m):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="3.0"
+         min_val="-1.0"
+         name="OTSCameraHeightPref"
+         top_pad="8"
+         width="440" />
+        <slider
+         control_name="OTSFocusDistance"
+         can_edit_text="true"
+         decimal_digits="1"
+         follows="left|top"
+         height="15"
+         initial_value="10.0"
+         layout="topleft"
+         label="Focus distance (m):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="50.0"
+         min_val="2.0"
+         name="OTSFocusDistancePref"
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="OTSCameraCollision"
+         follows="left|top"
+         height="16"
+         label="Camera collision (pull in when geometry blocks the view)"
+         layout="topleft"
+         left="30"
+         name="ots_camera_collision_prefs"
+         tool_tip="Pull the camera in closer when world geometry is between you and it, instead of clipping through. Avatars and phantom objects never block the camera."
+         top_pad="10"
+         width="470" />
+        <!-- <GMDX> No convergence camera checkbox (SoapStorm c9dbb017af): turning it off let
+             camera-position weapons fire around cover the avatar hides behind. It is always on. -->
+        <check_box
+         control_name="OTSRememberLastView"
+         follows="left|top"
+         height="16"
+         label="Remember last view (return to OTS or first person as last toggled)"
+         layout="topleft"
+         left="30"
+         name="ots_remember_view_prefs"
+         tool_tip="When entering aim mode, return to whichever view (over-the-shoulder or first person) you last switched to with the view toggle key (Ctrl+Space), instead of always starting in OTS"
+         top_pad="6"
+         width="470" />
+        <text
+         type="string"
+         follows="left|top"
+         height="40"
+         layout="topleft"
+         left="10"
+         name="cameras_note"
+         top_pad="14"
+         width="490"
+         wrap="true">
+            Two cameras: the third-person shooter camera (Move &amp; View) is a free camera for moving around; the OTS camera is the aim camera you enter with mouselook (M). Ctrl+Space toggles OTS and first person, Shift+Space swaps the shoulder. While OTS is active it owns the camera.
+        </text>
+    </panel>
+
+    <!-- <GMDX> ================================ ADS ================================ -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="ADS"
+     name="combat_ads">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Aim Down Sights (ADS)
+        </text>
+        <check_box
+         control_name="FSDoubleTapADS"
+         follows="left|top"
+         height="16"
+         label="Double-tap right-click to aim down sights"
+         layout="topleft"
+         left="12"
+         name="ads_enabled_prefs"
+         tool_tip="Tap, then tap-and-hold the right mouse button to aim down sights; release to exit. Works in first person and OTS (from OTS the camera dives into first person while you aim)."
+         top_pad="8"
+         width="470" />
+        <check_box
+         control_name="FSADSDefaultZoom"
+         follows="left|top"
+         height="16"
+         label="Use ADS for all right-click zoom (no double-tap)"
+         layout="topleft"
+         left="30"
+         name="ads_default_zoom_prefs"
+         tool_tip="Hold right-click to aim down sights straight away, with no double-tap. The normal right-click zoom in first person and OTS is turned off while this is on."
+         top_pad="6"
+         width="470" />
+        <slider
+         control_name="FSADSZoomFOV"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         increment="0.01"
+         layout="topleft"
+         label="ADS field of view:"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="1.2"
+         min_val="0.175"
+         name="ads_zoom_fov"
+         tool_tip="Aim-down-sights zoom level in radians (lower = more zoom). Scroll while in ADS to adjust it live."
+         top_pad="8"
+         width="440" />
+        <slider
+         control_name="FSADSMouseSensitivity"
+         can_edit_text="true"
+         decimal_digits="1"
+         follows="left|top"
+         height="15"
+         increment="0.5"
+         layout="topleft"
+         label="ADS mouse sensitivity:"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="15"
+         min_val="0"
+         name="ads_mouse_sensitivity"
+         tool_tip="Mouse sensitivity while aiming down sights, on the same scale as the mouselook sensitivity. Like it, it is slowed further by the zoom."
+         top_pad="8"
+         width="440" />
+        <slider
+         control_name="FSADSVignetteStrength"
+         can_edit_text="false"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         increment="0.05"
+         layout="topleft"
+         label="Vignette strength:"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="1"
+         min_val="0"
+         name="ads_vignette_strength"
+         tool_tip="How dark the screen edges get while aiming down sights (0 = no vignette)."
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="FSRMBScriptEnabled"
+         follows="left|top"
+         height="16"
+         label="Also send right-click to scripts (as CONTROL_LBUTTON)"
+         layout="topleft"
+         left="12"
+         name="rmb_script_enabled"
+         tool_tip="In mouselook and OTS, report the right mouse button to your weapons as the normal left button (CONTROL_LBUTTON in a control event), next to the mouselook left button (CONTROL_ML_LBUTTON). Right-click zoom and ADS keep working."
+         top_pad="10"
+         width="470" />
+    </panel>
+    <!-- </GMDX> -->
+
+    <!-- ============================== Reticle ============================= -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Reticle"
+     name="combat_reticle">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Crosshair
+        </text>
+        <check_box
+         control_name="FSCustomCrosshair"
+         follows="left|top"
+         height="16"
+         label="Custom crosshair (dot and chevrons)"
+         layout="topleft"
+         left="12"
+         name="custom_crosshair_prefs"
+         tool_tip="Replace the stock mouselook/OTS crosshair with the custom composite crosshair, tinted by the identified target's contact set color"
+         top_pad="8"
+         width="470" />
+        <slider
+         control_name="FSHitMarkerScale"
+         enabled_control="FSCustomCrosshair"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         increment="0.05"
+         layout="topleft"
+         label="Crosshair size:"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="3.0"
+         min_val="0.5"
+         name="crosshair_scale"
+         tool_tip="Scale for the custom crosshair and the hit marker flash"
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="FSOTSTrueAimDot"
+         enabled_control="FSCustomCrosshair"
+         follows="left|top"
+         height="16"
+         label="Line-of-sight (LOS) true aim in OTS"
+         layout="topleft"
+         left="30"
+         name="ots_true_aim_dot_prefs"
+         tool_tip="Slide the crosshair's chevrons to where a shot fired from your avatar is blocked. Centered when your line of sight to the target is clear."
+         top_pad="6"
+         width="470" />
+        <!-- <GMDX> -->
+        <check_box
+         control_name="FSRezQueueIndicator"
+         follows="left|top"
+         height="16"
+         label="Rez queue warning at crosshair"
+         layout="topleft"
+         left="12"
+         name="rez_queue_indicator_prefs"
+         tool_tip="Watch the region's pending asset downloads and warn above the crosshair in mouselook and OTS while the sim is backed up and refusing to rez objects, then report how long the queue lasted."
+         top_pad="10"
+         width="470" />
+        <!-- </GMDX> -->
+        <text
+         type="string"
+         follows="left|top"
+         height="30"
+         layout="topleft"
+         left="10"
+         name="iff_note"
+         top_pad="14"
+         width="490"
+         wrap="true">
+            With combat features on, the mouselook target identification (name under the crosshair) never identifies targets behind walls, floors or terrain.
+        </text>
+    </panel>
+
+    <!-- <GMDX> ============================ Kill Feed ============================ -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Kill Feed"
+     name="combat_killfeed">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Kill Feed (Combat 2.0)
+        </text>
+        <check_box
+         control_name="FSKillFeedEnabled"
+         follows="left|top"
+         height="16"
+         label="Show kill feed overlay"
+         layout="topleft"
+         left="12"
+         name="kill_feed_enabled_pref"
+         tool_tip="Region-wide Combat 2.0 deaths as an on-screen feed. Wears the small #Slipstream Helper object while on."
+         top_pad="8"
+         width="470" />
+        <slider
+         control_name="FSKillFeedMaxLines"
+         decimal_digits="0"
+         follows="left|top"
+         height="15"
+         increment="1"
+         label="Max lines visible:"
+         label_width="180"
+         layout="topleft"
+         left="30"
+         max_val="10"
+         min_val="1"
+         name="kill_feed_max_lines_pref"
+         show_text="true"
+         top_pad="10"
+         width="440" />
+        <slider
+         control_name="FSKillFeedHoldTime"
+         decimal_digits="0"
+         follows="left|top"
+         height="15"
+         increment="1"
+         label="Hold time (sec, 0=never fade):"
+         label_width="180"
+         layout="topleft"
+         left="30"
+         max_val="120"
+         min_val="0"
+         name="kill_feed_hold_time_pref"
+         show_text="true"
+         top_pad="8"
+         width="440" />
+        <button
+         follows="left|top"
+         height="23"
+         label="Position and size..."
+         layout="topleft"
+         left="30"
+         name="kill_feed_preview_btn"
+         tool_tip="Open the Kill Feed window: while it is open, an example line shows where and how kills will appear."
+         top_pad="14"
+         width="150">
+            <button.commit_callback
+             function="Floater.Show"
+             parameter="fs_kill_feed" />
+        </button>
+    </panel>
+    <!-- </GMDX> -->
+
+    <!-- <GMDX> ============================ Hit Marker =========================== -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Hit Marker"
+     name="combat_hitmarker">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Hit Marker &amp; Damage Report (Combat 2.0)
+        </text>
+        <check_box
+         control_name="FSHitMarkerEnabled"
+         follows="left|top"
+         height="16"
+         label="Enable hitmarker (flash on hit)"
+         layout="topleft"
+         left="12"
+         name="hit_marker_enabled_pref"
+         tool_tip="Flash a marker and play a sound when your combat damage lands on an avatar (Combat 2.0 regions; collision and fall damage are ignored). Wears the small #Slipstream Helper object while on."
+         top_pad="8"
+         width="470" />
+        <slider
+         control_name="FSHitMarkerScale"
+         can_edit_text="true"
+         decimal_digits="2"
+         follows="left|top"
+         height="15"
+         increment="0.05"
+         label="Marker size:"
+         label_width="180"
+         layout="topleft"
+         left="30"
+         max_val="3.0"
+         min_val="0.5"
+         name="hit_marker_scale_pref"
+         show_text="true"
+         tool_tip="Scale for the hitmarker flash and the custom crosshair."
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="FSHitMarkerText"
+         enabled_control="FSHitMarkerEnabled"
+         follows="left|top"
+         height="16"
+         label="Show hit report text (fading damage numbers under the crosshair)"
+         layout="topleft"
+         left="12"
+         name="hit_marker_text_pref"
+         top_pad="10"
+         width="470" />
+        <button
+         follows="left|top"
+         height="20"
+         label="Damage symbols..."
+         layout="topleft"
+         left="30"
+         name="hit_marker_customize_symbols_btn"
+         tool_tip="Assign your own symbol per damage type (also used by the kill feed)."
+         top_pad="6"
+         width="140">
+            <button.commit_callback
+             function="Floater.Show"
+             parameter="fs_hit_marker_emojis" />
+        </button>
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top_pad="16"
+         width="490">
+            Sounds
+        </text>
+        <check_box
+         control_name="FSHitMarkerSounds"
+         enabled_control="FSHitMarkerEnabled"
+         follows="left|top"
+         height="16"
+         label="Play hit and kill sounds (UI volume)"
+         layout="topleft"
+         left="12"
+         name="hit_marker_sounds_pref"
+         top_pad="8"
+         width="470" />
+        <text
+         type="string"
+         follows="left|top"
+         height="14"
+         layout="topleft"
+         left="30"
+         name="hit_sound_label"
+         top_pad="12"
+         width="70">
+            Hit sound:
+        </text>
+        <line_editor
+         control_name="FSHitMarkerHitSound"
+         follows="left|top"
+         height="20"
+         layout="topleft"
+         left_delta="75"
+         name="hit_sound_uuid"
+         tool_tip="Sound asset UUID played when your damage lands. Empty: no sound."
+         top_delta="-3"
+         width="290" />
+        <button
+         follows="left|top"
+         height="20"
+         label="Test"
+         layout="topleft"
+         left_pad="6"
+         name="test_hit_sound_btn"
+         tool_tip="Play the hit sound."
+         top_delta="0"
+         width="64">
+            <button.commit_callback
+             function="Pref.TestHitSound" />
+        </button>
+        <text
+         type="string"
+         follows="left|top"
+         height="14"
+         layout="topleft"
+         left="30"
+         name="kill_sound_label"
+         top_pad="10"
+         width="70">
+            Kill sound:
+        </text>
+        <line_editor
+         control_name="FSHitMarkerKillSound"
+         follows="left|top"
+         height="20"
+         layout="topleft"
+         left_delta="75"
+         name="kill_sound_uuid"
+         tool_tip="Sound asset UUID played when your damage kills. Empty: no sound."
+         top_delta="-3"
+         width="290" />
+        <button
+         follows="left|top"
+         height="20"
+         label="Test"
+         layout="topleft"
+         left_pad="6"
+         name="test_kill_sound_btn"
+         tool_tip="Play the kill sound."
+         top_delta="0"
+         width="64">
+            <button.commit_callback
+             function="Pref.TestKillSound" />
+        </button>
+    </panel>
+    <!-- </GMDX> -->
+
+    <!-- <GMDX> ============================== Pings ============================== -->
+    <!-- gmdxmapshare.h / gmdxpingwheel.h: pings said by my helper to the people I send to in my region -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Pings"
+     name="combat_pings">
+
+        <check_box
+         control_name="SLMapShareShow"
+         follows="left|top"
+         height="16"
+         label="Show pings people send me (over the world and on the maps)"
+         layout="topleft"
+         left="12"
+         name="map_share_show_pref"
+         tool_tip="Pings said to you by the helpers of the members of the groups you send to (in your region) are drawn instead of shown as chat lines. Anyone else's stays a chat line. Off: they all stay plain chat text."
+         top="10"
+         width="470" />
+        <check_box
+         control_name="SLMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send pings (wears the #Slipstream Helper)"
+         layout="topleft"
+         left="12"
+         name="map_share_send_pref"
+         tool_tip="Your helper says each ping privately to the people you send to who are in your region. Nobody outside your region ever gets one. Off: nothing can be sent."
+         top_pad="6"
+         width="470" />
+        <check_box
+         control_name="SLMapShareMyGroup"
+         enabled_control="SLMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send to my group (the one whose tag I wear)"
+         layout="topleft"
+         left="30"
+         name="map_share_my_group_pref"
+         tool_tip="Its members in your region get your pings, and theirs are drawn for you."
+         top_pad="6"
+         width="450" />
+        <slider
+         control_name="SLPingSeconds"
+         can_edit_text="true"
+         decimal_digits="0"
+         follows="left|top"
+         height="15"
+         increment="1"
+         initial_value="10"
+         layout="topleft"
+         label="Pings last (seconds):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="60"
+         min_val="3"
+         name="ping_seconds_pref"
+         tool_tip="How long a ping you receive shows over the world and on the maps."
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="SLPingSound"
+         follows="left|top"
+         height="16"
+         label="Sound when a ping arrives"
+         layout="topleft"
+         left="30"
+         name="ping_sound_pref"
+         top_pad="8"
+         width="450" />
+        <button
+         follows="left|top"
+         height="20"
+         label="Block pings from..."
+         layout="topleft"
+         left="30"
+         name="ping_block_btn"
+         tool_tip="Pick someone whose pings are never drawn for you (their lines stay plain chat text)."
+         top_pad="8"
+         width="150">
+            <button.commit_callback
+             function="Pref.PingBlock" />
+        </button>
+        <button
+         follows="left|top"
+         height="20"
+         label="Unblock all"
+         layout="topleft"
+         left_pad="8"
+         name="ping_unblock_btn"
+         tool_tip="Draw pings from everyone you blocked again."
+         top_delta="0"
+         width="110">
+            <button.commit_callback
+             function="Pref.PingUnblockAll" />
+        </button>
+        <!-- the ping keys (gmdxpingwheel.cpp), with the viewer's key capture dialog -->
+        <panel
+         class="gmdx_ping_keys"
+         follows="left|top"
+         height="100"
+         layout="topleft"
+         left="30"
+         name="ping_keys_panel"
+         top_pad="10"
+         width="440">
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_wheel_key_label"
+             top="0"
+             width="230">
+                Ping wheel (tap: Ping, hold: choose):
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_wheel_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_wheel: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_key_label"
+             top_pad="4"
+             width="230">
+                Ping:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_enemy_key_label"
+             top_pad="4"
+             width="230">
+                Ping Enemy:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_enemy_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_enemy: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_rally_key_label"
+             top_pad="4"
+             width="230">
+                Ping Rally:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_rally_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_rally: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+        </panel>
+        <text
+         type="string"
+         follows="left|top"
+         height="56"
+         layout="topleft"
+         left="30"
+         name="ping_help"
+         top_pad="6"
+         width="460"
+         wrap="true">
+The ping keys ping the place under the mouse pointer (in mouselook, under the crosshair). The ping wheel does too when tapped; held, a wheel opens: move toward Ping, Enemy or Rally and let go (in the middle: nothing). Only people in your region get them, never everyone there, as an ordinary chat line with a map link, so people on other viewers can read it.
+        </text>
+    </panel>
+    <!-- </GMDX> -->
+
+
+    <!-- sub-tabs -->
+
+</tab_container>
+</panel>

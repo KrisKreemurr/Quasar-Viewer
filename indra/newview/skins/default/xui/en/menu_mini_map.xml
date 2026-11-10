@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<menu
+ height="101"
+ layout="topleft"
+ left="100"
+ mouse_opaque="false"
+ name="Popup"
+ top="724"
+ visible="false"
+ width="128">
+    <menu_item_call
+     label="Camera to Avatar"
+     name="Cam To Avatar">
+        <menu_item_call.on_click
+         function="Minimap.CamToAvatar" />
+    </menu_item_call>
+    <menu
+     label="Camera to Avatar"
+     name="Cam To Avatars"
+     tear_off="false" />
+    <menu_item_separator
+     name="Cam To Avatar Separator" />
+    <menu_item_check
+     label="Zoom very close"
+     name="Zoom very close">
+        <menu_item_check.on_check
+         function="Minimap.Zoom.Check"
+         parameter="very close" />
+        <menu_item_check.on_click
+         function="Minimap.Zoom.Set"
+         parameter="very close" />
+    </menu_item_check>
+    <menu_item_check
+     label="Zoom close"
+     name="Zoom close">
+        <menu_item_check.on_check
+         function="Minimap.Zoom.Check"
+         parameter="close" />
+        <menu_item_check.on_click
+         function="Minimap.Zoom.Set"
+         parameter="close" />
+    </menu_item_check>
+    <menu_item_check
+     label="Zoom medium"
+     name="Zoom medium">
+        <menu_item_check.on_check
+         function="Minimap.Zoom.Check"
+         parameter="medium" />
+        <menu_item_check.on_click
+         function="Minimap.Zoom.Set"
+         parameter="medium" />
+    </menu_item_check>
+    <menu_item_check
+     label="Zoom far"
+     name="Zoom far">
+        <menu_item_check.on_check
+         function="Minimap.Zoom.Check"
+         parameter="far" />
+        <menu_item_check.on_click
+         function="Minimap.Zoom.Set"
+         parameter="far" />
+    </menu_item_check>
+	<menu_item_separator />
+    <menu_item_check
+       label="North at top"
+       name="North at top">
+          <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="north_at_top" />
+          <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="north_at_top" />
+    </menu_item_check>
+    <menu_item_check
+       label="Camera at top"
+       name="Camera at top">
+          <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="camera_at_top" />
+          <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="camera_at_top" />
+    </menu_item_check>
+	<menu_item_separator />
+    <menu_item_check
+     label="Auto-center map"
+     name="Auto-center map">
+        <menu_item_check.on_check
+         control="MiniMapAutoCenter" />
+        <menu_item_check.on_click
+         function="ToggleControl"
+         parameter="MiniMapAutoCenter" />
+    </menu_item_check>
+    <menu_item_separator />
+  <menu_item_check
+   label="Render Objects"
+   name="Render Objects">
+    <menu_item_check.on_check
+       control="SlipstreamMinimapRenderObjects" />
+    <menu_item_check.on_click
+       function="ToggleControl"
+       parameter="SlipstreamMinimapRenderObjects" />
+  </menu_item_check>
+  <menu_item_check
+   label="Show Guide Line"
+   name="Show Guide Line">
+    <menu_item_check.on_check
+       control="SlipstreamMinimapGuideLine" />
+    <menu_item_check.on_click
+       function="ToggleControl"
+       parameter="SlipstreamMinimapGuideLine" />
+  </menu_item_check>
+  <menu_item_check
+    label="Show Chat Rings"
+    name="Show Chat Rings">
+    <menu_item_check.on_check
+      control="SlipstreamMinimapChatRings" />
+    <menu_item_check.on_click
+      function="ToggleControl"
+      parameter="SlipstreamMinimapChatRings" />
+  </menu_item_check>
+      <menu_item_separator />
+    <menu_item_check
+    label="Parcel Boundries"
+    name="Parcel Boundries">
+    <menu_item_check.on_check
+      control="MiniMapShowPropertyLines" />
+    <menu_item_check.on_click
+      function="ToggleControl"
+      parameter="MiniMapShowPropertyLines" />
+  </menu_item_check>
+    <menu_item_check
+    enabled_control="MiniMapShowPropertyLines"
+    label="Parcels For Sale"
+    name="Parcels For Sale">
+    <menu_item_check.on_check
+      control="SlipstreamMiniMapForSaleParcels" />
+    <menu_item_check.on_click
+      function="ToggleControl"
+      parameter="SlipstreamMiniMapForSaleParcels" />
+  </menu_item_check>
+    <menu_item_check
+    enabled_control="MiniMapShowPropertyLines"
+    label="Parcel Access"
+    name="Parcel Access">
+    <menu_item_check.on_check
+      control="SlipstreamMiniMapCollisionParcels" />
+    <menu_item_check.on_click
+      function="ToggleControl"
+      parameter="SlipstreamMiniMapCollisionParcels" />
+  </menu_item_check>
+  
+    <menu_item_separator />
+    <menu_item_call
+     label="Re-center map"
+     name="Re-center map">
+        <menu_item_call.on_click
+         function="Minimap.Center.Activate" />
+    </menu_item_call>
+    <menu_item_call
+     label="Stop tracking"
+     name="Stop tracking">
+        <menu_item_call.on_click
+         function="Minimap.Tracker"
+         parameter="task_properties" />
+    </menu_item_call>
+    <menu_item_separator />
+    <menu_item_call
+     label="About Land"
+     name="About Land">
+        <menu_item_call.on_click
+         function="Minimap.AboutLand" />
+    </menu_item_call>
+    <menu_item_call
+     label="World Map"
+     name="World Map">
+        <menu_item_call.on_click
+         function="Floater.Show"
+         parameter="world_map" />
+    </menu_item_call>
+</menu>

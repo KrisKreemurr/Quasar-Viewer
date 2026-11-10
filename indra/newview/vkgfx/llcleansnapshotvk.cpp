@@ -1,0 +1,651 @@
+/**
+ * @file llcleansnapshotvk.cpp
+ * @brief LIVE SNAPSHOTS (#873) -- see llcleansnapshotvk.h.
+ *
+ * $LicenseInfo:firstyear=2026&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2026, Slipstream contributors.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ * $/LicenseInfo$
+ */
+
+#include "linden_common.h"
+
+#include "llcleansnapshotvk.h"
+#include "llsnapshotbufferlimits.h"
+#include "vk_common.h"
+#include "vk_pipeline.h"
+#include "vk_display_limits.h"
+#include "vk_world_shaders_spv.h"
+
+#include "llerror.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <new>
+
+namespace
+{
+// clean_snap_live.comp Push (96 B).
+struct SnapPush
+{
+    uint32_t size[4];   // source w, h; output w, h
+    uint32_t aux[4];    // flags, motion w, h, -
+    uint32_t rows[4];   // first work row, work rows
+    float    crop[4];   // source px x0, y0, w, h
+    float    p0[4];
+    float    p1[4];
+};
+VK_PUSH_BUDGET_CHECK(SnapPush);
+
+constexpr uint32_t kFlagBgra = 1u, kFlagMotion = 2u, kFlagFirst = 4u, kFlagDither = 8u,
+                   kFlagLinearNits = 16u, kFlagHdrRgbe = 32u;
+constexpr float    kAccSigma = 0.5f;      // reconstruction Gaussian, output px
+constexpr float    kMotionPx = 0.25f;     // moved more than this (display px) this frame: not accumulated
+constexpr uint64_t kFenceTimeoutNs = 10ull * 1000ull * 1000ull * 1000ull;
+
+enum { PIPE_H = 0, PIPE_V, PIPE_DEPTH, PIPE_ACC, PIPE_RESOLVE, PIPE_HDR_RGBE, PIPE_HDR_RESOLVE, PIPE_COUNT };
+
+// The accumulation's Gaussian width in OUTPUT px (#1093). Fixed (RenderSnapshotAdaptiveSigma
+// off, the old behaviour): kAccSigma. Adaptive: the samples per output pixel are
+// frames / up^2 (up = output px per live px). Four per pixel (the minimum the frame count
+// guarantees, a 2x or 4x shot) leave gaps of about half an output pixel, which a sigma of 0.5
+// bridges; at 8 or more per pixel (a 1.25x - 1.5x shot) the grid is dense and a narrower
+// splat keeps the detail: sigma = 0.5 * sqrt(4 / spp), clamped to [0.3, 0.5]. A Gaussian
+// (never a Lanczos / Mitchell weight) because the splat gathers irregular, jittered samples:
+// its weights are positive, so it cannot ring on a high-contrast edge; the contrast-adaptive
+// sharpen of the mean (RESOLVE) restores the edge response without ringing.
+float accSigma(const LLCleanSnapshotVK::Request& r, float cropW)
+{
+    if (!r.adaptiveSigma || cropW <= 0.f) return kAccSigma;
+    const float up = (float)r.outW / cropW;
+    const float spp = (float)r.frames / std::max(up * up, 1e-3f);
+    return std::min(std::max(0.5f * std::sqrt(4.f / std::max(spp, 1e-3f)), 0.3f), kAccSigma);
+}
+
+VkShaderModule snapModule(VkDevice dev, const uint32_t* code, size_t bytes, const char* name)
+{
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = bytes;
+    ci.pCode = code;
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(dev, &ci, nullptr, &m) != VK_SUCCESS) return VK_NULL_HANDLE;
+    vkNoteShaderModule(m, code, bytes, name);
+    return m;
+}
+
+void memBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+{
+    VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    m.srcStageMask = srcStage; m.srcAccessMask = srcAccess;
+    m.dstStageMask = dstStage; m.dstAccessMask = dstAccess;
+    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+    vkCmdPipelineBarrier2(cmd, &d);
+}
+
+void imageToBuffer(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect, VkImageLayout layout,
+                   VkPipelineStageFlags2 useStages, VkAccessFlags2 useWrite, VkAccessFlags2 useAccess,
+                   VkBuffer dst, uint32_t w, uint32_t h)
+{
+    VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    b.srcStageMask = useStages; b.srcAccessMask = useWrite;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT; b.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    b.oldLayout = layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.image = img; b.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount = 1; d0.pImageMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &d0);
+    VkBufferImageCopy r{};
+    r.imageSubresource = {aspect, 0, 0, 1};
+    r.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, 1, &r);
+    VkImageMemoryBarrier2 a = b;
+    a.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT; a.srcAccessMask = 0;
+    a.dstStageMask = useStages; a.dstAccessMask = useAccess;
+    a.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a.newLayout = layout;
+    VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount = 1; d1.pImageMemoryBarriers = &a;
+    vkCmdPipelineBarrier2(cmd, &d1);
+}
+
+double nowSec()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
+
+bool LLCleanSnapshotVK::sourceFormatSupported(VkFormat f)
+{
+    switch (f)
+    {
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32: case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool LLCleanSnapshotVK::ensurePipelines(VkDevice dev)
+{
+    if (mPipe[0] && !mPipeFailed) return true;
+    if (mPipeFailed) return false;
+    mPipeFailed = true;   // until everything below exists
+    VkDescriptorSetLayoutBinding b[4]{};
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        b[i].binding = i; b[i].descriptorCount = 1;
+        b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dl.bindingCount = 4; dl.pBindings = b;
+    if (vkdCreateSetLayout(dev, &dl, &mDsl, "mDslSnapLive") != VK_SUCCESS) return false;
+    if (mPool.create(dev, "snapLive", {{mDsl, 2}}) != VK_SUCCESS) return false;
+    if (mPool.allocate(mDsl, &mSet) != VK_SUCCESS || mPool.allocate(mDsl, &mSetHdr) != VK_SUCCESS) return false;
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SnapPush)};
+    VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    li.setLayoutCount = 1; li.pSetLayouts = &mDsl;
+    li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pr;
+    if (vkdCreatePipelineLayout(dev, &li, &mLayout, "mSnapLiveLayout") != VK_SUCCESS) return false;
+    struct Src { const uint32_t* code; size_t bytes; const char* name; };
+    const Src srcs[PIPE_COUNT] = {
+        {kWorldSnapLiveHSpv,       kWorldSnapLiveHSpv_bytes,       "SnapLiveH"},
+        {kWorldSnapLiveVSpv,       kWorldSnapLiveVSpv_bytes,       "SnapLiveV"},
+        {kWorldSnapLiveDepthSpv,   kWorldSnapLiveDepthSpv_bytes,   "SnapLiveDepth"},
+        {kWorldSnapLiveAccSpv,     kWorldSnapLiveAccSpv_bytes,     "SnapLiveAcc"},
+        {kWorldSnapLiveResolveSpv, kWorldSnapLiveResolveSpv_bytes, "SnapLiveResolve"},
+        {kWorldSnapLiveHDRSpv,     kWorldSnapLiveHDRSpv_bytes,     "SnapLiveHDRRGBE"},
+        {kWorldSnapLiveHDRResolveSpv, kWorldSnapLiveHDRResolveSpv_bytes, "SnapLiveHDRResolve"}};
+    for (uint32_t i = 0; i < PIPE_COUNT; ++i)
+    {
+        VkShaderModule m = snapModule(dev, srcs[i].code, srcs[i].bytes, srcs[i].name);
+        if (!m) return false;
+        mPipe[i] = createComputePipeline(dev, m, mLayout);
+        destroyShaderModuleDeferred(dev, m, nullptr);
+        if (!mPipe[i]) return false;
+    }
+    mPipeFailed = false;
+    return true;
+}
+
+void LLCleanSnapshotVK::fail(const std::string& why)
+{
+    if (mState != ST_FAILED)
+        LL_WARNS("Snapshot") << "live snapshot failed: " << why << LL_ENDL;
+    mWhy = why;
+    mState = ST_FAILED;
+}
+
+void LLCleanSnapshotVK::freeBuffers()
+{
+    if (!mCtx) return;
+    for (GpuBuffer* b : {&mSrc, &mWork, &mWorkHdr, &mOut, &mOutHdr, &mMotion})
+        if (b->buffer) mCtx->destroyBuffer(*b);
+    mSrc = mWork = mWorkHdr = mOut = mOutHdr = mMotion = GpuBuffer{};
+    mSetDirty = true;
+}
+
+uint64_t LLCleanSnapshotVK::deviceBytes() const
+{
+    return (uint64_t)mSrc.size + mWork.size + mWorkHdr.size + mMotion.size;
+}
+
+bool LLCleanSnapshotVK::arm(VkDeviceContext* ctx, const Request& r, uint32_t srcW, uint32_t srcH, std::string& why)
+{
+    if (!ctx) { why = "no device"; return false; }
+    if ((r.hdrRgbeOutput && (r.mode != MODE_RESAMPLE || r.pairedHdr)) ||
+        (r.pairedHdr && r.mode != MODE_RESAMPLE && r.mode != MODE_ACCUM))
+    { why = "Radiance output requires a color snapshot"; return false; }
+    if (mState == ST_ARMED || mState == ST_RECORDED || mState == ST_SUBMITTED)
+    {
+        LL_WARNS("Snapshot") << "live snapshot: a previous shot was not read; abandoned" << LL_ENDL;
+        cancel();
+    }
+    mCtx = ctx;
+    mState = ST_IDLE;
+    mWhy.clear();
+    if (!r.outW || !r.outH || r.crop[2] <= 0.f || r.crop[3] <= 0.f) { why = "empty shot"; return false; }
+    for (float value : r.crop)
+        if (!std::isfinite(value)) { why = "invalid shot crop"; return false; }
+    if (r.mode != MODE_DEPTH && (!srcW || !srcH)) { why = "no live frame"; return false; }
+    VkDevice dev = ctx->device();
+    if (!ensurePipelines(dev)) { why = "the snapshot compute pipelines could not be created"; return false; }
+    freeBuffers();
+    mReq = r;
+    mReq.frames = std::clamp(r.frames, 1u, 64u);
+    mSrcW = srcW; mSrcH = srcH;
+    mFrame = 0;
+    mCaptureGeneration = 0; mCaptureWhite = mCapturePeak = 0.f;
+    mMotionNow = false;
+    mFence = VK_NULL_HANDLE;
+    mPendingInFlight = false;
+
+    // MODE_RESAMPLE: the source rows the vertical kernel reaches (the crop's rows plus the
+    // Lanczos support), so the work buffer is shot width x those rows, never the window.
+    mWorkRow0 = mWorkRows = 0;
+    if (r.mode == MODE_RESAMPLE)
+    {
+        const double y0 = (double)r.crop[1] * srcH, ch = (double)r.crop[3] * srcH;
+        const double fs = std::max(ch / (double)r.outH, 1.0);
+        // Clamp as floating point before conversion, including out-of-frame crops.
+        const int64_t a = (int64_t)std::clamp(std::floor(y0 - 3.0 * fs - 1.0), 0.0, (double)srcH - 1.0);
+        const int64_t b = (int64_t)std::clamp(std::ceil(y0 + ch + 3.0 * fs + 1.0), 0.0, (double)srcH - 1.0);
+        mWorkRow0 = (uint32_t)a;
+        mWorkRows = (uint32_t)std::max<int64_t>(1, b - a + 1);
+    }
+
+    // Validate every full-image SSBO before any of the shot's buffers are allocated.
+    // Available VRAM is not a substitute for the per-descriptor device limit.
+    const uint64_t range_limit = ctx->limits().maxStorageBufferRange;
+    uint64_t output_bytes = 0, hdr_bytes = 0, work_bytes = 0, source_bytes = 0;
+    if (!(r.hdrRgbeOutput
+              ? LLSnapshotBufferLimits::packedRgbeBytes(r.outW, r.outH, range_limit, output_bytes)
+              : LLSnapshotBufferLimits::packedRgbBytes(r.outW, r.outH, range_limit, output_bytes))
+        || (r.pairedHdr && !LLSnapshotBufferLimits::packedRgbeBytes(r.outW, r.outH, range_limit, hdr_bytes))
+        || (r.mode == MODE_RESAMPLE && !LLSnapshotBufferLimits::imageBytes(r.outW, mWorkRows, 8, range_limit, work_bytes))
+        || (r.mode == MODE_ACCUM && !LLSnapshotBufferLimits::imageBytes(r.outW, r.outH, 8, range_limit, work_bytes))
+        // Reserve the largest supported colour source once at arm time. SDR frames
+        // use only half of it; a float linear-nits HDR frame can then be captured
+        // without reallocating or exposing PQ swapchain bytes to the snapshot path.
+        || (r.mode != MODE_DEPTH && !LLSnapshotBufferLimits::imageBytes(srcW, srcH, 8, range_limit, source_bytes)))
+    {
+        why = "shot exceeds the device storage-buffer range";
+        return false;
+    }
+    {
+        // Soft (#697 / #730): out of memory is a "no", never a crash; the caller falls back.
+        VkDeviceContext::SoftAllocScope soft(ctx, true);
+        {
+            VkMemScope memcat(VKMEM_READBACK);
+            const VkDeviceSize ob = output_bytes;
+            mOut = ctx->createBuffer(ob, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            if (!mOut.buffer)   // (no cached coherent type: plain coherent)
+                mOut = ctx->createBuffer(ob, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        if (r.pairedHdr && mOut.buffer && mOut.mapped)
+        {
+            VkMemScope memcat(VKMEM_READBACK);
+            mOutHdr = ctx->createBuffer(hdr_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        VkMemScope memcat(VKMEM_TARGET);
+        if (mOut.buffer && mOut.mapped && (!r.pairedHdr || (mOutHdr.buffer && mOutHdr.mapped)))
+        {
+            const VkDeviceSize wb = work_bytes;
+            if (wb) mWork = ctx->createBuffer(wb, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (wb && r.pairedHdr && r.mode == MODE_ACCUM && mWork.buffer)
+                mWorkHdr = ctx->createBuffer(wb, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (r.mode != MODE_DEPTH && (!wb || mWork.buffer))
+                ensureSource(source_bytes);
+        }
+    }
+    const bool ok = mOut.buffer && mOut.mapped && (!r.pairedHdr || (mOutHdr.buffer && mOutHdr.mapped))
+                 && (!(r.pairedHdr && r.mode == MODE_ACCUM) || mWorkHdr.buffer)
+                 && (r.mode == MODE_DEPTH || (mSrc.buffer && (r.mode == MODE_RESAMPLE || r.mode == MODE_ACCUM) && mWork.buffer));
+    if (!ok)
+    {
+        why = "not enough memory for the shot's buffers";
+        LL_WARNS("Snapshot") << "live snapshot " << r.outW << "x" << r.outH << ": " << why << " (output "
+                             << (output_bytes >> 20) << " MB host, work "
+                             << (work_bytes >> 20)
+                             << " MB device)" << LL_ENDL;
+        freeBuffers();
+        return false;
+    }
+    mSetDirty = true;
+    mState = ST_ARMED;
+    mArmTime = nowSec();
+    static const char* const kModes[3] = {"resample", "depth", "accumulate"};
+    LL_INFOS("Snapshot") << "live snapshot armed: " << r.outW << "x" << r.outH << " " << kModes[std::min<uint32_t>(r.mode, 2u)]
+                         << " at capture point " << r.point << " from " << srcW << "x" << srcH << " crop "
+                         << r.crop[0] << "," << r.crop[1] << " " << r.crop[2] << "x" << r.crop[3]
+                         << (r.mode == MODE_ACCUM ? " frames " + std::to_string(mReq.frames) : std::string())
+                         << (r.mode == MODE_ACCUM && r.motionReject ? " (motion rejection)" : "")
+                         << "; VRAM: source " << (mSrc.size >> 10) << " KB, "
+                         << (r.mode == MODE_ACCUM ? "accumulator " : "work ") << (mWork.size >> 10)
+                         << " KB; host output " << (mOut.size >> 10) << " KB" << LL_ENDL;
+    return true;
+}
+
+bool LLCleanSnapshotVK::ensureSource(VkDeviceSize bytes)
+{
+    if (!mCtx || !bytes || bytes > mCtx->limits().maxStorageBufferRange) return false;
+    if (mSrc.buffer && mSrc.size >= bytes) return true;
+    if (mSrc.buffer) return false;   // (sized at arm / the first record; a shot never re-sizes it)
+    VkMemScope memcat(VKMEM_TARGET);
+    VkDeviceContext::SoftAllocScope soft(mCtx, true);
+    mSrc = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    mSetDirty = true;
+    return mSrc.buffer != VK_NULL_HANDLE;
+}
+
+bool LLCleanSnapshotVK::ensureMotion(VkDeviceSize bytes)
+{
+    if (!mCtx || !bytes || bytes > mCtx->limits().maxStorageBufferRange) return false;
+    if (mMotion.buffer) return mMotion.size >= bytes;
+    VkMemScope memcat(VKMEM_TARGET);
+    VkDeviceContext::SoftAllocScope soft(mCtx, true);
+    mMotion = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    mSetDirty = true;
+    return mMotion.buffer != VK_NULL_HANDLE;
+}
+
+// Bindings the mode does not read name the source (a valid buffer; never accessed).
+void LLCleanSnapshotVK::writeSet()
+{
+    if (!mSetDirty || !mSet) return;
+    const VkBuffer src = mSrc.buffer;
+    for (unsigned pass = 0; pass < 2; ++pass)
+    {
+        const GpuBuffer& out = pass && mOutHdr.buffer ? mOutHdr : mOut;
+        const GpuBuffer& work = pass && mWorkHdr.buffer ? mWorkHdr : mWork;
+        const VkDescriptorBufferInfo bi[4] = {
+            {src, 0, mSrc.size},
+            {work.buffer ? work.buffer : src, 0, work.buffer ? work.size : mSrc.size},
+            {out.buffer, 0, out.size},
+            {mMotion.buffer ? mMotion.buffer : src, 0, mMotion.buffer ? mMotion.size : mSrc.size}};
+        VkWriteDescriptorSet wr[4]{};
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = pass ? mSetHdr : mSet; wr[i].dstBinding = i;
+            wr[i].descriptorCount = 1; wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr[i].pBufferInfo = &bi[i];
+        }
+        vkUpdateDescriptorSets(mCtx->device(), 4, wr, 0, nullptr);
+    }
+    mSetDirty = false;
+}
+
+void LLCleanSnapshotVK::record(VkCommandBuffer cmd, const Source& s)
+{
+    if (mState != ST_ARMED || s.point != mReq.point || !cmd) return;
+    const Request& r = mReq;
+    SnapPush pc{};
+    pc.size[2] = r.outW; pc.size[3] = r.outH;
+    uint32_t srcW = 0, srcH = 0;
+    if (r.mode == MODE_DEPTH)
+    {
+        if (!s.depthImage || s.depthFormat != VK_FORMAT_D32_SFLOAT || !s.depthW || !s.depthH)
+        {
+            fail("no D32 world depth at the capture point");
+            return;
+        }
+        srcW = s.depthW; srcH = s.depthH;
+        // The set may name a buffer an earlier, unread shot freed: the first record writes it.
+        uint64_t depth_bytes = 0;
+        if (!LLSnapshotBufferLimits::imageBytes(srcW, srcH, 4, mCtx->limits().maxStorageBufferRange, depth_bytes))
+        { fail("depth copy exceeds the device storage-buffer range"); return; }
+        if (!ensureSource(depth_bytes)) { fail("not enough memory for the depth copy"); return; }
+    }
+    else
+    {
+        if (!s.swapImage || !sourceFormatSupported(s.swapFormat)) { fail("unsupported SDR/linear snapshot source format"); return; }
+        if ((r.hdrRgbeOutput || r.pairedHdr) && s.swapFormat != VK_FORMAT_R16G16B16A16_SFLOAT)
+        { fail("HDR snapshot requires the FP16 linear-nits display source"); return; }
+        if (s.width != mSrcW || s.height != mSrcH)
+        {
+            fail("the window changed size during the shot");
+            return;
+        }
+        srcW = s.width; srcH = s.height;
+    }
+    const bool first = (mFrame == 0);
+    if (r.mode != MODE_DEPTH)
+    {
+        if (s.outputGeneration != s.committedGeneration ||
+            (!first && (s.outputGeneration != mCaptureGeneration ||
+                        s.paperWhiteNits != mCaptureWhite || s.peakNits != mCapturePeak)))
+        { fail("display output changed during the snapshot"); return; }
+        if (first)
+        {
+            mCaptureGeneration = s.outputGeneration;
+            mCaptureWhite = s.paperWhiteNits;
+            mCapturePeak = s.peakNits;
+        }
+    }
+    if (r.mode == MODE_ACCUM && first)
+    {
+        uint64_t motion_bytes = 0;
+        mMotionNow = r.motionReject && s.motionImage && s.motionW && s.motionH
+                  && LLSnapshotBufferLimits::imageBytes(s.motionW, s.motionH, 8, mCtx->limits().maxStorageBufferRange, motion_bytes)
+                  && ensureMotion(motion_bytes);
+        if (r.motionReject && !mMotionNow)
+            LL_INFOS("Snapshot") << "live snapshot: no motion vectors this frame (temporal AA off?); "
+                                    "moving content is accumulated as is" << LL_ENDL;
+    }
+    if (r.mode == MODE_ACCUM && mMotionNow)
+    {
+        uint64_t motion_bytes = 0;
+        if (!s.motionImage
+            || !LLSnapshotBufferLimits::imageBytes(s.motionW, s.motionH, 8, mCtx->limits().maxStorageBufferRange, motion_bytes)
+            || motion_bytes > mMotion.size)
+        { fail("motion copy no longer fits the shot's storage buffer"); return; }
+    }
+    writeSet();
+
+    vkBreadcrumb(cmd, "snap_live");
+    // WAR on the shot's buffers (the previous frame's dispatches of this shot) -> copies.
+    memBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+               VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    if (r.mode == MODE_DEPTH)
+        imageToBuffer(cmd, s.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                      mSrc.buffer, srcW, srcH);
+    else
+        imageToBuffer(cmd, s.swapImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+                      mSrc.buffer, srcW, srcH);
+    if (r.mode == MODE_ACCUM && mMotionNow)
+        imageToBuffer(cmd, s.motionImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, mMotion.buffer, s.motionW, s.motionH);
+    memBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+               VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+               VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    pc.size[0] = srcW; pc.size[1] = srcH;
+    pc.crop[0] = r.crop[0] * (float)srcW; pc.crop[1] = r.crop[1] * (float)srcH;
+    pc.crop[2] = r.crop[2] * (float)srcW; pc.crop[3] = r.crop[3] * (float)srcH;
+    const bool bgra = s.swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s.swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
+    const bool linearNits = s.swapFormat == VK_FORMAT_R16G16B16A16_SFLOAT;
+    pc.aux[0] = (r.mode != MODE_DEPTH && bgra) ? kFlagBgra : 0u;
+    if (r.mode != MODE_DEPTH && linearNits) pc.aux[0] |= kFlagLinearNits;
+    if (r.hdrRgbeOutput) pc.aux[0] |= kFlagHdrRgbe;
+    pc.p1[0] = std::clamp(s.paperWhiteNits,80.f,vkdisplay::kDisplayReferenceWhiteMaxNits);
+    pc.p1[1] = std::clamp(s.peakNits,pc.p1[0],10000.f);
+    if (r.mode == MODE_ACCUM && r.dither) pc.aux[0] |= kFlagDither;   // #932: the resolve dithers the mean once
+    const uint32_t packGroups = (uint32_t)((((uint64_t)r.outW * r.outH + 3u) / 4u + 63u) / 64u);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLayout, 0, 1, &mSet, 0, nullptr);
+    auto push = [&]() { vkCmdPushConstants(cmd, mLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc); };
+    auto computeToCompute = [&]() {
+        memBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    };
+    bool last = true;
+    switch (r.mode)
+    {
+    case MODE_RESAMPLE:
+        pc.rows[0] = mWorkRow0; pc.rows[1] = mWorkRows;
+        push();
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_H]);
+        vkCmdDispatch(cmd, (r.outW + 7u) / 8u, (mWorkRows + 7u) / 8u, 1);
+        computeToCompute();
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          mPipe[r.hdrRgbeOutput ? PIPE_HDR_RGBE : PIPE_V]);
+        vkCmdDispatch(cmd, packGroups, 1, 1);
+        if (r.pairedHdr)
+        {
+            // Reuse the exact same source copy. The second horizontal pass preserves
+            // nits; the RGBE vertical pass writes a separate host-visible output.
+            memBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLayout, 0, 1, &mSetHdr, 0, nullptr);
+            pc.aux[0] |= kFlagHdrRgbe;
+            push();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_H]);
+            vkCmdDispatch(cmd, (r.outW + 7u) / 8u, (mWorkRows + 7u) / 8u, 1);
+            computeToCompute();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_HDR_RGBE]);
+            vkCmdDispatch(cmd, packGroups, 1, 1);
+        }
+        break;
+    case MODE_DEPTH:
+        pc.p0[0] = r.depthRange[0]; pc.p0[1] = r.depthRange[1];
+        std::memcpy(pc.p1, s.invProj, sizeof(pc.p1));
+        push();
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_DEPTH]);
+        vkCmdDispatch(cmd, packGroups, 1, 1);
+        break;
+    case MODE_ACCUM:
+    {
+        last = (mFrame + 1u >= r.frames);
+        if (first) pc.aux[0] |= kFlagFirst;
+        if (mMotionNow) { pc.aux[0] |= kFlagMotion; pc.aux[1] = s.motionW; pc.aux[2] = s.motionH; }
+        pc.p0[0] = s.jitterPx[0]; pc.p0[1] = s.jitterPx[1];
+        pc.p0[2] = accSigma(r, pc.crop[2]); pc.p0[3] = kMotionPx;
+        if (!linearNits) pc.p1[0] = r.sharpen;   // RESOLVE: CAS on the mean (#1093)
+        push();
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_ACC]);
+        vkCmdDispatch(cmd, (r.outW + 7u) / 8u, (r.outH + 7u) / 8u, 1);
+        if (last)
+        {
+            computeToCompute();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_RESOLVE]);
+            vkCmdDispatch(cmd, packGroups, 1, 1);
+        }
+        if (r.pairedHdr)
+        {
+            // Independent accumulation preserves HDR headroom before RGBE quantization.
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLayout, 0, 1, &mSetHdr, 0, nullptr);
+            pc.aux[0] |= kFlagHdrRgbe;
+            push();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_ACC]);
+            vkCmdDispatch(cmd, (r.outW + 7u) / 8u, (r.outH + 7u) / 8u, 1);
+            if (last)
+            {
+                computeToCompute();
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_HDR_RESOLVE]);
+                vkCmdDispatch(cmd, packGroups, 1, 1);
+            }
+        }
+        break;
+    }
+    }
+    // The packed output -> the host (read() waits the frame's fence first).
+    if (last)
+        memBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    ++mFrame;
+    mPendingInFlight = true;
+    if (last) mState = ST_RECORDED;
+}
+
+void LLCleanSnapshotVK::frameSubmitted(VkFence fence)
+{
+    if (mState == ST_RECORDED)
+    {
+        mFence = fence;
+        mState = fence ? ST_SUBMITTED : ST_FAILED;
+        if (!fence) mWhy = "no frame fence";
+    }
+}
+
+void LLCleanSnapshotVK::frameDropped()
+{
+    // The dropped frame's recording never ran: an accumulation lost a sample (or its first
+    // frame's initialisation), a single-frame shot its only copy.
+    if (mState == ST_ARMED && mFrame > 0) fail("a captured frame was dropped (out of memory)");
+    else if (mState == ST_RECORDED) fail("the captured frame was dropped (out of memory)");
+}
+
+bool LLCleanSnapshotVK::read(std::vector<uint8_t>& rgb, uint32_t& w, uint32_t& h, std::vector<uint8_t>* pairedHdr)
+{
+    if (mState != ST_SUBMITTED || !mCtx)
+    {
+        if (mState == ST_FAILED || mState == ST_ARMED || mState == ST_RECORDED) cancel();
+        return false;
+    }
+    VkDevice dev = mCtx->device();
+    const VkResult wr = vkWaitForFences(dev, 1, &mFence, VK_TRUE, kFenceTimeoutNs);
+    if (wr != VK_SUCCESS)
+    {
+        LL_WARNS("Snapshot") << "live snapshot: the frame did not complete (" << (int)wr << ")" << LL_ENDL;
+        cancel();
+        return false;
+    }
+    w = mReq.outW; h = mReq.outH;
+    const size_t bytes = (size_t)w * h * (mReq.hdrRgbeOutput ? 4u : 3u);
+    try
+    {
+        rgb.resize(bytes);
+        std::memcpy(rgb.data(), mOut.mapped, bytes);
+        if (pairedHdr)
+        {
+            pairedHdr->clear();
+            if (mReq.pairedHdr)
+            {
+                pairedHdr->resize((size_t)w * h * 4u);
+                std::memcpy(pairedHdr->data(), mOutHdr.mapped, pairedHdr->size());
+            }
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        rgb.clear();
+        if (pairedHdr) pairedHdr->clear();
+        freeBuffers(); mPendingInFlight = false;
+        mWhy = "not enough host memory for snapshot readback"; mState = ST_FAILED;
+        return false;
+    }
+    LL_INFOS("Snapshot") << "live snapshot " << w << "x" << h << " read back after " << mFrame << " frame(s), "
+                         << (int)((nowSec() - mArmTime) * 1000.0) << " ms; peak VRAM " << (deviceBytes() >> 20)
+                         << " MB device + " << (hostBytes() >> 20) << " MB host" << LL_ENDL;
+    // The fence covers every recording of this shot (all submitted before it on this queue).
+    freeBuffers();
+    mPendingInFlight = false;
+    mState = ST_IDLE;
+    return true;
+}
+
+void LLCleanSnapshotVK::cancel()
+{
+    if (!mCtx) { mState = ST_IDLE; return; }
+    if (mPendingInFlight) vkDeviceWaitIdle(mCtx->device());   // (error path only)
+    freeBuffers();
+    mPendingInFlight = false;
+    mState = ST_IDLE;
+}
+
+void LLCleanSnapshotVK::destroy()
+{
+    if (!mCtx) return;
+    VkDevice dev = mCtx->device();
+    vkDeviceWaitIdle(dev);
+    freeBuffers();
+    for (VkPipeline& p : mPipe) if (p) { vkDestroyPipeline(dev, p, nullptr); p = VK_NULL_HANDLE; }
+    if (mLayout) { vkDestroyPipelineLayout(dev, mLayout, nullptr); mLayout = VK_NULL_HANDLE; }
+    mPool.destroy();
+    mSet = VK_NULL_HANDLE; mSetHdr = VK_NULL_HANDLE;
+    if (mDsl) { vkdDestroySetLayout(dev, mDsl); mDsl = VK_NULL_HANDLE; }
+    mPipeFailed = false;
+    mState = ST_IDLE;
+    mCtx = nullptr;
+}

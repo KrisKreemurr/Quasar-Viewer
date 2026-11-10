@@ -1,0 +1,2251 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "schema_minor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "consent": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "report_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "maxLength": 32,
+      "minLength": 1
+    },
+    "survey": {
+      "type": "boolean"
+    },
+    "segment": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "periodic",
+            "exit",
+            "checkpoint",
+            "initial"
+          ]
+        },
+        "minutes_bucket": {
+          "type": "string",
+          "enum": [
+            "<5",
+            "5-15",
+            "15-30",
+            "30-45",
+            "45-60"
+          ]
+        },
+        "logged_in": {
+          "type": "boolean"
+        },
+        "elapsed_hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        }
+      },
+      "required": [
+        "index",
+        "kind",
+        "minutes_bucket",
+        "logged_in"
+      ],
+      "additionalProperties": false
+    },
+    "viewer": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,8}$",
+          "maxLength": 20,
+          "minLength": 1
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "release",
+            "beta",
+            "jetstream",
+            "test",
+            "other"
+          ]
+        },
+        "build_config": {
+          "type": "string",
+          "enum": [
+            "Release",
+            "RelWithDebInfo",
+            "Debug",
+            "other"
+          ]
+        },
+        "isa": {
+          "type": "string",
+          "enum": [
+            "AVX2",
+            "SSE4_2",
+            "NEON",
+            "unknown"
+          ]
+        },
+        "install_kind": {
+          "type": "string",
+          "enum": [
+            "windows_setup",
+            "windows_zip",
+            "flatpak",
+            "deb",
+            "aur",
+            "tarball",
+            "other"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "channel",
+        "build_config",
+        "isa",
+        "install_kind"
+      ],
+      "additionalProperties": false
+    },
+    "os": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": [
+            "windows",
+            "linux",
+            "macos",
+            "unknown"
+          ]
+        },
+        "windows_build": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "kernel": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "glibc": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "distro": {
+          "type": "string",
+          "enum": [
+            "arch",
+            "cachyos",
+            "endeavouros",
+            "manjaro",
+            "ubuntu",
+            "debian",
+            "linuxmint",
+            "pop",
+            "fedora",
+            "opensuse-tumbleweed",
+            "opensuse-leap",
+            "nixos",
+            "gentoo",
+            "void",
+            "steamos",
+            "bazzite",
+            "alpine",
+            "rocky",
+            "almalinux",
+            "rhel",
+            "centos",
+            "zorin",
+            "elementary",
+            "kali",
+            "mx",
+            "solus",
+            "garuda",
+            "artix",
+            "other"
+          ]
+        },
+        "distro_major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "session_type": {
+          "type": "string",
+          "enum": [
+            "wayland",
+            "x11",
+            "windows",
+            "other"
+          ]
+        },
+        "desktop": {
+          "type": "string",
+          "enum": [
+            "KDE",
+            "GNOME",
+            "Hyprland",
+            "sway",
+            "XFCE",
+            "Cinnamon",
+            "MATE",
+            "LXQt",
+            "Budgie",
+            "COSMIC",
+            "gamescope",
+            "other"
+          ]
+        },
+        "flatpak": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "family",
+        "windows_build",
+        "kernel",
+        "glibc",
+        "distro",
+        "distro_major",
+        "session_type",
+        "desktop",
+        "flatpak"
+      ],
+      "additionalProperties": false
+    },
+    "cpu": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^(other|Intel (Core i[3579]-[0-9]{4,5}(F|K|KF|KS|T|U|H|HK|HX|P)?|Core Ultra [579] [0-9]{3}(H|HX|U|V|K|KF)?|Xeon (E[357]-[0-9]{4}( v[2-6])?|[WE]-[0-9]{4}|(Silver|Gold|Platinum) [0-9]{4})|Celeron [GN][0-9]{3,4}|Pentium [GN][0-9]{3,4})|AMD (Ryzen [3579] [0-9]{4,5}(X|XT|X3D|G|GE|U|H|HS|HX)?|Ryzen Threadripper [0-9]{4}(X|WX)|EPYC [0-9]{4}(P|F)?)|Apple M[1-9]( Pro| Max| Ultra)?)$",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "threads": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            48,
+            64,
+            96,
+            128,
+            129
+          ],
+          "minimum": 0,
+          "maximum": 129
+        }
+      },
+      "required": [
+        "model",
+        "threads"
+      ],
+      "additionalProperties": false
+    },
+    "memory_hw": {
+      "type": "object",
+      "properties": {
+        "ram_gb": {
+          "type": "integer",
+          "enum": [
+            0,
+            4,
+            6,
+            8,
+            12,
+            16,
+            24,
+            32,
+            48,
+            64,
+            96,
+            128,
+            192,
+            256,
+            257
+          ],
+          "minimum": 0,
+          "maximum": 257
+        },
+        "swap_present": {
+          "type": "boolean"
+        },
+        "psi": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ram_gb",
+        "swap_present",
+        "psi"
+      ],
+      "additionalProperties": false
+    },
+    "gpu": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^(other|NVIDIA (GeForce (RTX|GTX|GT) [0-9]{3,4}( Ti| SUPER| Ti SUPER)?( Laptop GPU)?|RTX [A]?[0-9]{3,4}( Ada Generation)?|Quadro [PMK][0-9]{3,4})|AMD (Radeon (RX [0-9]{3,4}( XT| XTX| GRE|M)?|PRO W[0-9]{4}|Graphics))( \\(RADV (NAVI[0-9]{2,3}|POLARIS[0-9]{2}|VEGA[0-9]{1,2}|RENOIR|RAVEN|RAVEN2|REMBRANDT|PHOENIX)\\))?|Intel (Arc [AB][0-9]{3}( Graphics)?|UHD Graphics( [0-9]{3})?|Iris Xe Graphics)|Apple M[1-9]( Pro| Max| Ultra)?)$",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "vendor": {
+          "type": "string",
+          "enum": [
+            "nvidia",
+            "amd",
+            "intel",
+            "apple",
+            "other"
+          ]
+        },
+        "vram_gb": {
+          "type": "integer",
+          "enum": [
+            0,
+            2,
+            3,
+            4,
+            6,
+            8,
+            10,
+            11,
+            12,
+            16,
+            20,
+            24,
+            32,
+            48,
+            49
+          ],
+          "minimum": 0,
+          "maximum": 49
+        }
+      },
+      "required": [
+        "name",
+        "vendor",
+        "vram_gb"
+      ],
+      "additionalProperties": false
+    },
+    "display": {
+      "type": "object",
+      "properties": {
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "720p",
+            "1080p",
+            "1440p",
+            "2160p",
+            "uw1440",
+            "uw1080",
+            "5k",
+            "8k",
+            "other",
+            "unknown"
+          ]
+        },
+        "refresh_hz": {
+          "type": "integer",
+          "enum": [
+            0,
+            30,
+            50,
+            60,
+            75,
+            90,
+            100,
+            120,
+            144,
+            165,
+            170,
+            180,
+            200,
+            240,
+            280,
+            360,
+            361
+          ],
+          "minimum": 0,
+          "maximum": 361
+        },
+        "scale_quarters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "hdr": {
+          "type": "boolean"
+        },
+        "monitors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "window_mode": {
+          "type": "string",
+          "enum": [
+            "windowed",
+            "maximized",
+            "fullscreen_desktop",
+            "fullscreen_exclusive",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "resolution",
+        "refresh_hz",
+        "scale_quarters",
+        "hdr",
+        "monitors",
+        "window_mode"
+      ],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "RenderVKDlssRayReconstruction": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "RenderVKSunShadows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "RenderVKProjectorShadows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "RenderScreenSpaceReflections": {
+          "type": "boolean"
+        },
+        "RenderMirrors": {
+          "type": "boolean"
+        },
+        "RenderVKTAA": {
+          "type": "boolean"
+        },
+        "RenderVKGodRays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "RenderVKRayTracing": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1,
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "RenderDeferredSSAO": {
+          "type": "boolean"
+        },
+        "RenderVKAOStandard": {
+          "type": "boolean"
+        },
+        "RenderTransparentWater": {
+          "type": "boolean"
+        },
+        "RenderDepthOfField": {
+          "type": "boolean"
+        },
+        "RenderVSyncEnable": {
+          "type": "boolean"
+        },
+        "RenderVKFramePacing": {
+          "type": "boolean"
+        },
+        "RenderHiDPI": {
+          "type": "boolean"
+        },
+        "RenderVKTextureCompression": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "RenderQualityPerformance": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "RenderVKUpscaler": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 11,
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ]
+        },
+        "RenderVKOpaqueShadingRate": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "RenderVKAlphaShadingRate": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "enum": [
+            0,
+            1,
+            2,
+            4
+          ]
+        },
+        "RenderShadowDetail": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "RenderVKShadowResolution": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "RenderReflectionProbeDetail": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "RenderReflectionProbeLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "RenderFSAAType": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "SlipstreamRenderTonemapType": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "RenderVKNoVsyncPresentMode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "TuningFPSStrategy": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "RenderMaxTextureResolution": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "RenderReflectionProbeResolution": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2048
+        },
+        "RenderReflectionProbeCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "RenderVKPipelineCompileThreads": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "RenderAvatarComplexityMode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "RenderFarClip": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 512,
+          "enum": [
+            64,
+            96,
+            128,
+            192,
+            256,
+            384,
+            512
+          ]
+        },
+        "RenderFPSLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 360,
+          "enum": [
+            0,
+            30,
+            50,
+            60,
+            75,
+            90,
+            100,
+            120,
+            144,
+            165,
+            180,
+            200,
+            240,
+            360
+          ]
+        },
+        "TargetFPS": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 360,
+          "enum": [
+            0,
+            30,
+            50,
+            60,
+            75,
+            90,
+            100,
+            120,
+            144,
+            165,
+            180,
+            200,
+            240,
+            360
+          ]
+        },
+        "RenderAvatarMaxNonImpostors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "enum": [
+            0,
+            1,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256
+          ]
+        },
+        "RenderMaxVideoMemoryMB": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536,
+          "enum": [
+            0,
+            512,
+            1024,
+            2048,
+            3072,
+            4096,
+            6144,
+            8192,
+            12288,
+            16384,
+            24576,
+            32768,
+            49152,
+            65536
+          ]
+        },
+        "ThrottleBandwidthKBPS": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192,
+          "enum": [
+            0,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192
+          ]
+        },
+        "RenderVKRenderScale": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 2,
+          "multipleOf": 0.05
+        },
+        "RenderVolumeLODFactor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 8,
+          "multipleOf": 0.25
+        },
+        "UIScaleFactor": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 4,
+          "multipleOf": 0.25
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "perf": {
+      "type": "object",
+      "properties": {
+        "steady": {
+          "type": "object",
+          "properties": {
+            "hist": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "maxItems": 2,
+                "minItems": 2
+              },
+              "maxItems": 66,
+              "minItems": 0
+            },
+            "frames": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_50ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_100ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_250ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_1s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "p": {
+              "type": "object",
+              "properties": {
+                "p1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p5": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p25": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p50": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p75": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p95": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p99": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p999": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                }
+              },
+              "required": [
+                "p1",
+                "p5",
+                "p25",
+                "p50",
+                "p75",
+                "p95",
+                "p99",
+                "p999"
+              ],
+              "additionalProperties": false
+            },
+            "fps_low_1pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "fps_low_01pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "x2_median": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "jitter_p99": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "stutter_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            }
+          },
+          "required": [
+            "hist",
+            "frames",
+            "over_50ms",
+            "over_100ms",
+            "over_250ms",
+            "over_1s",
+            "seconds",
+            "p",
+            "fps_low_1pct",
+            "fps_low_01pct",
+            "x2_median",
+            "jitter_p99",
+            "stutter_seconds"
+          ],
+          "additionalProperties": false
+        },
+        "loading": {
+          "type": "object",
+          "properties": {
+            "hist": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "maxItems": 2,
+                "minItems": 2
+              },
+              "maxItems": 66,
+              "minItems": 0
+            },
+            "frames": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_50ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_100ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_250ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_1s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "p": {
+              "type": "object",
+              "properties": {
+                "p1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p5": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p25": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p50": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p75": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p95": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p99": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p999": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                }
+              },
+              "required": [
+                "p1",
+                "p5",
+                "p25",
+                "p50",
+                "p75",
+                "p95",
+                "p99",
+                "p999"
+              ],
+              "additionalProperties": false
+            },
+            "fps_low_1pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "fps_low_01pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "x2_median": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "hist",
+            "frames",
+            "over_50ms",
+            "over_100ms",
+            "over_250ms",
+            "over_1s",
+            "seconds",
+            "p",
+            "fps_low_1pct",
+            "fps_low_01pct",
+            "x2_median"
+          ],
+          "additionalProperties": false
+        },
+        "background": {
+          "type": "object",
+          "properties": {
+            "hist": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "maxItems": 2,
+                "minItems": 2
+              },
+              "maxItems": 66,
+              "minItems": 0
+            },
+            "frames": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_50ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_100ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_250ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_1s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "p": {
+              "type": "object",
+              "properties": {
+                "p1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p5": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p25": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p50": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p75": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p95": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p99": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p999": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                }
+              },
+              "required": [
+                "p1",
+                "p5",
+                "p25",
+                "p50",
+                "p75",
+                "p95",
+                "p99",
+                "p999"
+              ],
+              "additionalProperties": false
+            },
+            "fps_low_1pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "fps_low_01pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "x2_median": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "hist",
+            "frames",
+            "over_50ms",
+            "over_100ms",
+            "over_250ms",
+            "over_1s",
+            "seconds",
+            "p",
+            "fps_low_1pct",
+            "fps_low_01pct",
+            "x2_median"
+          ],
+          "additionalProperties": false
+        },
+        "vr": {
+          "type": "object",
+          "properties": {
+            "hist": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "maxItems": 2,
+                "minItems": 2
+              },
+              "maxItems": 66,
+              "minItems": 0
+            },
+            "frames": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_50ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_100ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_250ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "over_1s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "p": {
+              "type": "object",
+              "properties": {
+                "p1": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p5": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p25": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p50": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p75": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p95": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p99": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                },
+                "p999": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "multipleOf": 0.1
+                }
+              },
+              "required": [
+                "p1",
+                "p5",
+                "p25",
+                "p50",
+                "p75",
+                "p95",
+                "p99",
+                "p999"
+              ],
+              "additionalProperties": false
+            },
+            "fps_low_1pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "fps_low_01pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "x2_median": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "hist",
+            "frames",
+            "over_50ms",
+            "over_100ms",
+            "over_250ms",
+            "over_1s",
+            "seconds",
+            "p",
+            "fps_low_1pct",
+            "fps_low_01pct",
+            "x2_median"
+          ],
+          "additionalProperties": false
+        },
+        "gpu_ms": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            },
+            "p95": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
+              "multipleOf": 0.1
+            }
+          },
+          "required": [
+            "p50",
+            "p95"
+          ],
+          "additionalProperties": false
+        },
+        "rig_gpu_ms_p50": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2000,
+          "multipleOf": 0.1
+        },
+        "bound": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "upscaler_s": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600
+          },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "steady",
+        "loading",
+        "background",
+        "vr",
+        "gpu_ms",
+        "rig_gpu_ms_p50",
+        "bound",
+        "upscaler_s"
+      ],
+      "additionalProperties": false
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "ram_state_s": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "rss_peak_half_gb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2048
+        },
+        "ram_avail_ratio_hist": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 16,
+          "maxItems": 16
+        },
+        "psi_some10_max_5pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "alloc_failures": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 9,
+          "maxItems": 9
+        },
+        "alloc_retried": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 9,
+          "maxItems": 9
+        },
+        "alloc_dropped": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 9,
+          "maxItems": 9
+        },
+        "sheds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "reserve_released": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "vram": {
+          "type": "object",
+          "properties": {
+            "usage_ratio_hist": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "minItems": 16,
+              "maxItems": 16
+            },
+            "usage_half_gb_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2048
+            },
+            "overhead_quarter_gb_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "ladder_s": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3600
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "rung_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 64
+            }
+          },
+          "required": [
+            "usage_ratio_hist",
+            "usage_half_gb_max",
+            "overhead_quarter_gb_max",
+            "ladder_s",
+            "rung_max"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ram_state_s",
+        "rss_peak_half_gb",
+        "ram_avail_ratio_hist",
+        "psi_some10_max_5pct",
+        "alloc_failures",
+        "alloc_retried",
+        "alloc_dropped",
+        "sheds",
+        "reserve_released",
+        "vram"
+      ],
+      "additionalProperties": false
+    },
+    "assets": {
+      "type": "object",
+      "properties": {
+        "objects": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          },
+          "required": [
+            "p50",
+            "max"
+          ],
+          "additionalProperties": false
+        },
+        "objects_active": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          },
+          "required": [
+            "p50",
+            "max"
+          ],
+          "additionalProperties": false
+        },
+        "avatars": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          },
+          "required": [
+            "p50",
+            "max"
+          ],
+          "additionalProperties": false
+        },
+        "avatars_visible": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          },
+          "required": [
+            "p50",
+            "max"
+          ],
+          "additionalProperties": false
+        },
+        "textures": {
+          "type": "object",
+          "properties": {
+            "p50": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            }
+          },
+          "required": [
+            "p50",
+            "max"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "objects",
+        "objects_active",
+        "avatars",
+        "avatars_visible",
+        "textures"
+      ],
+      "additionalProperties": false
+    },
+    "loading": {
+      "type": "object",
+      "properties": {
+        "tex": {
+          "type": "object",
+          "properties": {
+            "workers": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "http_inflight": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "queued": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "decode": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "decode_governor_wait": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "decode_oom": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "decode_pending": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "cache": {
+              "type": "object",
+              "properties": {
+                "hit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "miss": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "error": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              },
+              "required": [
+                "hit",
+                "miss",
+                "error"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "workers",
+            "http_inflight",
+            "queued",
+            "decode",
+            "decode_governor_wait",
+            "decode_oom",
+            "decode_pending",
+            "cache"
+          ],
+          "additionalProperties": false
+        },
+        "gov": {
+          "type": "object",
+          "properties": {
+            "waiters": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "inflight_mb": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            "budget_mb": {
+              "type": "object",
+              "properties": {
+                "p50": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "p50",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "waiters",
+            "inflight_mb",
+            "budget_mb"
+          ],
+          "additionalProperties": false
+        },
+        "data_mb_log2": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32
+          },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      },
+      "required": [
+        "tex",
+        "gov",
+        "data_mb_log2"
+      ],
+      "additionalProperties": false
+    },
+    "events": {
+      "type": "object",
+      "properties": {
+        "teleports": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "prev_session_end": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "normal",
+            "crash",
+            "llerror_crash",
+            "froze",
+            "logout_crash",
+            "out_of_memory",
+            "device_lost"
+          ]
+        },
+        "region_crossings": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "disconnects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "teleport_duration_hist": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 8,
+          "maxItems": 8
+        },
+        "login_s_bucket": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "world_ready_s_bucket": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "long_frames": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "teleports",
+        "prev_session_end",
+        "region_crossings",
+        "disconnects",
+        "teleport_duration_hist",
+        "login_s_bucket",
+        "world_ready_s_bucket",
+        "long_frames"
+      ],
+      "additionalProperties": false
+    },
+    "availability": {
+      "type": "object",
+      "properties": {
+        "display": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "loading": {
+          "type": "string",
+          "enum": [
+            "portable_subset"
+          ]
+        },
+        "gpu_details": {
+          "type": "string",
+          "enum": [
+            "unsupported"
+          ]
+        },
+        "vr_identity": {
+          "type": "string",
+          "enum": [
+            "unsupported"
+          ]
+        },
+        "renderer_metrics": {
+          "type": "string",
+          "enum": [
+            "portable_subset"
+          ]
+        },
+        "os_details": {
+          "type": "string",
+          "enum": [
+            "portable_subset"
+          ]
+        },
+        "settings": {
+          "type": "string",
+          "enum": [
+            "portable_subset"
+          ]
+        },
+        "events": {
+          "type": "string",
+          "enum": [
+            "portable_subset"
+          ]
+        },
+        "settings_missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "RenderVKDlssRayReconstruction",
+              "RenderVKSunShadows",
+              "RenderVKProjectorShadows",
+              "RenderScreenSpaceReflections",
+              "RenderMirrors",
+              "RenderVKTAA",
+              "RenderVKGodRays",
+              "RenderVKRayTracing",
+              "RenderDeferredSSAO",
+              "RenderVKAOStandard",
+              "RenderTransparentWater",
+              "RenderDepthOfField",
+              "RenderVSyncEnable",
+              "RenderVKFramePacing",
+              "RenderHiDPI",
+              "RenderVKTextureCompression",
+              "RenderQualityPerformance",
+              "RenderVKUpscaler",
+              "RenderVKOpaqueShadingRate",
+              "RenderVKAlphaShadingRate",
+              "RenderShadowDetail",
+              "RenderVKShadowResolution",
+              "RenderReflectionProbeDetail",
+              "RenderReflectionProbeLevel",
+              "RenderFSAAType",
+              "SlipstreamRenderTonemapType",
+              "RenderVKNoVsyncPresentMode",
+              "TuningFPSStrategy",
+              "RenderMaxTextureResolution",
+              "RenderReflectionProbeResolution",
+              "RenderReflectionProbeCount",
+              "RenderVKPipelineCompileThreads",
+              "RenderAvatarComplexityMode",
+              "RenderFarClip",
+              "RenderFPSLimit",
+              "TargetFPS",
+              "RenderAvatarMaxNonImpostors",
+              "RenderMaxVideoMemoryMB",
+              "ThrottleBandwidthKBPS",
+              "RenderVKRenderScale",
+              "RenderVolumeLODFactor",
+              "UIScaleFactor"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 42
+        }
+      },
+      "required": [
+        "display",
+        "loading",
+        "gpu_details",
+        "vr_identity",
+        "renderer_metrics",
+        "os_details",
+        "settings",
+        "events",
+        "settings_missing"
+      ],
+      "additionalProperties": false
+    },
+    "features": {
+      "type": "object",
+      "properties": {
+        "voice": {
+          "type": "boolean"
+        },
+        "media_autoplay": {
+          "type": "boolean"
+        },
+        "rlva": {
+          "type": "boolean"
+        },
+        "discord": {
+          "type": "boolean"
+        },
+        "ao": {
+          "type": "boolean"
+        },
+        "external_editor_set": {
+          "type": "boolean"
+        },
+        "autotune": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "voice",
+        "media_autoplay",
+        "rlva",
+        "discord",
+        "ao",
+        "external_editor_set",
+        "autotune"
+      ],
+      "additionalProperties": false
+    },
+    "grid": {
+      "type": "string",
+      "enum": [
+        "main",
+        "beta",
+        "other"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "schema_minor",
+    "consent",
+    "report_id",
+    "survey",
+    "segment",
+    "viewer",
+    "os",
+    "cpu",
+    "memory_hw",
+    "gpu",
+    "display",
+    "settings",
+    "perf",
+    "memory",
+    "assets",
+    "loading",
+    "events",
+    "availability",
+    "features",
+    "grid"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slipstreamviewer.org/telemetry/schema_v1.json",
+  "title": "Usage statistics v1 portable subset"
+}

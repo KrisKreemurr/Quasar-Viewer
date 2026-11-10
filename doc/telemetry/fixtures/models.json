@@ -1,0 +1,41 @@
+{
+  "cpu": {
+    "valid": [
+      "other",
+      "Intel Core i7-12700K",
+      "AMD Ryzen 7 7800X3D",
+      "Apple M4 Pro"
+    ],
+    "invalid": [
+      "John Smith",
+      "my-hostname",
+      "AMD John Smith",
+      "Intel Core i7-12700K John Smith",
+      "AMD Ryzen 7 7800X3D /home/name",
+      "Intel Core i7-12700K user@example.com",
+      "Intel Core i7-12700K\n",
+      "Intel Core i7-12700K\u0000",
+      "AMD Ryzen 7 7800X3D 9f1c3242-1122-3344-5566-778899aabbcc"
+    ]
+  },
+  "gpu": {
+    "valid": [
+      "other",
+      "NVIDIA GeForce RTX 4070 Ti",
+      "AMD Radeon RX 7900 XTX",
+      "Intel Arc B580",
+      "AMD Radeon RX 7900 XTX (RADV NAVI31)"
+    ],
+    "invalid": [
+      "John Smith",
+      "my-hostname",
+      "NVIDIA John Smith",
+      "NVIDIA GeForce RTX 4070 Ti my-hostname",
+      "AMD Radeon RX 7900 XTX /tmp/secret",
+      "NVIDIA GeForce RTX 4070 user@example.com",
+      "NVIDIA GeForce RTX 4070\n",
+      "NVIDIA GeForce RTX 4070 00112233-4455-6677-8899-aabbccddeeff",
+      "AMD Radeon RX 7900 XTX (RADV John Smith)"
+    ]
+  }
+}

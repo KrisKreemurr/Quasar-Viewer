@@ -1,0 +1,66 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+// vkclean -- SHOW PHYSICS SHAPE WHEN EDITING (#1176): each physics-shape row's draw.
+//
+// The CPU (LLCleanPhysShapeStore) lists one row per selected object and shape slot -- the
+// object's instance row, whose pose places the shape (edit drags, spin, worn attachments on
+// their joint), and the mesh-store slot holding the shape in unit space -- and re-uploads the
+// rows only when they change. Every frame this pass writes each row's DrawCmd from the
+// instance and slot tables as they are now: the slot's packed range with firstInstance = the
+// instance row, or an empty command for a released row (lod_group_id sentinel), a rigged or
+// HUD one, or a slot the geometry pack does not hold (yet). In place (command i = row i), so
+// the CPU's colour-bucket ranges stay valid (LLCleanRendererVK::recordPhysShapes). No
+// descriptor set: every buffer by device address.
+
+layout(local_size_x = 64) in;
+
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rows { uvec4 row[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstWords { uint w[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SlotWords { uint w[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Cmds { DrawCmd cmd[]; };
+
+layout(push_constant) uniform PhysPush {
+    uvec2 rows;     // LLVKPhysShapeRow[n_rows]: x instance id, y slot id
+    uvec2 inst;     // instance SSBO (Instance, 224 B)
+    uvec2 slots;    // SlotInfo SSBO (32 B, the packed ranges)
+    uvec2 cmds;     // DrawCmd[n_rows] out
+    uint  n_rows;
+    uint  n_inst;   // rows the instance SSBO holds
+    uint  n_slots;  // entries the SlotInfo SSBO holds
+    uint  pad;
+} pp;               // 48 B
+
+const uint kInstWords  = 56u;   // Instance = 224 B
+const uint kLodWord    = 44u;   // lod_group_id
+const uint kFlagsWord  = 46u;   // flags: bit 0 rigged, bit 3 HUD
+const uint kSkinWord   = 47u;   // skin_id
+const uint kSlotWords  = 8u;    // SlotInfo: first_index, index_count, base_vertex, ...
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pp.n_rows) return;
+    const uvec4 r = Rows(pp.rows).row[i];
+    DrawCmd c = DrawCmd(0u, 0u, 0u, 0, 0u);
+    if (r.x < pp.n_inst && r.y < pp.n_slots)
+    {
+        InstWords inst = InstWords(pp.inst);
+        const uint base = r.x * kInstWords;
+        const uint lod = inst.w[base + kLodWord];
+        const uint flags = inst.w[base + kFlagsWord];
+        // Rigged as the main cull classifies it (clean_cull.comp: the flag AND a skin).
+        const bool rigged = (flags & 1u) != 0u && inst.w[base + kSkinWord] != 0xFFFFFFFFu;
+        if (lod != 0xFFFFFFFFu && (flags & 8u) == 0u && !rigged)
+        {
+            SlotWords slots = SlotWords(pp.slots);
+            const uint sb = r.y * kSlotWords;
+            const uint index_count = slots.w[sb + 1u];
+            if (index_count != 0u)
+                c = DrawCmd(index_count, 1u, slots.w[sb], int(slots.w[sb + 2u]), r.x);
+        }
+    }
+    Cmds(pp.cmds).cmd[i] = c;
+}

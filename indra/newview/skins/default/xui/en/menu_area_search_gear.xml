@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<toggleable_menu
+ layout="topleft"
+ mouse_opaque="false"
+ name="menu_area_search_gear"
+ visible="false">
+    <menu_item_check
+     label="Also touch on double-click"
+     layout="topleft"
+     name="double_click_touch">
+        <menu_item_check.on_check
+         function="AreaSearch.Gear.Check"
+         parameter="touch" />
+        <menu_item_check.on_click
+         function="AreaSearch.Gear.Toggle"
+         parameter="touch" />
+    </menu_item_check>
+    <menu_item_check
+     label="Also buy on double-click"
+     layout="topleft"
+     name="double_click_buy">
+        <menu_item_check.on_check
+         function="AreaSearch.Gear.Check"
+         parameter="buy" />
+        <menu_item_check.on_click
+         function="AreaSearch.Gear.Toggle"
+         parameter="buy" />
+    </menu_item_check>
+    <menu_item_check
+     label="Also sit on double-click"
+     layout="topleft"
+     name="double_click_sit">
+        <menu_item_check.on_check
+         function="AreaSearch.Gear.Check"
+         parameter="sit" />
+        <menu_item_check.on_click
+         function="AreaSearch.Gear.Toggle"
+         parameter="sit" />
+    </menu_item_check>
+</toggleable_menu>

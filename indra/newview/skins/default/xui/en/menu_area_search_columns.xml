@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<context_menu
+ layout="topleft"
+ name="area_search_columns_menu">
+    <menu_item_check
+     label="Distance"
+     layout="topleft"
+     name="column_distance">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="distance" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="distance" />
+    </menu_item_check>
+    <menu_item_check
+     label="Name"
+     layout="topleft"
+     name="column_name">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="name" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="name" />
+    </menu_item_check>
+    <menu_item_check
+     label="Description"
+     layout="topleft"
+     name="column_description">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="description" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="description" />
+    </menu_item_check>
+    <menu_item_check
+     label="Price"
+     layout="topleft"
+     name="column_price">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="price" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="price" />
+    </menu_item_check>
+    <menu_item_check
+     label="Land Impact"
+     layout="topleft"
+     name="column_land_impact">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="land_impact" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="land_impact" />
+    </menu_item_check>
+    <menu_item_check
+     label="Prim Count"
+     layout="topleft"
+     name="column_prim_count">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="prim_count" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="prim_count" />
+    </menu_item_check>
+    <menu_item_check
+     label="Owner"
+     layout="topleft"
+     name="column_owner">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="owner" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="owner" />
+    </menu_item_check>
+    <menu_item_check
+     label="Group"
+     layout="topleft"
+     name="column_group">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="group" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="group" />
+    </menu_item_check>
+    <menu_item_check
+     label="Creator"
+     layout="topleft"
+     name="column_creator">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="creator" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="creator" />
+    </menu_item_check>
+    <menu_item_check
+     label="Last owner"
+     layout="topleft"
+     name="column_last_owner">
+        <menu_item_check.on_check
+         function="AreaSearch.Column.Visible"
+         parameter="last_owner" />
+        <menu_item_check.on_click
+         function="AreaSearch.Column.Toggle"
+         parameter="last_owner" />
+    </menu_item_check>
+</context_menu>

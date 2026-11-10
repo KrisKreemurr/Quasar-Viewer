@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ legacy_header_height="18"
+ can_minimize="true"
+ can_resize="false"
+ can_close="true"
+ height="559"
+ layout="topleft"
+ name="Snapshot"
+ single_instance="true"
+ help_topic="snapshot"
+ save_rect="true"
+ save_visibility="false"
+ title="SNAPSHOT"
+ width="624"
+ min_height="539">
+    <floater.string
+     name="unknown">
+        unknown
+    </floater.string>
+    <!-- orientation swap tooltips (llsnapshotavatars.cpp; ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
+    <floater.string
+     name="orientation_landscape_tip">
+        Orientation: Landscape (click to switch to Portrait)
+    </floater.string>
+    <floater.string
+     name="orientation_portrait_tip">
+        Orientation: Portrait (click to switch to Landscape)
+    </floater.string>
+    <string
+     name="postcard_progress_str">
+        Sending Email
+    </string>
+    <string
+        name="profile_progress_str">
+        Posting
+    </string>
+    <string
+     name="inventory_progress_str">
+        Saving to Inventory
+    </string>
+    <string
+     name="local_progress_str">
+        Saving to Computer
+    </string>
+ 	<string
+        name="profile_succeeded_str">
+ 	    Image uploaded
+ 	</string>
+ 	<string
+ 	 name="postcard_succeeded_str">
+ 	    Email Sent!
+ 	</string>
+ 	<string
+ 	 name="inventory_succeeded_str">
+ 	    Saved to Inventory!
+ 	</string>
+ 	<string
+ 	 name="local_succeeded_str">
+ 	    Saved to Computer!
+ 	</string>
+ 	<string
+     name="profile_failed_str">
+ 	    Failed to upload image to your Profile Feed.
+ 	</string>
+ 	<string
+ 	 name="postcard_failed_str">
+ 	    Failed to send email.
+ 	</string>
+ 	<string
+ 	 name="inventory_failed_str">
+ 	    Failed to save to inventory.
+ 	</string>
+ 	<string
+ 	 name="local_failed_str">
+ 	    Failed to save to computer.
+ 	</string>
+    <button
+     follows="left|top"
+     height="25"
+     image_overlay="Refresh_Off"
+	 image_hover_unselected="Toolbar_Middle_Over"
+     image_selected="Toolbar_Middle_Selected"
+     image_unselected="Toolbar_Middle_Off"
+     image_overlay_alignment="left"
+     imgoverlay_label_space="5"
+	 pad_bottom="0"
+	 halign="left"
+     layout="topleft"
+     left="10"
+	 label="REFRESH"
+     name="new_snapshot_btn"
+     top_pad="26"
+     width="136" />
+    <!-- landscape / portrait swap (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4) -->
+    <button
+     follows="left|top"
+     height="25"
+     image_hover_unselected="Toolbar_Middle_Over"
+     image_selected="Toolbar_Middle_Off"
+     image_unselected="Toolbar_Middle_Off"
+     image_overlay="Icon_Orientation_Landscape"
+     layout="topleft"
+     left_pad="1"
+     top_delta="0"
+     width="31"
+     name="swap_portrait_btn"
+     tool_tip="Orientation: Landscape (click to switch to Portrait)" />
+	<button
+       follows="left|top"
+	   control_name="AdvanceSnapshot"
+	   invisibility_control="AdvanceSnapshot"
+       height="25"
+	   is_toggle="true"
+       layout="topleft"
+	   image_hover_unselected="Toolbar_Middle_Over"
+	   image_selected="Toolbar_Middle_Off"
+	   image_unselected="Toolbar_Middle_Off"
+	   image_overlay="Conv_toolbar_expand"
+       name="retract_btn"
+       left_pad="1"
+	   top_delta="0"
+       width="31" />
+   <button
+       follows="left|top"
+	   control_name="AdvanceSnapshot"
+	   visibility_control="AdvanceSnapshot"
+       height="25"
+	   is_toggle="true"
+       layout="topleft"
+	   image_overlay="Conv_toolbar_collapse"
+	   image_hover_unselected="Toolbar_Middle_Over"
+	   image_selected="Toolbar_Middle_Off"
+	   image_unselected="Toolbar_Middle_Off"
+       name="extend_btn"
+       left_delta="0"
+	   top_delta="0"
+       width="31" />
+    <string name="cancel_countdown">Cancel ([SECONDS] s)</string>
+    <string name="cancel_timer">Cancel</string>
+    <combo_box
+     follows="left|top"
+     height="23"
+     initial_value="0"
+     layout="topleft"
+     left="10"
+     top_pad="5"
+     name="snapshot_timer"
+     tool_tip="Choose a self-timer, then save or send. Changing the timer cancels the countdown. Snapshot settings can be changed during the countdown."
+     width="100">
+        <combo_box.item label="Timer: Off" name="timer_off" value="0" />
+        <combo_box.item label="Timer: 3 s" name="timer_3" value="3" />
+        <combo_box.item label="Timer: 5 s" name="timer_5" value="5" />
+        <combo_box.item label="Timer: 10 s" name="timer_10" value="10" />
+    </combo_box>
+    <button
+     enabled="false"
+     follows="left|top"
+     height="23"
+     label="Cancel"
+     layout="topleft"
+     left_pad="3"
+     name="cancel_timer_btn"
+     top_delta="0"
+     tool_tip="Cancel the pending snapshot. Hiding, minimizing or closing this window also cancels the countdown."
+     width="96" />
+	<panel
+     height="223"
+     layout="topleft"
+	 follows="top|left"
+     left="0"
+     name="advanced_options_panel"
+     top_pad="-6"
+     width="210">
+        <view_border 
+         bevel_style="in"
+         follows="left|top|right" 
+         height="1"
+         left="10"
+         layout="topleft"
+         name="advanced_options_hr"
+         right="-1"
+         top_pad="5"
+         />
+        <text
+         type="string"
+         length="1"
+         follows="left|top"
+         height="13"
+         layout="topleft"
+         left="10"
+         name="layer_type_label"
+         top_pad="10"
+         width="100">
+            Capture:
+        </text>
+        <combo_box
+         follows="left|top|right"
+         height="23"
+         label="Image Layers"
+         layout="topleft"
+         left="30"
+         name="layer_types"
+         right="-2">
+            <combo_box.item
+             label="Colors"
+             name="Colors"
+             value="colors" />
+            <combo_box.item
+             label="Depth"
+             name="Depth"
+             value="depth" />
+            <!-- avatar layers (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4; llsnapshotavatars.h) -->
+            <combo_box.item
+             label="Avatars only (transparent background)"
+             name="AvatarTransparent"
+             value="avatar_transparent" />
+            <combo_box.item
+             label="Avatar Matte (Black on White)"
+             name="AvatarMaskBlack"
+             value="avatar_mask_black" />
+            <combo_box.item
+             label="Avatar Matte (White on Black)"
+             name="AvatarMaskWhite"
+             value="avatar_mask_white" />
+        </combo_box>
+        <!-- which avatars snapshots include (SLSnapshotAvatarScope) + the picker -->
+        <combo_box
+         control_name="SLSnapshotAvatarScope"
+         follows="left|top|right"
+         height="23"
+         layout="topleft"
+         left="30"
+         name="avatar_scope_combo"
+         top_pad="4"
+         right="-29"
+         tool_tip="Which avatars snapshots and the avatar layers include. Selected: the avatars ticked in the list beside this window (you are ticked to begin with; unticked, your shadow and reflection still show in world snapshots). Animesh are only in All; what an avatar wears is always with it. Snapshots with the interface show everyone.">
+            <combo_box.item
+             label="Avatars: All"
+             name="AvatarsAll"
+             value="2" />
+            <combo_box.item
+             label="Avatars: Selected"
+             name="AvatarsSelected"
+             value="1" />
+            <combo_box.item
+             label="Avatars: Self only"
+             name="AvatarsSelf"
+             value="0" />
+        </combo_box>
+        <button
+         follows="right|top"
+         height="23"
+         layout="topleft"
+         left_pad="3"
+         top_delta="0"
+         width="24"
+         image_overlay="Command_Avatar_Icon"
+         image_hover_unselected="Toolbar_Middle_Over"
+         image_selected="Toolbar_Middle_Off"
+         image_unselected="Toolbar_Middle_Off"
+         name="avatar_scope_popout_btn"
+         tool_tip="Choose the avatars for Selected" />
+        <check_box
+         label="Interface"
+         layout="topleft"
+         left="30"
+		 height="16"
+         top_pad="8"
+         width="80"
+         control_name="RenderUIInSnapshot"
+         name="ui_check" />
+       <check_box
+         label="L$ Balance"
+         layout="topleft"
+         left_pad="16"
+         height="16"
+         top_delta="0"
+         width="80"
+         control_name="RenderBalanceInSnapshot"
+         enabled_control="RenderUIInSnapshot"
+         name="balance_check" />
+        <check_box
+         label="HUDs"
+         layout="topleft"
+		 height="16"
+         left="30"
+         top_pad="1"
+         width="180"
+         control_name="RenderHUDInSnapshot"
+         name="hud_check" />
+        <check_box
+         label="Freeze frame (fullscreen)"
+         layout="topleft"
+		 height="16"
+         left="10"
+         top_pad="1"
+         width="180"
+         name="freeze_frame_check" />
+        <check_box
+         label="Auto-refresh"
+         layout="topleft"
+		 height="16"
+         left="10"
+         top_pad="1"
+         width="180"
+         name="auto_snapshot_check" />
+        <check_box
+         label="No post-processing"
+         layout="topleft"
+         height="16"
+         left="10"
+         top_pad="1"
+         width="180"
+         name="no_post_check" />
+        <check_box
+         label="Antialias (slower)"
+         tool_tip="Smooths jagged edges by rendering the snapshot several times with tiny camera shifts and blending them. Takes longer. Has no effect on depth snapshots or snapshots that include the interface."
+         layout="topleft"
+         height="16"
+         left="10"
+         top_pad="1"
+         width="180"
+         control_name="SnapshotAntialias"
+         name="aa_check" />
+        <text
+         type="string"
+         length="1"
+         follows="left|top"
+         height="13"
+         layout="topleft"
+         left="10"
+         name="filter_list_label"
+         top_pad="10"
+         width="50">
+            Filter:
+        </text>
+        <combo_box
+            control_name="PhotoFilters"
+            follows="left|right|top"
+            name="filters_combobox"
+            tool_tip="Image filters"
+            top_delta="-3"
+            left="50"
+			right="-1"
+            height="21"
+            width="135">
+            <combo_box.item
+            label="No Filter"
+            name="NoFilter"
+            value="NoFilter" />
+        </combo_box>
+		 <view_border 
+         bevel_style="in"
+         follows="left|top|right" 
+         height="1"
+         left="10"
+         layout="topleft"
+         name="advanced_options_hr1"
+         right="-1"
+         top_pad="7"
+         />
+    </panel>
+	<panel_container
+     follows="left|top"
+     height="270"
+     layout="topleft"
+     left="0"
+     name="panel_container"
+     default_panel_name="panel_snapshot_options"
+     top_pad="5"
+     width="215">
+      <panel
+       class="llpanelsnapshotoptions"
+       filename="panel_snapshot_options.xml"
+       follows="all"
+       layout="topleft"
+       left="0"
+       name="panel_snapshot_options"
+       top="0" />
+      <panel
+       class="llpanelsnapshotprofile"
+       follows="all"
+       layout="topleft"
+       name="panel_snapshot_profile"
+       filename="panel_snapshot_profile.xml" />
+      <panel
+       class="llpanelsnapshotpostcard"
+       follows="all"
+       layout="topleft"
+       name="panel_snapshot_postcard"
+       filename="panel_snapshot_postcard.xml" />
+      <panel
+       class="llpanelsnapshotinventory"
+       follows="all"
+       layout="topleft"
+       name="panel_snapshot_inventory"
+       filename="panel_snapshot_inventory.xml" />
+      <panel
+       class="llpanelsnapshotlocal"
+       follows="all"
+       layout="topleft"
+       name="panel_snapshot_local"
+       filename="panel_snapshot_local.xml" />
+    </panel_container>
+	<view_border 
+         bevel_style="in"
+         follows="left|top" 
+         height="1"
+         left="10"
+         layout="topleft"
+         name="status_hr"
+         width="199"
+         top_pad="-16"/>
+	<panel
+       background_visible="false"
+       follows="left|top"
+       font="SansSerifLarge"
+       halign="center"
+       height="20"
+       layout="topleft"
+       left="10"
+       length="1"
+       name="succeeded_panel"
+	   width="198"
+       top_pad="1"
+       type="string"
+       visible="false">
+          <text
+           follows="all"
+           font="SansSerif"
+           halign="center"
+           height="18"
+           layout="topleft"
+           left="1"
+           length="1"
+           name="succeeded_lbl"
+           right="-1"
+           text_color="0.2 0.85 0.2 1"
+           top="4"
+           translate="false"
+           type="string">
+              Succeeded
+          </text>
+      </panel>
+      <panel
+       background_visible="false"
+       follows="left|top"
+       font="SansSerifLarge"
+       halign="center"
+       height="20"
+       layout="topleft"
+       left="10"
+       length="1"
+       name="failed_panel"
+	   width="198"
+       top_delta="0"
+       type="string"
+       visible="false">
+          <text
+           follows="all"
+           font="SansSerif"
+           halign="center"
+           height="18"
+           layout="topleft"
+           left="1"
+           length="1"
+           name="failed_lbl"
+           right="-1"
+           text_color="0.95 0.4 0.4 1"
+           top="4"
+           translate="false"
+           type="string">
+              Failed
+          </text>
+      </panel>
+      <loading_indicator
+       follows="left|top"
+       height="24"
+       layout="topleft"
+       name="working_indicator"
+       left="10"
+       top_delta="0"
+       visible="false"
+       width="24" />
+      <text
+       follows="left|top"
+       font="SansSerifBold"
+       height="14"
+       layout="topleft"
+       left_pad="3"
+       length="1"
+       halign="left"
+       name="working_lbl"
+       top_delta="5"
+       translate="false"
+       type="string"
+       visible="false"
+       width="162">
+          Working
+      </text>
+      <text
+       follows="left|top"
+       font="SansSerifBold"
+       halign="left"
+       height="18"
+       layout="topleft"
+       left="10"
+       length="1"
+       name="refresh_lbl"
+       text_color="0.95 0.4 0.4 1"
+       top_delta="0"
+       translate="false"
+       type="string"
+       visible="false"
+       width="130">
+          Refresh to save.
+      </text>
+  <ui_ctrl 
+    layout="topleft"
+    name="thumbnail_placeholder"
+    top="23"
+	left="215"
+	width="420"
+	height="420"
+    follows="top|left"/>
+  <view_border 
+   bevel_style="in" 
+   height="21"
+   layout="topleft"
+   name="img_info_border"
+   top_pad="0"
+   right="-130"
+   follows="left|top|right"
+   left_delta="0"/>
+   <text
+    type="string"
+    font="SansSerifSmall"
+    length="1"
+    follows="left|top|right"
+    height="14"
+    layout="topleft"
+    left="220"
+    halign="left"
+    name="image_res_text"
+    top_delta="5"
+    width="250">
+       [WIDTH]px (width) x [HEIGHT]px (height)
+   </text>
+   <text
+    follows="right|top"
+    font="SansSerifSmall"
+    height="14"
+    layout="topleft"
+    left="-185"
+    length="1"
+    halign="right"
+    name="file_size_label"
+    top_delta="0"
+    type="string"
+    width="50">
+       [SIZE] KB
+   </text>
+   <text
+    follows="right|top"
+    font="SansSerifSmall"
+    height="14"
+    layout="topleft"
+    left="-130"
+    length="1"
+    halign="right"
+    name="360_label"
+    text_color="HTMLLinkColor"
+    top_delta="0"
+    type="string"
+    width="115">
+    Take a 360 snapshot
+   </text>
+</floater>
