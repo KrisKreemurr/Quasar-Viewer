@@ -8602,6 +8602,7 @@ struct QLVulkanPresenter::Impl
         std::vector<U8> bytes;
         U64             stamp = 0;       // an engine block's stamp as written (GpBlock::stamp), 0 unknown
         const void*     src   = nullptr; // and where its bytes were
+        VkDeviceSize    size  = 0;       // a stamped block's
     };
     std::unordered_map<U64, GpWritten> mGpBlocksDone;
     std::vector<U8>                    mGpBlockScratch;
@@ -10282,21 +10283,9 @@ struct QLVulkanPresenter::Impl
                 U64 key = 0;
                 const QLVulkanPresenter::GpBlock* block = nullptr;
                 U8* dst = nullptr;
-                bool defaults_same = false;
                 if (r.default_block)
                 {
                     key = 0x8000000000000000ull | (U64)(U32)d.program;
-                    // The values' stamp as written for this program already: neither filled nor compared again.
-                    const auto done = mGpBlocksDone.find(key);
-                    defaults_same = d.defaults_version && done != mGpBlocksDone.end() &&
-                                    done->second.stamp == d.defaults_version && !done->second.src &&
-                                    done->second.bytes.size() == (size_t)bytes;
-                    if (!defaults_same)
-                    {
-                        mGpBlockScratch.assign((size_t)bytes, 0);
-                        dst = mGpBlockScratch.data();
-                        gpFillDefaults(p, d, dst);
-                    }
                 }
                 else
                 {
@@ -10332,11 +10321,60 @@ struct QLVulkanPresenter::Impl
                         return false;
                     }
                 }
+                // Stamped (the default block's values hashed by the adapter, an engine block's binding stamped): the
+                // block of this pass written for the stamp is bound, or one is written straight into the host buffer,
+                // with nothing filled, compared or kept beside it.
+                const U64 stamp = r.default_block ? d.defaults_version : (block ? block->stamp : 0);
+                if (stamp)
+                {
+                    const void* src = block ? block->data : nullptr;
+                    GpWritten& stamped = mGpBlocksDone[(key * 0x9E3779B97F4A7C15ull) ^ stamp ^ 0x4000000000000000ull];
+                    if (stamped.stamp == stamp && stamped.src == src && stamped.size == bytes)
+                    {
+                        ++mGpBlocksReused;
+                    }
+                    else
+                    {
+                        const VkDeviceSize at = gpAllocate(bytes);
+                        if (at == GP_NONE)
+                        {
+                            give_back();
+                            gpWhy("the pass's host memory is full");
+                            return false;
+                        }
+                        U8* out = mGpMapped + at;
+                        if (block)
+                        {
+                            const size_t copied = llmin((size_t)r.size, block->bytes);
+                            memcpy(out, block->data, copied);
+                            if (copied < (size_t)bytes)
+                            {
+                                memset(out + copied, 0, (size_t)bytes - copied);
+                            }
+                        }
+                        else
+                        {
+                            gpFillDefaults(p, d, out);
+                        }
+                        stamped.at    = at;
+                        stamped.stamp = stamp;
+                        stamped.src   = src;
+                        stamped.size  = bytes;
+                        ++mGpBlocksWritten;
+                    }
+                    b.buffer     = { mGpHost, stamped.at, bytes };
+                    b.dyn_buffer = { mGpHost, 0, bytes };
+                    continue;
+                }
+                if (r.default_block)
+                {
+                    mGpBlockScratch.assign((size_t)bytes, 0);
+                    dst = mGpBlockScratch.data();
+                    gpFillDefaults(p, d, dst);
+                }
                 GpWritten& written = mGpBlocksDone[key];
-                const bool stamped_same = defaults_same ||
-                                          (block && block->stamp && written.stamp == block->stamp &&
-                                           written.src == block->data && written.bytes.size() == (size_t)bytes);
-                if (block && !stamped_same)
+                const bool stamped_same = false;
+                if (block)
                 {
                     mGpBlockScratch.assign((size_t)bytes, 0);
                     dst = mGpBlockScratch.data();
@@ -10350,11 +10388,7 @@ struct QLVulkanPresenter::Impl
                         written.stamp = block->stamp;
                         written.src   = block->data;
                     }
-                    else if (!defaults_same)
-                    {
-                        written.stamp = d.defaults_version;
-                        written.src   = nullptr;
-                    }
+
                 }
                 else
                 {

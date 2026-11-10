@@ -12949,7 +12949,6 @@ namespace
             std::vector<U8>                          kinds;
             U64                                      version = 0;
         };
-        static U64 defaults_version_next = 0;
         static std::unordered_map<const LLGLSLShader*, QLProgramNames> names_by_program;
         static std::vector<QLVulkanPresenter::GpTexture> textures;
         static std::vector<QLVulkanPresenter::GpBlock>   blocks;
@@ -13006,7 +13005,18 @@ namespace
             if (!words_same)
             {
                 names.words.assign(words, words + word_count);
-                names.version = ++defaults_version_next;
+                // The values' hash, so a draw going back to values an earlier draw had finds its block written.
+                U64 hash = 0x9E3779B97F4A7C15ull ^ ((U64)(uintptr_t)&shader * 0xFF51AFD7ED558CCDull) ^ word_count;
+                for (size_t w = 0; w < word_count; ++w)
+                {
+                    hash = (hash ^ words[w]) * 0x100000001B3ull;
+                    hash ^= hash >> 29;
+                }
+                for (U8 k : names.kinds)
+                {
+                    hash = (hash ^ k) * 0x100000001B3ull;
+                }
+                names.version = hash | 1;
             }
         }
         // Each sampler's texture and sampling, from the unit GL gave it at link.
