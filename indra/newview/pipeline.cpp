@@ -14763,6 +14763,24 @@ static constexpr QLMaskPass QL_MASK_PASSES[] = {
 };
 static constexpr U32 QL_MASK_PASS_COUNT = LL_ARRAY_SIZE(QL_MASK_PASSES);
 
+// Why Vulkan left masked casters to GL, this frame and the last (for the GL shadow draws' line): no texture, no skin
+// palette, a texture it cannot tile, a mesh it cannot place, no colours where the test reads them, the draw refused.
+enum EQLMaskWhy : U32 { QL_MASK_NO_TEXTURE, QL_MASK_SKIN, QL_MASK_TILE, QL_MASK_ARENA, QL_MASK_COLORS, QL_MASK_DRAW,
+                        QL_MASK_WHYS };
+static U32 sQLMaskWhyNow[QL_MASK_WHYS] = {}, sQLMaskWhyLast[QL_MASK_WHYS] = {};
+static U32 sQLMaskWhyFrame = 0;
+[[maybe_unused]] static void ql_mask_why(EQLMaskWhy why)
+{
+    const U32 frame = LLFrameTimer::getFrameCount();
+    if (frame != sQLMaskWhyFrame)
+    {
+        sQLMaskWhyFrame = frame;
+        memcpy(sQLMaskWhyLast, sQLMaskWhyNow, sizeof(sQLMaskWhyNow));
+        memset(sQLMaskWhyNow, 0, sizeof(sQLMaskWhyNow));
+    }
+    ++sQLMaskWhyNow[why];
+}
+
 // What Vulkan left of each masked pass, unrigged and rigged, for GL to draw as its pass would.
 struct QLMaskLeftovers
 {
@@ -16575,6 +16593,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     const bool batched = pass.mBatchTextures && params->mTextureList.size() > 1;
                     if (!batched && params->mTexture.isNull())
                     {
+                        ql_mask_why(QL_MASK_NO_TEXTURE);
                         gl_draws();
                         continue;
                     }
@@ -16582,6 +16601,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     {
                         if (!params->mAvatar || !params->mSkinInfo)
                         {
+                            ql_mask_why(QL_MASK_SKIN);
                             gl_draws();
                             continue;
                         }
@@ -16605,6 +16625,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                         }
                         if (palette == ~0u)
                         {
+                            ql_mask_why(QL_MASK_SKIN);
                             gl_draws();
                             continue;
                         }
@@ -16626,6 +16647,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                         }
                         if (!tiled)
                         {
+                            ql_mask_why(QL_MASK_TILE);
                             gl_draws();
                             continue;
                         }
@@ -16644,6 +16666,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                         }
                         if (!last_tiled)
                         {
+                            ql_mask_why(QL_MASK_TILE);
                             gl_draws();
                             continue;
                         }
@@ -16671,6 +16694,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                     }
                     if (!last_in_arena || (pass.mTest == 0 && !last_colors))
                     {
+                        ql_mask_why(!last_in_arena ? QL_MASK_ARENA : QL_MASK_COLORS);
                         gl_draws();
                         continue;
                     }
@@ -16690,6 +16714,7 @@ static bool ql_vulkan_shadow_casters(const LLMatrix4a& proj, bool depth_clamp, s
                                                              base_index + params->mOffset, params->mCount,
                                                              batch_count ? batch_tiles : nullptr, batch_count))
                     {
+                        ql_mask_why(QL_MASK_DRAW);
                         gl_draws();
                     }
                 }
@@ -16759,6 +16784,10 @@ std::string ql_shadow_gl_draws_info()
     {
         info += llformat(" %s %u", names[order[i]], d[order[i]]);
     }
+    // Why the masked casters Vulkan left were left.
+    const U32* w = sQLMaskWhyLast;
+    info += llformat(" | masked left: no texture %u, skin %u, texture %u, mesh %u, colours %u, refused %u", w[0], w[1],
+                     w[2], w[3], w[4], w[5]);
     // In the log too, every half minute, where the whole line can be read.
     static LLFrameTimer logged;
     if (logged.getElapsedTimeF32() > 30.f)
