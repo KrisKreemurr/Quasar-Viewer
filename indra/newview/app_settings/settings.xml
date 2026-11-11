@@ -12745,13 +12745,13 @@
   <key>QuasarAvatarTags</key>
   <map>
     <key>Comment</key>
-    <string>Quasar: follow other avatars' Quasar physics tags -- a worn object's hover text holding [qlphys ...] (doc/quasar_physics_tag.md) sets how that avatar's body feels (softness, wobble, off) in place of this viewer's sliders. Off: everyone gets this viewer's sliders.</string>
+    <string>Quasar: follow other avatars' Quasar physics tags -- a worn object's hover text holding [qlphys ...] (doc/quasar_physics_tag.md) sets how that avatar's body feels (softness, wobble, off) in place of this viewer's sliders. Off (default for now: the default physics comes first): everyone gets this viewer's sliders.</string>
     <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
-    <integer>1</integer>
+    <integer>0</integer>
   </map>
   <key>QuasarBodyCollisionFitMax</key>
   <map>

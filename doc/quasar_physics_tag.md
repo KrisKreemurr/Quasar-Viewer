@@ -60,8 +60,9 @@ soft or wobbly as the ranges allow.
   `qlStripPhysTag()` removes it from the drawn text. `LLViewerObject` passes hover text
   through it before `SLParcelSpeakers::displayText()`, so the tag is never drawn in
   Quasar Viewer.
-- `QuasarAvatarTags` (default on, "Follow people's own Quasar physics tags"): when it is
-  off, tags are ignored and everyone gets this viewer's sliders.
+- `QuasarAvatarTags` ("Follow people's own Quasar physics tags", **default off for now**:
+  the default physics comes first): when it is off, tags are ignored and everyone gets this
+  viewer's sliders. The tag is still never drawn.
 - Tag values replace `QuasarSoftContactGive` and `QuasarSoftContactWobble` for that
   avatar. `QuasarSoftContactNoPhysics` still decides what a part with no Physics layer
   does.

@@ -7023,7 +7023,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         const F32 soft_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
         // The avatar's own wishes, if they wear a Quasar physics tag (and tags are on): their
         // values replace this viewer's sliders for them; "off" turns soft contact off on them.
-        static LLCachedControl<bool> s_tags(gSavedSettings, "QuasarAvatarTags", true);
+        static LLCachedControl<bool> s_tags(gSavedSettings, "QuasarAvatarTags", false);
         qlReadPhysTag();
         const QLPhysTag& tag = mQLPhysTag;
         const bool use_tag = s_tags && tag.present;
