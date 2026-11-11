@@ -12698,6 +12698,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionFitMax</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision auto-fit: the largest a body part's shape may be fitted, in times SL's own shape for it (SL's breast shape is only ~5 cm; hyper breasts and butts sized by a body's HUD can be many times that). 30 = no limit. Applies from the next measuring (an outfit change).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>10</real>
+  </map>
   <key>QuasarBodyCollisionFitShape</key>
   <map>
     <key>Comment</key>

@@ -6248,7 +6248,28 @@ namespace
     // into a body rather than hovering off it), and kept only if it hugs the vertices
     // closer than the even fit -- never worse. Offline test (made-up breasts, hips, butt,
     // slim; with 15 % loose clothing): the average gap to the true surface dropped 5-20x.
-    bool ql_fit_shape(const std::vector<LLVector3>& all, F32 even, F32 half_out[3], F32 centre_out[3])
+    // How much of a body part's vertices its shape covers, by its size (times its volume):
+    // 60 % up to 2x, rising to 85 % by 6x (see the even fit).
+    F32 ql_fit_cover(F32 size)
+    {
+        const F32 t = llclamp((size - 2.f) / 4.f, 0.f, 1.f);
+        return 0.6f + 0.25f * t * t * (3.f - 2.f * t);
+    }
+
+    // The distance below which the given share of a histogram's samples lie.
+    F32 ql_hist_percentile(const U32* hist, S32 bins, F32 bin, U32 samples, F32 share)
+    {
+        const U32 want = (U32)(samples * share);
+        U32 seen = 0;
+        for (S32 b = 0; b < bins; ++b)
+        {
+            seen += hist[b];
+            if (seen >= want) return (b + 0.5f) * bin;
+        }
+        return bins * bin;
+    }
+
+    bool ql_fit_shape(const std::vector<LLVector3>& all, F32 even, F32 cap, F32 half_out[3], F32 centre_out[3])
     {
         if (all.size() < 60 || even <= 0.f) return false;
         // At most ~800 vertices take part (one area a frame, once per outfit change: about a
@@ -6258,9 +6279,26 @@ namespace
         for (size_t i = 0; i < all.size(); i += every) pts.push_back(all[i]);
         const size_t n = pts.size();
 
+        // Start from where the vertices are: their middle, and their spread along each axis
+        // (a sphere's surface spreads radius / sqrt(3) along each). Starting from the volume's
+        // centre, a hyper breast (front only, far forward) grew around it instead of moving
+        // out: a shape that also stuck out of the back, catching arms held behind it.
         const F64 log_even = log((F64)even);
         F64 c[3] = { 0.0, 0.0, 0.0 };
         F64 lh[3] = { log_even, log_even, log_even };
+        {
+            F64 mean[3] = { 0.0, 0.0, 0.0 }, var[3] = { 0.0, 0.0, 0.0 };
+            for (const LLVector3& p : pts)
+                for (S32 k = 0; k < 3; ++k) mean[k] += p.mV[k];
+            for (S32 k = 0; k < 3; ++k) mean[k] /= (F64)n;
+            for (const LLVector3& p : pts)
+                for (S32 k = 0; k < 3; ++k) var[k] += (p.mV[k] - mean[k]) * (p.mV[k] - mean[k]);
+            for (S32 k = 0; k < 3; ++k)
+            {
+                c[k] = mean[k];
+                lh[k] = log(llclamp(sqrt(3.0 * var[k] / (F64)n), 0.3, (F64)cap));
+            }
+        }
         constexpr F64 PRIOR = 0.001;
         std::vector<F32> resid(n), sorted(n);
         for (S32 it = 0; it < 30; ++it)
@@ -6327,7 +6365,7 @@ namespace
             }
         }
 
-        // The same "cover 60 %" as the even fit, then the limits.
+        // The same cover as the even fit (60 %, more for big parts), then the limits.
         F64 h[3] = { exp(lh[0]), exp(lh[1]), exp(lh[2]) };
         std::vector<F32> dist(all.size());
         for (size_t i = 0; i < all.size(); ++i)
@@ -6340,19 +6378,45 @@ namespace
             }
             dist[i] = (F32)sqrt(sum);
         }
-        const size_t at60 = (all.size() * 6) / 10;
-        std::nth_element(dist.begin(), dist.begin() + at60, dist.end());
-        const F64 scale = dist[at60];
+        const size_t at = llmin(all.size() - 1, (size_t)(all.size() * ql_fit_cover(even)));
+        std::nth_element(dist.begin(), dist.begin() + at, dist.end());
+        const F64 scale = dist[at];
         if (!(scale > 0.0) || !std::isfinite(scale)) return false;
         // Still that body part: half sizes within half to twice the even fit, the centre
         // within 0.6 of it (in the volume's units) -- a fit that wants more is reaching into
         // a neighbour's mesh.
-        const F32 half_lo = llmax(0.6f, 0.5f * even), half_hi = llmin(4.f, 2.f * even);
+        const F32 half_lo = llmax(0.6f, 0.5f * even), half_hi = llmin(cap, 2.f * even);
         const F32 move = 0.6f * even;
         for (S32 k = 0; k < 3; ++k)
         {
             half_out[k] = llclamp((F32)(h[k] * scale), half_lo, half_hi);
             centre_out[k] = llclamp((F32)c[k], -move, move);
+        }
+
+        // No further than a little past the last vertices in any direction. A mesh with only
+        // a front (a breast: its back is in the chest) fits about as well from the volume's
+        // centre as from where it really sits, and from the centre its shape reached as far
+        // back as forward -- for a hyper breast, out of the avatar's back. Each side of the
+        // shape is cut to the vertices' extent there (2nd / 98th percentile) plus a fifth of
+        // the even fit; the side the vertices are on stays.
+        {
+            std::vector<F32> along(all.size());
+            const F32 margin = 0.2f * even;
+            for (S32 k = 0; k < 3; ++k)
+            {
+                for (size_t i = 0; i < all.size(); ++i) along[i] = all[i].mV[k];
+                const size_t lo_at = all.size() / 50, hi_at = all.size() - 1 - all.size() / 50;
+                std::nth_element(along.begin(), along.begin() + lo_at, along.end());
+                const F32 lo_data = along[lo_at] - margin;
+                std::nth_element(along.begin(), along.begin() + hi_at, along.end());
+                const F32 hi_data = along[hi_at] + margin;
+                F32 lo = centre_out[k] - half_out[k], hi = centre_out[k] + half_out[k];
+                lo = llmax(lo, lo_data);
+                hi = llmin(hi, hi_data);
+                if (hi - lo < 2.f * 0.6f) continue;   // nothing sensible left: keep it as it was
+                centre_out[k] = 0.5f * (lo + hi);
+                half_out[k] = 0.5f * (hi - lo);
+            }
         }
 
         // Never worse: the average gap from each vertex to the shape's surface (along the
@@ -6389,7 +6453,8 @@ namespace
 // ...), or, for mesh rigged to the main bones (pelvis, torso, chest, spine, hips), the
 // nearest volume within 3 times its size. Each vertex's distance from its volume's centre
 // in the volume's own unit (1 = on the volume's surface) goes into a histogram; the 60th
-// percentile is the fit (0.6 - 4): most of the surface lies within the shape, a little
+// percentile is the fit (0.6 up to QuasarBodyCollisionFitMax, 10; bigger parts covered
+// closer, up to 85 %): most of the surface lies within the shape, a little
 // out of it -- a hand rests slightly into a body rather than hovering off it, and a skirt
 // or a loose sleeve weighted to the hips moves the fit only a little. Fewer than 30 vertices
 // for a volume keep its fit at 1.
@@ -6410,6 +6475,8 @@ namespace
         U32    decoded = 0, direct = 0, missing = 0;
         std::vector<LLVector3> points[10];   // each volume's weighted vertices in its unit space (shaped fit)
         // Fitting, after measuring: the even fits at once, then one area's shaped fit a frame.
+        F32    bin = 0.05f;    // histogram step (volume units): the measured range / BINS
+        F32    cap = 10.f;     // the largest fit, as QuasarBodyCollisionFitMax was when this started
         bool   evens_done = false;
         S32    fit_next = 0;
         F32    fit[10] = {};
@@ -6426,8 +6493,11 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
     static U32 s_budget_frame = 0xFFFFFFFFu;
     static F64 s_budget_used = 0.0;
     constexpr F64 FRAME_BUDGET_MS = 1.5;
-    constexpr S32 BINS = 120;            // distance 0 - 6 in steps of 0.05
-    constexpr F32 BIN = 0.05f;
+    // Distances are measured out to 1.25 times the size limit (QuasarBodyCollisionFitMax,
+    // default 10 -- was a fixed 4, which hyper breasts and butts sized by their own HUD
+    // outgrew: SL's breast volume is only ~5 cm, a hyper breast 25-40 cm), in 240 steps.
+    constexpr S32 BINS = 240;
+    static LLCachedControl<F32> s_fit_max(gSavedSettings, "QuasarBodyCollisionFitMax", 10.f);
     constexpr S32 MAX_SLOTS = 10;
 
     if (!s_autofit)
@@ -6483,6 +6553,9 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
             job.stride = llmax(1u, total / 12000u);
             job.key = key;
             job.hist.assign((size_t)MAX_SLOTS * BINS, 0);
+            // At the slider's top (30): no limit -- measured out to 50 volumes.
+            job.cap = (F32)s_fit_max >= 29.99f ? 40.f : llclamp((F32)s_fit_max, 2.f, 30.f);
+            job.bin = job.cap * 1.25f / BINS;
             job_it = sQLFitJobs.emplace(getID(), std::move(job)).first;
         }
     }
@@ -6608,13 +6681,13 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
                 }
                 if (slot < 0 || slot >= MAX_SLOTS) continue;
                 const F32 dist = unit.length();
-                job.hist[(size_t)slot * BINS + llclamp((S32)(dist / BIN), 0, BINS - 1)]++;
+                job.hist[(size_t)slot * BINS + llclamp((S32)(dist / job.bin), 0, BINS - 1)]++;
                 job.samples[slot]++;
                 // The shaped fit uses only vertices weighted to this volume: a main-bone vertex's
                 // "nearest volume" is a guess (a body rigged to the main bones gave PELVIS 5,000 of
                 // them, up to the waist, and the shaped fit stretched the hips into a column the
                 // hanging arms hit). Guesses still count toward the even fit, as before.
-                if (dist < 6.f && fitted) job.points[slot].push_back(unit);
+                if (dist < job.cap * 1.25f && fitted) job.points[slot].push_back(unit);
             }
             job.phase += n;
         }
@@ -6630,14 +6703,15 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         F32 fit = 1.f;
         if (job.samples[t] >= 30)
         {
-            const U32 want = (U32)(job.samples[t] * 0.6f);
-            U32 seen = 0;
-            for (S32 b = 0; b < BINS; ++b)
+            fit = llclamp(ql_hist_percentile(&job.hist[(size_t)t * BINS], BINS, job.bin, job.samples[t], 0.6f), 0.6f, job.cap);
+            // Big parts are covered closer (60 % of the vertices inside up to 2x, rising to
+            // 85 % by 6x): the part left outside the shape -- where a hand sinks in -- stays a
+            // few centimetres instead of growing with the part.
+            const F32 cover = ql_fit_cover(fit);
+            if (cover > 0.6f)
             {
-                seen += job.hist[(size_t)t * BINS + b];
-                if (seen >= want) { fit = (b + 0.5f) * BIN; break; }
+                fit = llclamp(ql_hist_percentile(&job.hist[(size_t)t * BINS], BINS, job.bin, job.samples[t], cover), 0.6f, job.cap);
             }
-            fit = llclamp(fit, 0.6f, 4.f);
         }
         job.fit[t] = fit;
     }
@@ -6670,7 +6744,7 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
                     job.points[t].push_back(mirrored);
                 }
             }
-            shape.shaped = ql_fit_shape(job.points[t], job.fit[t], shape.half, shape.centre);
+            shape.shaped = ql_fit_shape(job.points[t], job.fit[t], job.cap, shape.half, shape.centre);
             if (shape.shaped && middle) shape.centre[1] = 0.f;
             if (!shape.shaped) shape = QLBodyShape();
         }

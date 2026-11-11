@@ -885,6 +885,25 @@ Only used with a DLSS upscaling mode.
             left="30"
             top="530" />
           <slider
+            control_name="QuasarBodyCollisionFitMax"
+            enabled_control="QuasarBodyCollisionAutoFit"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="10"
+            label="Size limit:"
+            label_width="90"
+            layout="topleft"
+            min_val="2"
+            max_val="30"
+            name="QuasarBodyCollisionFitMax"
+            show_text="true"
+            tool_tip="The biggest a body part can be fitted, in times SL's own shape for it. Raise it if hyper breasts or butts still swallow hands; 30 = no limit. Takes effect when an avatar's outfit next changes."
+            width="250"
+            left="334"
+            top="530" />
+          <slider
             control_name="QuasarBodyCollisionChest"
             enabled_control="QuasarBodyCollision"
             decimal_digits="2"
