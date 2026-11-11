@@ -752,6 +752,7 @@ private:
         LLVector3    last_ankle;     // the animated ankle last frame (world): the foot's speed
         F32          plant = 1.f;    // smoothed: 1 = the foot stands (still in the world), 0 = it swings
         F32          bend_last = -1.f;   // the knee bend the last solve gave (radians; < 0 = none)
+        F32          steep_lift = 0.f;   // smoothed: how far the foot is raised on ground too steep to lie flat on (m)
     };
     QLFootIKLeg mQLFootIKLeg[2];
     F32         mQLFootIKDrop = 0.f;         // smoothed pelvis drop (m, <= 0)

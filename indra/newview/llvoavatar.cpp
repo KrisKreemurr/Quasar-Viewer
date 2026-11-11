@@ -5250,6 +5250,10 @@ namespace
     // solve that leg).
     const F32 QL_NO_BEND = -1000.f;
 
+    // How far foot IK tilts a foot toward the ground's slope (was 25 degrees). Steeper
+    // ground than this raises the foot instead (see "STEEP GROUND").
+    const F32 QL_MAX_FOOT_TILT = 35.f * DEG_TO_RAD;
+
     // The joint writes of the IK are the pose's, like the blender's: no GPU ext write.
     struct QLAnimApplyScope
     {
@@ -5492,7 +5496,11 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // A foot the animation lifts above the other stays lifted; a drop past what a
         // leg can take (a ledge, a cliff edge) is not reached for.
         const F32 lift_fade = 1.f - ql_smoothstep(0.08f, 0.25f, ankle_p[i].mV[VZ] - low_ankle);
-        const F32 reach_fade = 1.f - ql_smoothstep(0.35f, 0.55f, fabsf(raw));
+        // On steep ground (past 30 degrees, fully by 50) a long step up or down the hill is
+        // a big height difference too, not a ledge: the foot is still reached for further.
+        const F32 foot_slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
+        const F32 steep = ql_smoothstep(30.f * DEG_TO_RAD, 50.f * DEG_TO_RAD, foot_slope);
+        const F32 reach_fade = 1.f - ql_smoothstep(0.35f + 0.25f * steep, 0.55f + 0.30f * steep, fabsf(raw));
         QLFootIKLeg& leg = mQLFootIKLeg[i];
         LLVector3 travel = ankle_p[i] - leg.last_ankle;
         travel.mV[VZ] = 0.f;
@@ -5623,7 +5631,51 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const LLVector3 hip = hip_p[i] + drop_v;
         const LLVector3 knee = knee_p[i] + drop_v;
         const LLVector3 ankle = ankle_p[i] + drop_v;
-        const LLVector3 target = ankle_p[i] + LLVector3(0.f, 0.f, step[i]);
+        // STEEP GROUND. The foot tilts toward the slope by at most QL_MAX_FOOT_TILT (an
+        // ankle bends only so far). Past that the end of the foot pointing up the hill --
+        // the toe walking up, the heel walking down -- would sink into the ground by the
+        // rest of the slope: its length x sin(rest) / cos(slope) of height. Raise the foot
+        // by that, so it stands on that end, as people do on a steep hill. Nothing below
+        // QL_MAX_FOOT_TILT: ordinary roads and hills are exactly as before.
+        {
+            F32 lift_target = 0.f;
+            const F32 slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
+            const F32 rest = slope - QL_MAX_FOOT_TILT;
+            if (rest > 0.f)
+            {
+                LLVector3 downhill(ground_norm[i].mV[VX], ground_norm[i].mV[VY], 0.f);
+                LLVector3 foot_fwd = LLVector3::x_axis * ankle_q[i];
+                foot_fwd.mV[VZ] = 0.f;
+                if (foot_fwd.lengthSquared() < 1.0e-6f)
+                {
+                    foot_fwd = forward;
+                    foot_fwd.mV[VZ] = 0.f;
+                }
+                if (downhill.lengthSquared() > 1.0e-8f && foot_fwd.lengthSquared() > 1.0e-6f)
+                {
+                    downhill.normVec();
+                    foot_fwd.normVec();
+                    const F32 uphill = -(foot_fwd * downhill);   // 1 = the foot points up the hill
+                    // The foot's length from the ankle to the toe joint (scales with the
+                    // avatar); the heel sticks out about a third of that, the side a quarter.
+                    static const char* const TOES[2] = { "mToeLeft", "mToeRight" };
+                    F32 toe_len = 0.15f;
+                    if (LLJoint* toe = getJoint(TOES[i]))
+                    {
+                        LLVector3 d = toe->getWorldPosition() - ankle_p[i];
+                        d.mV[VZ] = 0.f;
+                        toe_len = llclamp(d.length(), 0.05f, 0.5f);
+                    }
+                    const F32 along = uphill >= 0.f ? toe_len : 0.35f * toe_len;
+                    const F32 aligned = fabsf(uphill);
+                    const F32 length = along * aligned + 0.25f * toe_len * (1.f - aligned);
+                    lift_target = length * sinf(rest) / llmax(cosf(slope), 0.25f);
+                    lift_target = llmin(lift_target, 0.2f) * leg.fade * strength * level_gate;
+                }
+            }
+            leg.steep_lift += (lift_target - leg.steep_lift) * follow;
+        }
+        const LLVector3 target = ankle_p[i] + LLVector3(0.f, 0.f, step[i] + leg.steep_lift);
 
         const LLVector3 thigh = knee - hip;
         const LLVector3 shin = ankle - knee;
@@ -5783,8 +5835,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 slope_in = ql_smoothstep(5.f * DEG_TO_RAD, 10.f * DEG_TO_RAD, slope);
         if (tilt_amount > 0.f && slope > 0.001f && slope_in > 0.f)
         {
-            const F32 MAX_TILT = 25.f * DEG_TO_RAD;
-            const F32 t = tilt_amount * slope_in * llmin(1.f, MAX_TILT / slope);
+            const F32 t = tilt_amount * slope_in * llmin(1.f, QL_MAX_FOOT_TILT / slope);
             tilt = slerp(t, LLQuaternion::DEFAULT, ql_arc(LLVector3::z_axis, ground_norm[i]));
         }
         ankles[i]->setWorldRotation(ankle_q[i] * tilt);
