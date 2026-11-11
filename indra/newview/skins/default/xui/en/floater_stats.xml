@@ -35,6 +35,13 @@
                   decimal_digits="1"
                   show_bar="true"
                   show_history="true"/>
+        <stat_bar name="fps_shown"
+                  label="FPS* (frame gen)"
+                  unit_label="fps"
+                  stat="fpsshown"
+                  decimal_digits="1"
+                  show_bar="true"
+                  show_history="true"/>
         <stat_bar name="frame_mean"
                   label="frame (mean)"
                   unit_label="ms"

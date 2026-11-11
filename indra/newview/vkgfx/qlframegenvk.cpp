@@ -2,6 +2,7 @@
 #include "qlframegenvk.h"
 #include "qlframegen_spv.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -58,6 +59,10 @@ struct WarpPush
 };
 static_assert(sizeof(WarpPush) == 32, "matches ql_fg_warp.frag");
 } // namespace
+
+namespace { std::atomic<unsigned> sGenerated{0}; }
+void qlFrameGenNoteGenerated() { sGenerated.fetch_add(1, std::memory_order_relaxed); }
+unsigned qlFrameGenTakeGenerated() { return sGenerated.exchange(0, std::memory_order_relaxed); }
 
 void qlSetFrameGenWanted(bool on) { sWanted = on; }
 bool qlFrameGenWanted() { return sWanted; }

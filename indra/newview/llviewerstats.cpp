@@ -28,6 +28,7 @@
 #include "llgpuinfo.h"
 
 #include "llviewerstats.h"
+#include "vkgfx/qlframegen_settings.h"   // Quasar: FPS*
 #include "llviewerthrottle.h"
 
 #include "message.h"
@@ -118,6 +119,7 @@ namespace LLStatViewer
 {
 
 LLTrace::CountStatHandle<>  FPS("FPS", "Frames rendered"),
+                            FPS_SHOWN("fpsshown", "Frames shown: rendered + Quasar frame generation's in-between frames"),
                             PACKETS_IN("Packets In", "Packets received"),
                             PACKETS_LOST("packetsloststat", "Packets lost"),
                             PACKETS_OUT("packetsoutstat", "Packets sent"),
@@ -561,6 +563,7 @@ void update_statistics()
             sample(LLStatViewer::FPS_SAMPLE, fps_mean);
         }
         add(LLStatViewer::FPS, 1);
+        add(LLStatViewer::FPS_SHOWN, 1 + qlFrameGenTakeGenerated());   // Quasar: FPS* (frame generation)
         viewer_stats.addFrame();
     }
 

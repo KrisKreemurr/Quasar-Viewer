@@ -15,3 +15,8 @@ void qlSetFrameGenWanted(bool on);
 bool qlFrameGenWanted();
 void qlSetFrameGenTuning(const QLFrameGenTuning& t);
 const QLFrameGenTuning& qlFrameGenTuning();
+
+// Generated frames since the last take (the Vulkan frame bumps it, the viewer's stats take
+// it once a frame for the FPS* statistic: real frames + generated ones).
+void qlFrameGenNoteGenerated();
+unsigned qlFrameGenTakeGenerated();

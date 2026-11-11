@@ -4110,6 +4110,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         VK_HITCH_SCOPE("ql_frameGenSubmit");
         VK_CHECK(vkQueueSubmit2(mImpl->mDevice.queue(), 1, &gsub, mImpl->mSwapchain.genFence()));
         ++mImpl->mFgFrames;
+        qlFrameGenNoteGenerated();   // (the FPS* statistic)
         if (mImpl->mFgFrames == 1 || mImpl->mFgFrames % 3600 == 0)
             LL_INFOS("Vulkan") << "Quasar frame generation: " << mImpl->mFgFrames << " generated frames, "
                                << mImpl->mSwapchain.pacedPresents() << " paced presents" << LL_ENDL;
