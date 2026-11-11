@@ -12564,7 +12564,7 @@
     <key>Type</key>
     <string>F32</string>
     <key>Value</key>
-    <real>400.0</real>
+    <real>100.0</real>
   </map>
   <key>QuasarFootIKWalkHips</key>
   <map>

@@ -5590,7 +5590,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // degrees in one frame from a 1.5 cm change. A leg not solved last frame starts
         // fresh (no stale correction to clamp toward).
         {
-            static LLCachedControl<F32> s_bend_rate(gSavedSettings, "QuasarFootIKMaxBendRate", 400.f);
+            static LLCachedControl<F32> s_bend_rate(gSavedSettings, "QuasarFootIKMaxBendRate", 100.f);
             const F32 last = leg.bend_last;
             leg.bend_last = QL_NO_BEND;
             auto knee_bend = [a, b](F32 length)
