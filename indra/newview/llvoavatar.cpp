@@ -5242,6 +5242,10 @@ namespace
         return t * t * (3.f - 2.f * t);
     }
 
+    // QLFootIKLeg::bend_last when no correction is carried over (the last frame did not
+    // solve that leg).
+    const F32 QL_NO_BEND = -1000.f;
+
     // The joint writes of the IK are the pose's, like the blender's: no GPU ext write.
     struct QLAnimApplyScope
     {
@@ -5369,7 +5373,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     if (!wanted)
     {
         mQLFootIKTracking = false;
-        mQLFootIKLeg[0].bend_last = mQLFootIKLeg[1].bend_last = -1.f;
+        mQLFootIKLeg[0].bend_last = mQLFootIKLeg[1].bend_last = QL_NO_BEND;
         return;
     }
 
@@ -5398,6 +5402,10 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     // Smoothing: about a tenth of a second to follow a change of ground.
     const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
     const F32 follow = mQLFootIKTracking ? 1.f - expf(-dt * 12.f) : 1.f;
+    if (!mQLFootIKTracking)
+    {
+        mQLFootIKLeg[0].bend_last = mQLFootIKLeg[1].bend_last = QL_NO_BEND;   // starting fresh
+    }
 
     // Both feet off the ground in the animation (a hover pose, a jump): the animation's.
     const F32 float_fade = 1.f - ql_smoothstep(0.30f, 0.50f, low_ankle - ref_z);
@@ -5514,6 +5522,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     }
     if (!needed)
     {
+        mQLFootIKLeg[0].bend_last = mQLFootIKLeg[1].bend_last = QL_NO_BEND;
         return;   // level ground, or the feet are the animation's: the animation as it is
     }
 
@@ -5574,25 +5583,35 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         {
             c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.001f);
         }
-        // How fast the knee may bend or straighten (QuasarFootIKMaxBendRate, degrees a
-        // second). A walking leg is nearly straight, where a centimetre of reach is many
-        // degrees of knee: the log showed 18 degrees in one frame from a 1.5 cm change.
+        // How fast the IK's CORRECTION of the knee may change (QuasarFootIKMaxBendRate,
+        // degrees a second): the bend it adds to or takes from the animation's own, which
+        // stays free -- a walk bends the knee fast itself. A walking leg is nearly
+        // straight, where a centimetre of reach is many degrees of knee: the log showed 18
+        // degrees in one frame from a 1.5 cm change. A leg not solved last frame starts
+        // fresh (no stale correction to clamp toward).
         {
             static LLCachedControl<F32> s_bend_rate(gSavedSettings, "QuasarFootIKMaxBendRate", 400.f);
-            const F32 cos_knee = llclamp((a * a + b * b - c * c) / (2.f * a * b), -1.f, 1.f);
-            F32 bend = F_PI - acosf(cos_knee);
-            if ((F32)s_bend_rate > 0.f && leg.bend_last >= 0.f && mQLFootIKTracking)
+            const F32 last = leg.bend_last;
+            leg.bend_last = QL_NO_BEND;
+            auto knee_bend = [a, b](F32 length)
+            {
+                return F_PI - acosf(llclamp((a * a + b * b - length * length) / (2.f * a * b), -1.f, 1.f));
+            };
+            const F32 anim_bend = knee_bend((ankle - hip).length());
+            F32 correction = knee_bend(c) - anim_bend;
+            if ((F32)s_bend_rate > 0.f && last > QL_NO_BEND * 0.5f && mQLFootIKTracking)
             {
                 const F32 max_change = (F32)s_bend_rate * DEG_TO_RAD * dt;
-                const F32 limited = llclamp(bend, leg.bend_last - max_change, leg.bend_last + max_change);
-                if (limited != bend)
+                const F32 limited = llclamp(correction, last - max_change, last + max_change);
+                if (limited != correction)
                 {
-                    bend = limited;
+                    correction = limited;
+                    const F32 bend = llclamp(anim_bend + correction, 0.f, F_PI);
                     c = sqrtf(llmax(0.f, a * a + b * b + 2.f * a * b * cosf(bend)));
                     c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.0005f);
                 }
             }
-            leg.bend_last = bend;
+            leg.bend_last = correction;
         }
 
         // The bend plane. The knee bends toward its kneecap -- the knee joint's own forward
