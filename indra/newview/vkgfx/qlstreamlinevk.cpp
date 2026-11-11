@@ -535,11 +535,19 @@ void frameBegin(const FrameSettings& s)
     if (!want && sFGOn) setFrameGenMode(false);
     sFGArmed = want;
     // Generated frames Streamline actually showed (FPS*), now and then.
-    if (sFGOn && slDLSSGGetState && (sFrame % 15) == 0)
+    if (sFGOn && slDLSSGGetState)
     {
+        // Each frame: how many frames the last present actually showed (2 = one generated).
         sl::DLSSGState st{};
-        if (slDLSSGGetState(viewport(), st, nullptr) == sl::Result::eOk && st.numFramesActuallyPresented > 1)
-            sGenerated.fetch_add((st.numFramesActuallyPresented - 1) * 15, std::memory_order_relaxed);
+        if (slDLSSGGetState(viewport(), st, nullptr) == sl::Result::eOk)
+        {
+            if (st.numFramesActuallyPresented > 1)
+                sGenerated.fetch_add(st.numFramesActuallyPresented - 1, std::memory_order_relaxed);
+            if ((sFrame % 600) == 0)
+                QL_SL_INFO("DLSS Frame Generation state: " << st.numFramesActuallyPresented
+                           << " frames shown per real frame, status " << (int)st.status
+                           << ", minimum size " << st.minWidthOrHeight);
+        }
     }
 #else
     (void)s;
