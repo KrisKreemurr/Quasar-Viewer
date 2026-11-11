@@ -12632,6 +12632,17 @@
     <key>Value</key>
     <real>0.85</real>
   </map>
+  <key>QuasarBodyCollisionLegs</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: the arms rest on the thighs too (hands on big thighs, sitting or standing), not only the torso.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionDebug</key>
   <map>
     <key>Comment</key>

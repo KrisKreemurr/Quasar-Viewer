@@ -5953,10 +5953,14 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     // The pose as it now stands (the animation's, after foot IK).
     mRoot->updateWorldMatrixChildren();
 
-    static const char* const TORSO[] = { "PELVIS", "BUTT", "BELLY", "LOWER_BACK", "CHEST", "LEFT_PEC", "RIGHT_PEC", "UPPER_BACK" };
+    // The body the arms rest on: the torso, and the thighs (hands on big thighs, sitting or
+    // standing); QuasarBodyCollisionLegs leaves the thighs out.
+    static LLCachedControl<bool> s_legs(gSavedSettings, "QuasarBodyCollisionLegs", true);
+    static const char* const TORSO[] = { "PELVIS", "BUTT", "BELLY", "LOWER_BACK", "CHEST", "LEFT_PEC", "RIGHT_PEC", "UPPER_BACK",
+                                         "L_UPPER_LEG", "R_UPPER_LEG" };
     static const char* const ARM[2][3] = { { "L_UPPER_ARM", "L_LOWER_ARM", "L_HAND" },
                                            { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
-    constexpr S32 MAX_TORSO = 8;
+    constexpr S32 MAX_TORSO = 10;
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
     S32 torso_count = 0;
@@ -5970,6 +5974,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         {
             if (name == t)
             {
+                if (!s_legs && (name == "L_UPPER_LEG" || name == "R_UPPER_LEG"))
+                {
+                    matched = true;
+                    break;
+                }
                 if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count]))
                 {
                     for (LLVector3& axis : torso[torso_count].axis) axis *= body_size;

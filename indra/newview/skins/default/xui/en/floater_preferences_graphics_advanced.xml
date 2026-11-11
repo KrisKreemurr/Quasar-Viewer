@@ -851,6 +851,17 @@ Only used with a DLSS upscaling mode.
             width="350"
             left="30"
             top="464" />
+          <check_box
+            control_name="QuasarBodyCollisionLegs"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Hands on the thighs too"
+            layout="topleft"
+            name="QuasarBodyCollisionLegs"
+            tool_tip="Keep the hands and arms out of the thighs as well (hands resting on big thighs, sitting or standing), not only the torso."
+            width="250"
+            left="334"
+            top="442" />
         </panel>
       </scroll_container>
     </panel>
