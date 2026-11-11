@@ -55,6 +55,12 @@ if ! make windows 2>&1 | tee ~/quasar-build.log; then
   grep -E -A3 " error:|Killed|signal|CMake Error" ~/quasar-build.log | grep -v -E "warning:|^/usr/lib/llvm" | head -60 || echo "(no error message: the compiler was most likely out of memory; run: NINJA_JOBS=2 bash setup.sh)"
   exit 1
 fi
+# Windows won't let a running viewer's files be replaced: wait for it to close
+if tasklist.exe 2>/dev/null | grep -qi "SlipstreamViewer.exe"; then
+  echo ">>> The viewer is running: close it and the new build will be copied in."
+  while tasklist.exe 2>/dev/null | grep -qi "SlipstreamViewer.exe"; do sleep 2; done
+  sleep 2
+fi
 rm -rf /mnt/c/dev/QuasarSlipstream
 7z x -o/mnt/c/dev/QuasarSlipstream build-windows-x86_64/package/*_win64.zip >/dev/null
 # A desktop shortcut straight to the exe, wherever the zip put it
