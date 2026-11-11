@@ -32,9 +32,14 @@ fi
 [ -d ~/.xwin ] || xwin --accept-license splat --output ~/.xwin
 [ -d ~/quasar-slipstream ] || git clone --branch quasar/slipstream --single-branch https://github.com/KrisKreemurr/Quasar-Viewer.git ~/quasar-slipstream
 cd ~/quasar-slipstream
-# Follow the branch exactly (it may be rebuilt on a newer Slipstream, which a plain pull refuses)
-git fetch origin quasar/slipstream
-git reset --hard FETCH_HEAD
+# Follow the branch exactly (it may be rebuilt on a newer Slipstream, which a plain pull
+# refuses), then run the NEW copy of this script: bash reads a script as it goes, so one
+# that the update rewrote under it would run half old, half new.
+if [ "${1:-}" != "--updated" ]; then
+  git fetch origin quasar/slipstream
+  git reset --hard FETCH_HEAD
+  exec bash ./setup.sh --updated
+fi
 # A different Slipstream version under the same build folder starts its configure fresh
 # (downloaded libraries and compiled files that still match are kept)
 VER=$(cat indra/newview/VIEWER_VERSION.txt)
@@ -106,5 +111,5 @@ if ($exe) {
 PS1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\dev\make-quasar-shortcut.ps1' >/dev/null 2>&1 || true
 # A double-click rebuild for Windows, so Linux never has to be opened again
-printf '@echo off\r\nwsl -d Ubuntu-24.04 -- bash -lc "~/quasar-slipstream/setup.sh"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
+printf '@echo off\r\nwsl -d Ubuntu-24.04 -- bash -lc "cd ~/quasar-slipstream && git fetch -q origin quasar/slipstream && git reset -q --hard FETCH_HEAD && bash ./setup.sh --updated"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
 echo "Done: C:\\dev\\QuasarSlipstream  (next time, double-click C:\\dev\\Build-Quasar.bat)"
