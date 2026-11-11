@@ -5433,6 +5433,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
 
     F32 step[2];
     LLVector3 ground_norm[2];
+    F32 level_gap = 0.f;   // the larger ground difference of the two feet, before the dead zone
     for (S32 i = 0; i < 2; ++i)
     {
         F32 ground_z = ref_z;
@@ -5444,6 +5445,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // correct), fading in to the full difference by 1.5 times it.
         static LLCachedControl<F32> s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.04f);
         const F32 measured = ground_z - ref_z;
+        level_gap = llmax(level_gap, fabsf(measured));
         const F32 dz = llmax(0.f, (F32)s_dead_zone);
         const F32 raw = dz > 0.f ? measured * ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) : measured;
         // A foot the animation lifts above the other stays lifted; a drop past what a
@@ -5500,7 +5502,11 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 average = 0.5f * (step[0] + step[1]);
         const F32 SOFT = 0.06f;
         const F32 h = llmax(SOFT - fabsf(step[0] - step[1]), 0.f) / SOFT;
-        const F32 soft_low = llmin(step[0], step[1]) - h * h * SOFT * 0.25f;
+        // Near-level feet lean to the average, which the lower foot equals when they are
+        // level -- so level feet give no drop at all. (The first form, min - h*h*SOFT/4,
+        // dropped the hips 1.5 cm whenever the feet were level: on flat ground, always.)
+        const F32 low = llmin(step[0], step[1]);
+        const F32 soft_low = low + (average - low) * h * h;
         const F32 walk_target = llmin(0.f, average + (soft_low - average) * hips);
         drop_target += (walk_target - drop_target) * walking;
     }
@@ -5522,10 +5528,22 @@ void LLVOAvatar::qlFootIKApply(bool visible)
             dbg_raw[0], mQLFootIKLeg[0].ground, mQLFootIKLeg[0].fade, mQLFootIKLeg[0].plant, dbg_speed[0], step[0],
             dbg_raw[1], mQLFootIKLeg[1].ground, mQLFootIKLeg[1].fade, mQLFootIKLeg[1].plant, dbg_speed[1], step[1]) << LL_ENDL;
     }
+    // LEVEL GROUND = NO IK AT ALL. The dead zone gates the foot tilt too: terrain that
+    // reads as level by height still has patches over 5 degrees, and the tilt alone kept
+    // the IK running on flat ground. Both feet within the dead zone of the ground under
+    // the pelvis: no tilt, no step, nothing written -- the animation as it is. The tilt
+    // fades in with the steps (from half the dead zone to 1.5 times it).
+    F32 level_gate = 1.f;
+    {
+        static LLCachedControl<F32> s_level_dz(gSavedSettings, "QuasarFootIKDeadZone", 0.04f);
+        const F32 dz = llmax(0.f, (F32)s_level_dz);
+        level_gate = dz > 0.f ? ql_smoothstep(0.5f * dz, 1.5f * dz, level_gap) : 1.f;
+    }
     bool needed = false;
     for (S32 i = 0; i < 2; ++i)
     {
-        const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD);
+        const bool tilts = mQLFootIKLeg[i].fade * strength * level_gate > 0.001f
+                           && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD);
         needed = needed || fabsf(step[i]) >= 0.001f || tilts || drop < -0.001f;
     }
     if (!needed)
@@ -5716,7 +5734,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
                 i == 0 ? "L" : "R", deg(swing), deg(twist), deg(knee_turn), c / reach, off_plane) << LL_ENDL;
         }
 
-        const F32 tilt_amount = leg.fade * strength;
+        const F32 tilt_amount = leg.fade * strength * level_gate;
         LLQuaternion tilt;
         const F32 slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
         // Slopes under 5 degrees count as level for the foot's tilt (fading in to 10).
