@@ -6344,10 +6344,15 @@ namespace
         std::nth_element(dist.begin(), dist.begin() + at60, dist.end());
         const F64 scale = dist[at60];
         if (!(scale > 0.0) || !std::isfinite(scale)) return false;
+        // Still that body part: half sizes within half to twice the even fit, the centre
+        // within 0.6 of it (in the volume's units) -- a fit that wants more is reaching into
+        // a neighbour's mesh.
+        const F32 half_lo = llmax(0.6f, 0.5f * even), half_hi = llmin(4.f, 2.f * even);
+        const F32 move = 0.6f * even;
         for (S32 k = 0; k < 3; ++k)
         {
-            half_out[k] = llclamp((F32)(h[k] * scale), 0.6f, 4.f);
-            centre_out[k] = llclamp((F32)c[k], -2.f, 2.f);
+            half_out[k] = llclamp((F32)(h[k] * scale), half_lo, half_hi);
+            centre_out[k] = llclamp((F32)c[k], -move, move);
         }
 
         // Never worse: the average gap from each vertex to the shape's surface (along the
@@ -6403,7 +6408,7 @@ namespace
         std::vector<U32> hist;
         U32    samples[10] = {};
         U32    decoded = 0, direct = 0, missing = 0;
-        std::vector<LLVector3> points[10];   // each volume's vertices in its unit space (shaped fit)
+        std::vector<LLVector3> points[10];   // each volume's weighted vertices in its unit space (shaped fit)
         // Fitting, after measuring: the even fits at once, then one area's shaped fit a frame.
         bool   evens_done = false;
         S32    fit_next = 0;
@@ -6605,7 +6610,11 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
                 const F32 dist = unit.length();
                 job.hist[(size_t)slot * BINS + llclamp((S32)(dist / BIN), 0, BINS - 1)]++;
                 job.samples[slot]++;
-                if (dist < 6.f) job.points[slot].push_back(unit);
+                // The shaped fit uses only vertices weighted to this volume: a main-bone vertex's
+                // "nearest volume" is a guess (a body rigged to the main bones gave PELVIS 5,000 of
+                // them, up to the waist, and the shaped fit stretched the hips into a column the
+                // hanging arms hit). Guesses still count toward the even fit, as before.
+                if (dist < 6.f && fitted) job.points[slot].push_back(unit);
             }
             job.phase += n;
         }
@@ -6641,9 +6650,28 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         const S32 t = job.fit_next++;
         QLBodyShape& shape = job.shape[t];
         shape = QLBodyShape();
-        if (job.samples[t] >= 30)
+        if (job.points[t].size() >= 60)
         {
+            // Volumes down the middle of the body (not a breast or a thigh) stay symmetric:
+            // the vertices and their mirror images side to side (the volume's second axis), so
+            // a shape can't drift to one side (one fit moved the hips a third of their width
+            // left, into the left arm).
+            const std::string area = names[t];
+            const bool middle = area == "PELVIS" || area == "BUTT" || area == "BELLY" || area == "LOWER_BACK"
+                                || area == "CHEST" || area == "UPPER_BACK";
+            if (middle)
+            {
+                const size_t own = job.points[t].size();
+                job.points[t].reserve(own * 2);
+                for (size_t i = 0; i < own; ++i)
+                {
+                    LLVector3 mirrored = job.points[t][i];
+                    mirrored.mV[1] = -mirrored.mV[1];
+                    job.points[t].push_back(mirrored);
+                }
+            }
             shape.shaped = ql_fit_shape(job.points[t], job.fit[t], shape.half, shape.centre);
+            if (shape.shaped && middle) shape.centre[1] = 0.f;
             if (!shape.shaped) shape = QLBodyShape();
         }
         s_budget_used += fit_timer.getElapsedTimeF64() * 1000.0;
