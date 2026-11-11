@@ -58,6 +58,7 @@
 #include "llviewerparceloverlay.h"
 #include "llviewerregion.h"
 #include "llviewerstats.h"
+namespace LLStatViewer { extern LLTrace::CountStatHandle<> FPS_SHOWN; }   // Quasar (llviewerstats.cpp)
 #include "lltracerecording.h"
 #include "llviewerwindow.h"
 #include "llframetimer.h"
@@ -392,7 +393,24 @@ void LLStatusBar::refresh()
     {
         mFPSUpdateTimer.reset();
         F32 fps = (F32)LLTrace::get_frame_recording().getLastRecording().getMean(LLStatViewer::FPS_SAMPLE);
-        mTextFPS->setText(std::to_string(llfloor(fps)));
+        // Quasar: with frame generation, the frames shown (rendered + generated), marked *;
+        // the tooltip keeps the rendered rate.
+        static F32 sShownRatio = 1.f;
+        {
+            LLTrace::Recording& rec = LLTrace::get_frame_recording().getLastRecording();
+            const F64 rendered = rec.getSum(LLStatViewer::FPS);
+            const F64 shown = rec.getSum(LLStatViewer::FPS_SHOWN);
+            const F32 ratio = rendered > 0.0 ? (F32)(shown / rendered) : 1.f;
+            sShownRatio += (llclamp(ratio, 1.f, 8.f) - sShownRatio) * 0.25f;
+        }
+        if (sShownRatio > 1.05f)
+        {
+            mTextFPS->setText(std::to_string(llfloor(fps * sShownRatio)) + "*");
+            mTextFPS->setToolTip("Frames shown, generated ones included (*). Rendered: " + std::to_string(llfloor(fps))
+                                 + " fps. Click for frame timings, Shift+click for statistics.");
+        }
+        else
+            mTextFPS->setText(std::to_string(llfloor(fps)));
     }
 }
 
