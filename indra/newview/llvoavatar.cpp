@@ -136,6 +136,7 @@
 #include "llcleanmeshasset.h"   // Quasar body collision auto-fit: raw mesh bytes of released geometry
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <unordered_map>
 
 #include "llperfstats.h"
@@ -6546,6 +6547,12 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
                 for (const LLPointer<LLViewerObject>& child : object->getChildren()) consider(child.get());
             }
         }
+        // The size limit is part of what was measured with: moving the slider measures
+        // everyone again (a stranger can't be asked to change clothes to pick it up).
+        U32 limit_bits = 0;
+        const F32 limit = s_fit_max;
+        memcpy(&limit_bits, &limit, sizeof(limit_bits));
+        key = (key ^ limit_bits) * 1099511628211ULL;
         if (key != mQLBodyFitKey)
         {
             QLFitJob job;
