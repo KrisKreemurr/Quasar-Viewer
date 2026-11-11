@@ -12503,13 +12503,13 @@
   <key>QuasarFrameGenBlend</key>
   <map>
     <key>Comment</key>
-    <string>Quasar frame generation: blend the previous frame into the in-between frame where both agree (smoother); off = the current frame warped back alone. Live.</string>
+    <string>Quasar frame generation: blend the previous frame into the in-between frame where both agree (smoother); off = the current frame warped back alone. Off by default: where the game has no motion for something that moves (an animated avatar), blending overlays its two positions (a ghost). Live.</string>
     <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
-    <integer>1</integer>
+    <integer>0</integer>
   </map>
   <key>QuasarFrameGenShowGenerated</key>
   <map>

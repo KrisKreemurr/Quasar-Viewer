@@ -8,7 +8,7 @@ struct QLFrameGenTuning
 {
     float motionScale = 1.f;   // QuasarFrameGenMotionScale
     bool  flipMotionY = false; // QuasarFrameGenFlipMotionY
-    bool  blendPrev = true;    // QuasarFrameGenBlend
+    bool  blendPrev = false;    // QuasarFrameGenBlend
     bool  showGenerated = true;// QuasarFrameGenShowGenerated (false: the generated frame is a copy of the real one)
 };
 void qlSetFrameGenWanted(bool on);

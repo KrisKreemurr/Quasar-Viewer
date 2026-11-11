@@ -3687,7 +3687,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     {
         static LLCachedControl<F32> fgScale(gSavedSettings, "QuasarFrameGenMotionScale", 1.f);
         static LLCachedControl<bool> fgFlipY(gSavedSettings, "QuasarFrameGenFlipMotionY", false);
-        static LLCachedControl<bool> fgBlend(gSavedSettings, "QuasarFrameGenBlend", true);
+        static LLCachedControl<bool> fgBlend(gSavedSettings, "QuasarFrameGenBlend", false);
         static LLCachedControl<bool> fgShow(gSavedSettings, "QuasarFrameGenShowGenerated", true);
         QLFrameGenTuning tun;
         tun.motionScale = fgScale;
