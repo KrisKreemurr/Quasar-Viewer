@@ -777,6 +777,22 @@ private:
     QLBodyArm   mQLBodyArm[2];
     bool        mQLBodyApplied = false;
     bool        mQLBodyTracking = false;
+    // QUASAR SOFT CONTACT (QuasarSoftContact, llvoavatar.cpp "QUASAR SOFT CONTACT"): an arm
+    // pressing into a breast, the butt or the belly dents it (part moved away, part
+    // squashed flat) instead of only being pushed out, and it springs back with the
+    // avatar's own Physics-layer spring and damping, slower the bigger the part. Per body
+    // shape (body collision's TORSO order); drawn by setting the volume's world matrix
+    // for the frame, so nothing about the avatar itself changes.
+    struct QLSoftPart
+    {
+        LLAvatarJointCollisionVolume* volume = nullptr;
+        LLVector3 x, v;                   // the dent and its speed, in the volume's parent frame (m)
+        LLVector3 shape_c, shape_a[3];    // this frame's fitted shape (world), squashed about
+        bool      drawn = false;          // its world matrix holds a dent this frame
+    };
+    QLSoftPart  mQLSoft[10];
+    bool        mQLSoftDrawn = false;
+    void        qlSoftContactDraw();
     void        qlBodyCollisionApply(bool visible);
     static F32  qlBodyAreaScale(const std::string& volume);   // per-area size multiplier (settings)
     void        qlBodyCollisionFit(const void* torso, const S32* kind, const char* const* names, S32 count);

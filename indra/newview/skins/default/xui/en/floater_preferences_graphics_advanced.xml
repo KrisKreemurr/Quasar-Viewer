@@ -903,6 +903,70 @@ Only used with a DLSS upscaling mode.
             width="250"
             left="334"
             top="530" />
+          <check_box
+            control_name="QuasarSoftContact"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Soft breasts, butt and belly"
+            layout="topleft"
+            name="QuasarSoftContact"
+            tool_tip="An arm pressing into a breast, the butt or the belly dents it and it springs back, using that avatar's own Physics layer (bigger parts move slower and heavier). Seen in Quasar Viewer only."
+            width="300"
+            left="30"
+            top="552" />
+          <slider
+            control_name="QuasarSoftContactGive"
+            enabled_control="QuasarSoftContact"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="0.5"
+            label="Softness:"
+            label_width="90"
+            layout="topleft"
+            min_val="0"
+            max_val="1"
+            name="QuasarSoftContactGive"
+            show_text="true"
+            tool_tip="How much a soft part gives way under an arm: 0 = the arm is pushed out, 1 = the part takes the whole press."
+            width="250"
+            left="334"
+            top="552" />
+          <slider
+            control_name="QuasarSoftContactWobble"
+            enabled_control="QuasarSoftContact"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="Wobble:"
+            label_width="90"
+            layout="topleft"
+            min_val="0"
+            max_val="2"
+            name="QuasarSoftContactWobble"
+            show_text="true"
+            tool_tip="How much a pressed part wobbles as it springs back: 0 = none, 1 = the avatar's own physics, 2 = twice as lively."
+            width="250"
+            left="30"
+            top="574" />
+          <combo_box
+            control_name="QuasarSoftContactNoPhysics"
+            enabled_control="QuasarSoftContact"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            left="334"
+            name="QuasarSoftContactNoPhysics"
+            tool_tip="For avatars wearing no Physics layer for a part (they never set up jiggle)."
+            top="572"
+            width="250">
+            <combo_box.item label="No physics worn: leave still" name="NoPhysicsOff" value="0" />
+            <combo_box.item label="No physics worn: dent only" name="NoPhysicsDent" value="1" />
+            <combo_box.item label="No physics worn: default physics" name="NoPhysicsDefault" value="2" />
+          </combo_box>
           <slider
             control_name="QuasarBodyCollisionChest"
             enabled_control="QuasarBodyCollision"

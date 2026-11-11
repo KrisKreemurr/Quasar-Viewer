@@ -366,6 +366,10 @@ public:
     void setSkinOffset( const LLVector3 &offset);
 
     LLXformMatrix   *getXform() { return &mXform; }
+    // Quasar soft contact: this frame's world matrix, set directly (for a leaf joint -- a
+    // collision volume dented by an arm). Nothing local changes, so the next
+    // touch(MATRIX_DIRTY) + update rebuilds it from the local transform as usual.
+    void setWorldMatrixForFrame(const LLMatrix4& mat) { mXform.setWorldMatrix(mat); mWorldMatrix.loadu(mat); }
 
     void clampRotation(LLQuaternion old_rot, LLQuaternion new_rot);
 

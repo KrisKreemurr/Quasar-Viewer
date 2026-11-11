@@ -5180,6 +5180,9 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
         qlHandFootApply(visible);
         qlBodyCollisionApply(visible);
         mRoot->updateWorldMatrixChildren();
+        // Soft contact draws its dents into the finished world matrices (last: nothing
+        // after this rebuilds them this frame).
+        qlSoftContactDraw();
     }
     else
     {
@@ -5348,6 +5351,18 @@ void LLVOAvatar::qlGroundUnder(const LLVector3& pos_agent, F32 up, F32 down, F32
 
 void LLVOAvatar::qlFootIKRestore()
 {
+    // Soft contact's dents live only in last frame's world matrices: mark those volumes to
+    // be rebuilt from their own (untouched) local transforms.
+    if (mQLSoftDrawn)
+    {
+        mQLSoftDrawn = false;
+        for (QLSoftPart& part : mQLSoft)
+        {
+            if (!part.drawn) continue;
+            part.drawn = false;
+            if (part.volume) part.volume->touch(LLJoint::MATRIX_DIRTY);
+        }
+    }
     // Body collision's shoulders (the same rule: only where the joint still holds the write).
     if (mQLBodyApplied)
     {
@@ -6204,6 +6219,71 @@ namespace
         return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f));
     }
 
+    // QUASAR SOFT CONTACT helpers.
+    //
+    // How far an ellipsoid's surface is from its centre along a unit direction.
+    F32 ql_radius_along(const LLVector3 axis[3], const LLVector3& n)
+    {
+        F32 sum = 0.f;
+        for (S32 k = 0; k < 3; ++k)
+        {
+            const F32 u = (n * axis[k]) / llmax(axis[k].lengthSquared(), 1.0e-12f);
+            sum += u * u;
+        }
+        return sum > 1.0e-12f ? 1.f / sqrtf(sum) : 0.f;
+    }
+
+    // One frame of a damped spring pulling x toward target (omega: natural frequency, rad/s;
+    // zeta: damping ratio, 1 = no overshoot), in steps of at most 1/120 s so a slow frame
+    // can't make it blow up; the dent never grows past max_len.
+    void ql_soft_spring(LLVector3& x, LLVector3& v, const LLVector3& target, F32 omega, F32 zeta, F32 dt, F32 max_len)
+    {
+        const S32 steps = llclamp((S32)ceilf(dt * 120.f), 1, 24);
+        const F32 h = dt / (F32)steps;
+        for (S32 s = 0; s < steps; ++s)
+        {
+            const LLVector3 a = (target - x) * (omega * omega) - v * (2.f * zeta * omega);
+            v += a * h;
+            x += v * h;
+            const F32 len = x.length();
+            if (len > max_len && len > 0.f)
+            {
+                x *= max_len / len;
+                const LLVector3 dir = x / max_len;
+                const F32 out = v * dir;
+                if (out > 0.f) v -= dir * out;   // pressed to the limit: no further outward speed
+            }
+        }
+        if (!x.isFinite() || !v.isFinite())
+        {
+            x.clearVec();
+            v.clearVec();
+        }
+    }
+
+    // A volume's world matrix (rows 0-2 = semi-axis vectors, row 3 = centre) squashed by k
+    // along the unit direction n -- with half that much bulge across it, roughly keeping its
+    // volume -- about squash_centre, then moved by shift. Fitted mesh weighted to the volume
+    // follows: a point p becomes squash_centre + (p - squash_centre) S + shift, with
+    // S = (1 + b) I - (k + b) n n (b = k / 2).
+    void ql_squash_matrix(F32 m[4][4], const LLVector3& n, F32 k, const LLVector3& squash_centre, const LLVector3& shift)
+    {
+        const F32 b = 0.5f * k;
+        auto apply = [&](const LLVector3& r) { return r * (1.f + b) - n * ((k + b) * (r * n)); };
+        for (S32 row = 0; row < 3; ++row)
+        {
+            const LLVector3 r = apply(LLVector3(m[row][0], m[row][1], m[row][2]));
+            m[row][0] = r.mV[0];
+            m[row][1] = r.mV[1];
+            m[row][2] = r.mV[2];
+        }
+        const LLVector3 c(m[3][0], m[3][1], m[3][2]);
+        const LLVector3 moved = squash_centre + apply(c - squash_centre) + shift;
+        m[3][0] = moved.mV[0];
+        m[3][1] = moved.mV[1];
+        m[3][2] = moved.mV[2];
+    }
+
     // Solves the 6x6 system H x = b (Gaussian elimination with partial pivoting).
     bool ql_solve6(F64 H[6][6], F64 b[6], F64 x[6])
     {
@@ -6829,6 +6909,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     if (!wanted)
     {
         mQLBodyTracking = false;
+        for (QLSoftPart& part : mQLSoft)
+        {
+            part.x.clearVec();
+            part.v.clearVec();
+        }
         return;
     }
 
@@ -6846,6 +6931,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
     S32 torso_kind[MAX_TORSO] = {};   // index into TORSO (mQLBodyFit's order)
+    LLAvatarJointCollisionVolume* torso_vol[MAX_TORSO] = {};
     S32 torso_count = 0;
     LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
     for (S32 v = 0; v < mNumCollisionVolumes; ++v)
@@ -6865,6 +6951,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 }
                 if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count]))
                 {
+                    torso_vol[torso_count] = volume;
                     torso_kind[torso_count] = kind;
                     torso_name[torso_count++] = t;
                 }
@@ -6912,6 +6999,130 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     {
         pivot[i] = shoulders[i]->getWorldPosition();
         for (S32 k = 0; k < 3; ++k) have[i][k] = ql_capsule(arm_volume[i][k], k == 0 ? 0.35f : 0.f, caps[i][k]);
+    }
+
+    // QUASAR SOFT CONTACT. A breast, the butt or the belly gives way under an arm: of how
+    // deep the animation puts an arm into one (as animated, before any correction), a share
+    // (QuasarSoftContactGive, 0.5) becomes that part's dent and only the rest pushes the arm
+    // out -- the arm is solved below against the part as dented. The dent follows a damped
+    // spring in the part's parent frame (it rides with the body), so it presses in over a
+    // moment and, when the arm leaves, springs back -- with the avatar's own Physics layer:
+    // its spring and damping for that part (SL's defaults 10 and 0.2 are a bouncy spring),
+    // and slower the bigger the part (frequency / size^0.35: a 9x hyper breast moves about
+    // half as fast). An avatar wearing no physics for that part (all its Max Effect 0) gets
+    // QuasarSoftContactNoPhysics: 0 nothing, 1 (default) a dent that returns without
+    // wobbling, 2 SL's default physics. QuasarSoftContactWobble scales the wobble (0 none,
+    // 1 the avatar's own, 2 twice as lively).
+    {
+        static LLCachedControl<bool> s_soft(gSavedSettings, "QuasarSoftContact", true);
+        static LLCachedControl<F32>  s_give(gSavedSettings, "QuasarSoftContactGive", 0.5f);
+        static LLCachedControl<F32>  s_wobble(gSavedSettings, "QuasarSoftContactWobble", 1.f);
+        static LLCachedControl<S32>  s_no_physics(gSavedSettings, "QuasarSoftContactNoPhysics", 1);
+        const F32 soft_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+        const F32 give = llclamp((F32)s_give, 0.f, 1.f);
+        const F32 wobble = llclamp((F32)s_wobble, 0.f, 2.f);
+        for (S32 t = 0; t < torso_count; ++t)
+        {
+            const S32 kind = torso_kind[t];
+            // TORSO order: BUTT 1, BELLY 2, LEFT_PEC 5, RIGHT_PEC 6
+            const S32 part_of = kind == 5 || kind == 6 ? 0 : kind == 1 ? 1 : kind == 2 ? 2 : -1;
+            if (part_of < 0) continue;
+            QLSoftPart& part = mQLSoft[kind];
+            part.volume = torso_vol[t];
+            part.shape_c = torso[t].c;
+            for (S32 k = 0; k < 3; ++k) part.shape_a[k] = torso[t].axis[k];
+            LLJoint* parent = torso_vol[t] ? torso_vol[t]->getParent() : nullptr;
+            if (!s_soft || !parent || give <= 0.f)
+            {
+                part.x.clearVec();
+                part.v.clearVec();
+                continue;
+            }
+
+            // The avatar's own physics for this part.
+            static const char* const PREFIX[3] = { "Breast_Physics_", "Butt_Physics_", "Belly_Physics_" };
+            const std::string pre = PREFIX[part_of];
+            F32 max_effect = getVisualParamWeight((pre + "UpDown_Max_Effect").c_str());
+            if (part_of == 0) max_effect += getVisualParamWeight((pre + "InOut_Max_Effect").c_str());
+            if (part_of != 2) max_effect += getVisualParamWeight((pre + "LeftRight_Max_Effect").c_str());
+            F32 spring = 10.f, damping = 0.2f, mass = 0.1f;
+            bool wobbles = true;
+            if (max_effect > 0.f)
+            {
+                spring = getVisualParamWeight((pre + "UpDown_Spring").c_str());
+                damping = getVisualParamWeight((pre + "UpDown_Damping").c_str());
+                mass = getVisualParamWeight((pre + "Mass").c_str());
+            }
+            else if (s_no_physics <= 0)
+            {
+                part.x.clearVec();
+                part.v.clearVec();
+                continue;
+            }
+            else if (s_no_physics == 1)
+            {
+                wobbles = false;
+            }
+            mass = llmax(mass, 0.05f);
+            spring = llmax(spring, 0.5f);
+            const F32 size = llclamp(mQLBodyFit[kind], 1.f, 40.f);
+            const F32 omega = llclamp(sqrtf(spring / mass), 4.f, 30.f) / powf(size, 0.35f);
+            // Never below 0.15: SL's default (0.1) is a jiggle that never quite stops --
+            // a dent with it kept wobbling over 3 s after the arm left.
+            F32 zeta = llclamp(damping / (2.f * sqrtf(spring * mass)), 0.15f, 1.f);
+            if (!wobbles) zeta = 1.f;
+            else if (wobble <= 1.f) zeta = 1.f + (zeta - 1.f) * wobble;   // 0: no wobble, 1: the avatar's
+            else zeta = zeta / wobble;                                     // up to twice as lively
+
+            // How deep the animation puts each arm into this part, as animated.
+            LLVector3 target;
+            for (S32 i = 0; i < 2; ++i)
+            {
+                const F32 as_foot = mQLHandFoot[i].fade;
+                if (as_foot >= 0.999f) continue;
+                F32 deepest = 0.f;
+                LLVector3 deepest_push;
+                for (S32 k = 0; k < 3; ++k)
+                {
+                    if (!have[i][k]) continue;
+                    LLVector3 p, d;
+                    if (!ql_penetration(caps[i][k], torso[t], p, d)) continue;
+                    const F32 depth = d.length();
+                    if (depth > deepest) { deepest = depth; deepest_push = d; }
+                }
+                // The arm would be pushed out along d; the part gives way the other way.
+                target -= deepest_push * (give * (1.f - as_foot));
+            }
+            // At most half the part's own depth that way, and 15 cm.
+            F32 max_len = 0.15f;
+            if (target.lengthSquared() > 1.0e-10f)
+            {
+                LLVector3 n = target;
+                n.normVec();
+                max_len = llmin(0.15f, 0.5f * ql_radius_along(torso[t].axis, n));
+                if (target.length() > max_len) target *= max_len / target.length();
+            }
+            const LLQuaternion parent_rot = parent->getWorldRotation();
+            const LLVector3 target_local = target * ~parent_rot;
+            if (!mQLBodyTracking)
+            {
+                part.x.clearVec();
+                part.v.clearVec();
+            }
+            // While an arm presses, the part is held by it: it settles into the dent without
+            // bouncing (offline: SL's bouncy defaults overshot a 3 cm press to 5 cm). The
+            // avatar's own wobble plays when the arm lets go.
+            const bool pressed = target.lengthSquared() > 1.0e-8f;
+            ql_soft_spring(part.x, part.v, target_local, omega, pressed ? llmax(zeta, 0.7f) : zeta, soft_dt,
+                           llmax(max_len, 0.01f));
+            if (target.lengthSquared() < 1.0e-10f && part.x.lengthSquared() < 1.0e-8f && part.v.lengthSquared() < 1.0e-6f)
+            {
+                part.x.clearVec();   // settled
+                part.v.clearVec();
+            }
+            // The arm meets the part where it is now: dented.
+            torso[t].c += part.x * parent_rot;
+        }
     }
 
     // Solve: a few passes, each turning each arm out of its deepest torso contact, then the
@@ -7039,6 +7250,35 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         arm.shoulder_set = shoulders[i]->getRotation();
     }
     mQLBodyApplied = true;
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR SOFT CONTACT -- drawing the dents (see qlBodyCollisionApply). Each dented part's
+// volume matrix is changed for this frame only: moved by 30 % of the dent, and squashed
+// along it by the other 70 % about the part's far side (the side against the body stays,
+// the side the arm presses flattens), with a little bulge across -- so fitted mesh weighted
+// to it (a mesh breast, butt or belly) shows the press. Restored by qlFootIKRestore.
+//-----------------------------------------------------------------------------
+void LLVOAvatar::qlSoftContactDraw()
+{
+    for (QLSoftPart& part : mQLSoft)
+    {
+        if (!part.volume || part.x.lengthSquared() < 0.0005f * 0.0005f) continue;
+        LLJoint* parent = part.volume->getParent();
+        if (!parent) continue;
+        const LLVector3 dent = part.x * parent->getWorldRotation();
+        const F32 len = dent.length();
+        if (!(len > 0.f)) continue;
+        const LLVector3 n = dent / len;
+        const F32 depth = ql_radius_along(part.shape_a, n);   // centre to surface, the dent's way
+        if (depth <= 0.001f) continue;
+        const F32 k = llclamp(0.7f * len / (2.f * depth), 0.f, 0.5f);
+        LLMatrix4 m = part.volume->getXform()->getWorldMatrix();
+        ql_squash_matrix(m.mMatrix, n, k, part.shape_c + n * depth, dent * 0.3f);
+        part.volume->setWorldMatrixForFrame(m);
+        part.drawn = true;
+        mQLSoftDrawn = true;
+    }
 }
 
 //-----------------------------------------------------------------------------

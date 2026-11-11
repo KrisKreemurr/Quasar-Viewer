@@ -12698,6 +12698,50 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarSoftContact</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact: an arm pressing into a breast, the butt or the belly dents it (part moved, part squashed flat) instead of only being pushed out, and it springs back with the avatar's own Physics layer, slower the bigger the part. Needs QuasarBodyCollision; seen only in this viewer.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarSoftContactGive</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact: how much of an arm's press a soft part takes as a dent (0 = the arm is pushed out as before, 1 = the part takes it all).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.5</real>
+  </map>
+  <key>QuasarSoftContactWobble</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact: how much a dented part wobbles as it springs back (0 = none, 1 = the avatar's own Physics layer, 2 = twice as lively).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1</real>
+  </map>
+  <key>QuasarSoftContactNoPhysics</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact for avatars wearing no physics on a part: 0 = no dent, 1 = a dent that returns without wobbling, 2 = SL's default physics.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>S32</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionFitMax</key>
   <map>
     <key>Comment</key>
