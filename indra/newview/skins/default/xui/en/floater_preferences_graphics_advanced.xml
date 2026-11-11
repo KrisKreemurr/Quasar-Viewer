@@ -792,6 +792,46 @@ Only used with a DLSS upscaling mode.
             width="350"
             left="30"
             top="394" />
+          <check_box
+            control_name="QuasarBodyCollision"
+            height="16"
+            label="Reduce body clipping (arms)"
+            layout="topleft"
+            name="QuasarBodyCollision"
+            tool_tip="Arms that the animation sinks into your belly, chest or hips are turned out at the shoulder so they rest on the body instead. Visual only: every Quasar viewer works it out for the avatars it shows (the same avatars as foot IK)."
+            width="300"
+            left="30"
+            top="420" />
+          <check_box
+            control_name="QuasarBodyCollisionArms"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Arms against each other too"
+            layout="topleft"
+            name="QuasarBodyCollisionArms"
+            tool_tip="Also keep the arms out of each other, for crossed arms and clasped hands. Each arm moves half the way."
+            width="250"
+            left="334"
+            top="420" />
+          <slider
+            control_name="QuasarBodyCollisionOverlap"
+            enabled_control="QuasarBodyCollision"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.005"
+            initial_value="0.01"
+            label="Allowed overlap (m):"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="0.06"
+            name="QuasarBodyCollisionOverlap"
+            show_text="true"
+            tool_tip="How deep an arm may sink into the body (or the other arm) before it is pushed out, so soft contact stays. 0 = touching only."
+            width="350"
+            left="30"
+            top="442" />
         </panel>
       </scroll_container>
     </panel>

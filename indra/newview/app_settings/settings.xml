@@ -12588,6 +12588,50 @@
     <key>Value</key>
     <real>0.01</real>
   </map>
+  <key>QuasarBodyCollision</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: body collision. Arms that the animation sinks into the torso (belly, chest, hips) are turned out at the shoulder so they rest on the body. Visual only, worked out by each viewer; the animation itself is untouched. Same avatars as foot IK (yours, and the closest others).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarBodyCollisionArms</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: also keep the arms out of each other (crossed arms, clasped hands); each arm moves half the way.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarBodyCollisionOverlap</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: how deep (metres) an arm may sink into the body or the other arm before it is pushed out, so soft contact stays.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.01</real>
+  </map>
+  <key>QuasarBodyCollisionDebug</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: log, for your own avatar, each frame how deep the arms are in the torso and in each other and how far the shoulders turn (category QuasarBodyCollision). For diagnosing; leave off.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

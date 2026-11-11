@@ -764,6 +764,19 @@ private:
     void        qlFootIKRestore();
     void        qlFootIKApply(bool visible);
     void        qlGroundUnder(const LLVector3& pos_agent, F32 up, F32 down, F32& out_z, LLVector3& out_norm);
+    // QUASAR BODY COLLISION (QuasarBodyCollision, llvoavatar.cpp "QUASAR BODY COLLISION"):
+    // after the animations (and foot IK), arms that sink into the torso or into each other
+    // are turned out at the shoulder until they rest on the surface. Built like foot IK: a
+    // correction over the animation's own pose, put back before the motions update.
+    struct QLBodyArm
+    {
+        LLQuaternion shoulder_pre, shoulder_set;   // the animation's local / what was written
+        LLQuaternion correction;                    // smoothed, in the shoulder's parent frame
+    };
+    QLBodyArm   mQLBodyArm[2];
+    bool        mQLBodyApplied = false;
+    bool        mQLBodyTracking = false;
+    void        qlBodyCollisionApply(bool visible);
 public:
     // Whether foot IK applies to this avatar this frame (LLCleanAnimStore keeps such an
     // avatar on the CPU animation path, which the IK writes into).

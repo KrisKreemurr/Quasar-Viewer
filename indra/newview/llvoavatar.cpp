@@ -5172,6 +5172,7 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     {
         // Quasar foot IK corrects the finished pose (CPU path only: the IK writes joints).
         qlFootIKApply(visible);
+        qlBodyCollisionApply(visible);
         mRoot->updateWorldMatrixChildren();
     }
     else
@@ -5262,8 +5263,11 @@ void LLVOAvatar::qlFootIKRank()
     if (s_frame == gFrameCount) return;
     s_frame = gFrameCount;
 
-    static LLCachedControl<bool> s_on(gSavedSettings, "QuasarFootIK", true);
+    static LLCachedControl<bool> s_foot(gSavedSettings, "QuasarFootIK", true);
+    static LLCachedControl<bool> s_body(gSavedSettings, "QuasarBodyCollision", true);
     static LLCachedControl<bool> s_others(gSavedSettings, "QuasarFootIKOthers", true);
+    // Avatar motion (foot IK, body collision) share the ranking and its settings.
+    const bool s_on = s_foot || s_body;
     static LLCachedControl<F32>  s_dist(gSavedSettings, "QuasarFootIKDistance", 15.f);
     static LLCachedControl<U32>  s_max(gSavedSettings, "QuasarFootIKMaxAvatars", 8);
 
@@ -5285,7 +5289,7 @@ void LLVOAvatar::qlFootIKRank()
         }
         if (!s_others || av->isUIAvatar() || av->mIsDummy || av->isControlAvatar()
             || av->mSpecialRenderMode != 0 || !av->mIsBuilt
-            || av->isSitting() || av->getParent() || av->mInAir)   // the IK would not run: keep it on the GPU
+            || (!s_body && (av->isSitting() || av->getParent() || av->mInAir)))   // nothing would run: keep it on the GPU
         {
             continue;
         }
@@ -5334,6 +5338,20 @@ void LLVOAvatar::qlGroundUnder(const LLVector3& pos_agent, F32 up, F32 down, F32
 
 void LLVOAvatar::qlFootIKRestore()
 {
+    // Body collision's shoulders (the same rule: only where the joint still holds the write).
+    if (mQLBodyApplied)
+    {
+        mQLBodyApplied = false;
+        QLAnimApplyScope scope;
+        LLJoint* shoulders[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
+        for (S32 i = 0; i < 2; ++i)
+        {
+            if (shoulders[i] && shoulders[i]->getRotation() == mQLBodyArm[i].shoulder_set)
+            {
+                shoulders[i]->setRotation(mQLBodyArm[i].shoulder_pre);
+            }
+        }
+    }
     if (!mQLFootIKApplied) return;
     mQLFootIKApplied = false;
     QLAnimApplyScope scope;
@@ -5365,7 +5383,8 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     LLJoint* ankles[2] = { mAnkleLeftp, mAnkleRightp };
 
     qlFootIKRank();
-    const bool wanted = mQLFootIKSelected && visible && strength > 0.f && mRoot && mPelvisp
+    static LLCachedControl<bool> s_foot_on(gSavedSettings, "QuasarFootIK", true);
+    const bool wanted = s_foot_on && mQLFootIKSelected && visible && strength > 0.f && mRoot && mPelvisp
         && hips[0] && hips[1] && knees[0] && knees[1] && ankles[0] && ankles[1]
         && getRegion() && !isSitting() && !getParent() && !mInAir
         && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
@@ -5752,6 +5771,338 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         leg.ankle_set = ankles[i]->getRotation();
     }
     mQLFootIKApplied = true;
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR BODY COLLISION (QuasarBodyCollision)
+//
+// After the animations (and foot IK) have posed an avatar, an arm that sinks into the
+// torso -- an AO's arms into the belly, hands into the hips -- or into the other arm
+// (crossed arms, clasped hands) is turned out at the shoulder until it rests on the
+// surface. The body's shape is the avatar's own collision volumes: ellipsoids for the
+// pelvis, belly, chest, pecs, back and butt, and long ones along the upper arm, forearm
+// and hand, all sized by the shape sliders (and what fitted mesh bodies are weighted to).
+// Each arm volume is taken as a capsule; a capsule against a torso ellipsoid is tested by
+// inflating the ellipsoid by the capsule's radius and finding the segment's deepest point
+// in the ellipsoid's own unit space. QuasarBodyCollisionOverlap of contact is allowed (soft
+// flesh touches); only what goes deeper is pushed out. Arm against arm, each arm moves
+// half the way. A few passes settle a pose that touches several volumes.
+//
+// Built like foot IK: a correction over the animation's own pose (only the shoulders are
+// written), put back by qlFootIKRestore before the motions update; the correction is kept
+// in the shoulder's parent frame (so it turns with the body), smoothed, and its speed
+// capped, so it eases in and out and never snaps. Same avatars as foot IK (self, and the
+// closest others, on the CPU animation path).
+//-----------------------------------------------------------------------------
+namespace
+{
+    struct QLEllipsoid { LLVector3 c; LLVector3 axis[3]; };   // centre, semi-axis vectors (world)
+    struct QLCapsule { LLVector3 a, b; F32 r = 0.f; };          // segment, radius (world)
+
+    // A collision volume's ellipsoid: its world matrix maps the unit sphere onto it (LL
+    // multiplies row vectors: rows 0-2 are the semi-axis vectors, row 3 the centre).
+    bool ql_volume(LLAvatarJointCollisionVolume* v, QLEllipsoid& e)
+    {
+        if (!v) return false;
+        v->updateWorldMatrix();
+        const LLMatrix4& m = v->getXform()->getWorldMatrix();
+        for (S32 k = 0; k < 3; ++k)
+        {
+            e.axis[k].set(m.mMatrix[k][0], m.mMatrix[k][1], m.mMatrix[k][2]);
+            if (e.axis[k].lengthSquared() < 1.0e-8f || !e.axis[k].isFinite()) return false;
+        }
+        e.c.set(m.mMatrix[3][0], m.mMatrix[3][1], m.mMatrix[3][2]);
+        return e.c.isFinite();
+    }
+
+    // A limb volume as a capsule along its longest axis. skip_start (0..1) leaves out the
+    // part nearest its joint: the top of the upper arm sits in the shoulder, against the
+    // chest, at rest -- testing it would push every arm out.
+    bool ql_capsule(LLAvatarJointCollisionVolume* v, F32 skip_start, QLCapsule& out)
+    {
+        QLEllipsoid e;
+        if (!ql_volume(v, e)) return false;
+        F32 len[3] = { e.axis[0].length(), e.axis[1].length(), e.axis[2].length() };
+        S32 k = 0;
+        if (len[1] > len[k]) k = 1;
+        if (len[2] > len[k]) k = 2;
+        out.r = 0.5f * (len[(k + 1) % 3] + len[(k + 2) % 3]);
+        const LLVector3 dir = e.axis[k] / len[k];
+        const F32 half = llmax(0.f, len[k] - out.r);
+        // The volume's long axis runs from its joint outward: its +axis end is the far end
+        // when that end lies farther from the joint's side. Orientation only matters for the
+        // trim, so take the end nearer the volume's parent joint as the start.
+        LLVector3 a = e.c - dir * half, b = e.c + dir * half;
+        if (LLJoint* parent = v->getParent())
+        {
+            const LLVector3 j = parent->getWorldPosition();
+            if ((b - j).lengthSquared() < (a - j).lengthSquared()) std::swap(a, b);
+        }
+        out.a = a + (b - a) * skip_start;
+        out.b = b;
+        return true;
+    }
+
+    LLVector3 ql_turn_point(const LLVector3& q, const LLVector3& pivot, const LLQuaternion& turn)
+    {
+        return pivot + (q - pivot) * turn;
+    }
+
+    // How deep a capsule is in an ellipsoid: false when it is not. point = its deepest
+    // point, push = how far (and which way) that point must move to reach the surface.
+    bool ql_penetration(const QLCapsule& cap, const QLEllipsoid& e, LLVector3& point, LLVector3& push)
+    {
+        // inflate by the radius; the axes are orthogonal (a rotation times a scale)
+        LLVector3 ax[3];
+        for (S32 k = 0; k < 3; ++k)
+        {
+            const F32 l = e.axis[k].length();
+            ax[k] = e.axis[k] * ((l + cap.r) / l);
+        }
+        auto to_unit = [&](const LLVector3& p)
+        {
+            const LLVector3 d = p - e.c;
+            return LLVector3((d * ax[0]) / ax[0].lengthSquared(), (d * ax[1]) / ax[1].lengthSquared(),
+                             (d * ax[2]) / ax[2].lengthSquared());
+        };
+        auto from_unit = [&](const LLVector3& u) { return e.c + ax[0] * u.mV[0] + ax[1] * u.mV[1] + ax[2] * u.mV[2]; };
+        const LLVector3 a = to_unit(cap.a), b = to_unit(cap.b), d = b - a;
+        const F32 dd = d.lengthSquared();
+        const F32 t = dd < 1.0e-12f ? 0.f : llclamp(-(a * d) / dd, 0.f, 1.f);
+        const LLVector3 p = a + d * t;
+        const F32 dist = p.length();
+        if (dist >= 1.f) return false;
+        const LLVector3 s = dist > 1.0e-5f ? p / dist : LLVector3::x_axis;
+        point = from_unit(p);
+        push = from_unit(s) - point;
+        return push.isFinite();
+    }
+
+    // Closest points between two segments (Ericson, Real-Time Collision Detection 5.1.9).
+    void ql_closest_segments(const LLVector3& p1, const LLVector3& q1, const LLVector3& p2, const LLVector3& q2,
+                             LLVector3& c1, LLVector3& c2)
+    {
+        const LLVector3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+        const F32 a = d1 * d1, e = d2 * d2, f = d2 * r;
+        F32 s = 0.f, t = 0.f;
+        if (a <= 1.0e-10f && e <= 1.0e-10f) { c1 = p1; c2 = p2; return; }
+        if (a <= 1.0e-10f) { t = llclamp(f / e, 0.f, 1.f); }
+        else
+        {
+            const F32 c = d1 * r;
+            if (e <= 1.0e-10f) { s = llclamp(-c / a, 0.f, 1.f); }
+            else
+            {
+                const F32 b = d1 * d2, denom = a * e - b * b;
+                s = denom > 1.0e-10f ? llclamp((b * f - c * e) / denom, 0.f, 1.f) : 0.f;
+                t = (b * s + f) / e;
+                if (t < 0.f) { t = 0.f; s = llclamp(-c / a, 0.f, 1.f); }
+                else if (t > 1.f) { t = 1.f; s = llclamp((b - c) / a, 0.f, 1.f); }
+            }
+        }
+        c1 = p1 + d1 * s;
+        c2 = p2 + d2 * t;
+    }
+
+    // The turn about pivot that moves point by (the part of) push (across the lever).
+    LLQuaternion ql_turn_toward(const LLVector3& pivot, const LLVector3& point, const LLVector3& push)
+    {
+        const LLVector3 lever = point - pivot;
+        const F32 len = lever.length();
+        if (len < 0.01f) return LLQuaternion::DEFAULT;
+        const LLVector3 lh = lever / len;
+        const LLVector3 across = push - lh * (lh * push);
+        const F32 move = across.length();
+        if (move < 1.0e-5f) return LLQuaternion::DEFAULT;
+        LLVector3 axis = lever % across;
+        if (axis.lengthSquared() < 1.0e-12f) return LLQuaternion::DEFAULT;
+        axis.normVec();
+        return LLQuaternion(atan2f(move, len), axis);
+    }
+
+    F32 ql_quat_angle(const LLQuaternion& q)
+    {
+        return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f));
+    }
+}
+
+void LLVOAvatar::qlBodyCollisionApply(bool visible)
+{
+    static LLCachedControl<bool> s_on(gSavedSettings, "QuasarBodyCollision", true);
+    static LLCachedControl<bool> s_arms(gSavedSettings, "QuasarBodyCollisionArms", true);
+    static LLCachedControl<F32>  s_overlap(gSavedSettings, "QuasarBodyCollisionOverlap", 0.01f);
+    static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarBodyCollisionDebug", false);
+
+    LLJoint* shoulders[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
+    qlFootIKRank();
+    const bool wanted = s_on && mQLFootIKSelected && visible && mRoot && shoulders[0] && shoulders[1]
+        && shoulders[0]->getParent() && shoulders[1]->getParent() && mNumCollisionVolumes > 0
+        && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
+        && !FSPoserAnimator::isAvatarPosedLocally(this);
+    if (!wanted)
+    {
+        mQLBodyTracking = false;
+        return;
+    }
+
+    // The pose as it now stands (the animation's, after foot IK).
+    mRoot->updateWorldMatrixChildren();
+
+    static const char* const TORSO[] = { "PELVIS", "BUTT", "BELLY", "LOWER_BACK", "CHEST", "LEFT_PEC", "RIGHT_PEC", "UPPER_BACK" };
+    static const char* const ARM[2][3] = { { "L_UPPER_ARM", "L_LOWER_ARM", "L_HAND" },
+                                           { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
+    constexpr S32 MAX_TORSO = 8;
+    QLEllipsoid torso[MAX_TORSO];
+    S32 torso_count = 0;
+    LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
+    for (S32 v = 0; v < mNumCollisionVolumes; ++v)
+    {
+        LLAvatarJointCollisionVolume* volume = &mCollisionVolumes[v];
+        const std::string& name = volume->getName();
+        bool matched = false;
+        for (const char* t : TORSO)
+        {
+            if (name == t)
+            {
+                if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count])) ++torso_count;
+                matched = true;
+                break;
+            }
+        }
+        if (matched) continue;
+        for (S32 i = 0; i < 2; ++i)
+            for (S32 k = 0; k < 3; ++k)
+                if (name == ARM[i][k]) arm_volume[i][k] = volume;
+    }
+
+    // The arms' capsules as animated; the upper arm without its top third (in the shoulder).
+    QLCapsule caps[2][3];
+    bool have[2][3] = { { false, false, false }, { false, false, false } };
+    LLVector3 pivot[2];
+    for (S32 i = 0; i < 2; ++i)
+    {
+        pivot[i] = shoulders[i]->getWorldPosition();
+        for (S32 k = 0; k < 3; ++k) have[i][k] = ql_capsule(arm_volume[i][k], k == 0 ? 0.35f : 0.f, caps[i][k]);
+    }
+
+    // Solve: a few passes, each turning each arm out of its deepest torso contact, then the
+    // deepest arm-against-arm contact apart (half each).
+    const F32 overlap = llclamp((F32)s_overlap, 0.f, 0.1f);
+    LLQuaternion turn[2] = { LLQuaternion::DEFAULT, LLQuaternion::DEFAULT };
+    F32 first_depth[2] = { 0.f, 0.f };
+    F32 first_arms = 0.f;
+    auto posed = [&](S32 i, S32 k)
+    {
+        QLCapsule c = caps[i][k];
+        c.a = ql_turn_point(c.a, pivot[i], turn[i]);
+        c.b = ql_turn_point(c.b, pivot[i], turn[i]);
+        return c;
+    };
+    for (S32 pass = 0; pass < 3; ++pass)
+    {
+        for (S32 i = 0; i < 2; ++i)
+        {
+            F32 deepest = 0.f;
+            LLVector3 at = pivot[i], push = LLVector3::zero;
+            for (S32 k = 0; k < 3; ++k)
+            {
+                if (!have[i][k]) continue;
+                const QLCapsule c = posed(i, k);
+                for (S32 t = 0; t < torso_count; ++t)
+                {
+                    LLVector3 p, d;
+                    if (!ql_penetration(c, torso[t], p, d)) continue;
+                    const F32 depth = d.length();
+                    if (depth > deepest) { deepest = depth; at = p; push = d; }
+                }
+            }
+            if (pass == 0) first_depth[i] = deepest;
+            if (deepest > overlap)
+            {
+                const LLVector3 needed = push * ((deepest - overlap) / deepest);
+                turn[i] = turn[i] * ql_turn_toward(pivot[i], at, needed);
+            }
+        }
+        if (s_arms)
+        {
+            F32 deepest = 0.f;
+            LLVector3 at[2] = { pivot[0], pivot[1] }, away = LLVector3::zero;
+            for (S32 k0 = 0; k0 < 3; ++k0)
+            {
+                if (!have[0][k0]) continue;
+                const QLCapsule c0 = posed(0, k0);
+                for (S32 k1 = 0; k1 < 3; ++k1)
+                {
+                    if (!have[1][k1]) continue;
+                    const QLCapsule c1 = posed(1, k1);
+                    LLVector3 p0, p1;
+                    ql_closest_segments(c0.a, c0.b, c1.a, c1.b, p0, p1);
+                    LLVector3 between = p0 - p1;
+                    const F32 dist = between.length();
+                    const F32 depth = c0.r + c1.r - dist;
+                    if (depth <= deepest) continue;
+                    deepest = depth;
+                    at[0] = p0;
+                    at[1] = p1;
+                    // apart along the line between them, or across the body when they cross exactly
+                    away = dist > 1.0e-4f ? between / dist : LLVector3::y_axis * mRoot->getWorldRotation();
+                }
+            }
+            if (pass == 0) first_arms = deepest;
+            if (deepest > overlap)
+            {
+                const F32 half = 0.5f * (deepest - overlap);
+                turn[0] = turn[0] * ql_turn_toward(pivot[0], at[0], away * half);
+                turn[1] = turn[1] * ql_turn_toward(pivot[1], at[1], away * -half);
+            }
+        }
+    }
+
+    // Into each shoulder's parent frame (the correction turns with the body), smoothed over
+    // about a tenth of a second and at most 360 degrees a second, so it eases in and out.
+    const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+    const F32 follow = mQLBodyTracking ? 1.f - expf(-dt * 15.f) : 1.f;
+    const F32 max_step = 360.f * DEG_TO_RAD * dt;
+    bool any = false;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        const LLQuaternion parent = shoulders[i]->getParent()->getWorldRotation();
+        LLQuaternion target = parent * turn[i] * ~parent;
+        target.normalize();
+        QLBodyArm& arm = mQLBodyArm[i];
+        if (!mQLBodyTracking)
+        {
+            arm.correction = target;
+        }
+        else
+        {
+            LLQuaternion next = slerp(follow, arm.correction, target);
+            const F32 step = ql_quat_angle(next * ~arm.correction);
+            if (step > max_step && step > 0.f) next = slerp(max_step / step, arm.correction, next);
+            arm.correction = next;
+        }
+        arm.correction.normalize();
+        any = any || ql_quat_angle(arm.correction) > 0.05f * DEG_TO_RAD;
+    }
+    mQLBodyTracking = true;
+
+    if (s_debug && isSelf())
+    {
+        LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm R torso=%.1fcm arms=%.1fcm | L turn=%.1f R turn=%.1f deg",
+            first_depth[0] * 100.f, first_depth[1] * 100.f, first_arms * 100.f,
+            ql_quat_angle(mQLBodyArm[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyArm[1].correction) * RAD_TO_DEG) << LL_ENDL;
+    }
+    if (!any) return;   // nothing to push out: the animation as it is
+
+    QLAnimApplyScope scope;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLBodyArm& arm = mQLBodyArm[i];
+        arm.shoulder_pre = shoulders[i]->getRotation();
+        shoulders[i]->setRotation(arm.shoulder_pre * arm.correction);
+        arm.shoulder_set = shoulders[i]->getRotation();
+    }
+    mQLBodyApplied = true;
 }
 
 //-----------------------------------------------------------------------------
