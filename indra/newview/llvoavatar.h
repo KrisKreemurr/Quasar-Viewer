@@ -736,6 +736,33 @@ private:
     F64         mVKLastAnimEvalTime = -1.0;      // last NORMAL / FORCE motion update (gFrameTimeSeconds)
     F64         mVKLastVisibleTime = -1.0;       // last frame isVisible() was true
     F64         mAnimStateDbgNext = 0.0;         // RenderVKAnimStateDebug cadence
+
+    // QUASAR FOOT IK (QuasarFootIK, llvoavatar.cpp "QUASAR FOOT IK"): a correction applied
+    // after the animations have posed the avatar -- the legs bend and the pelvis lowers
+    // so the feet the animation has near the ground land on the ground under them. Each
+    // frame starts from the animation's own pose: what the IK wrote is put back
+    // (qlFootIKRestore) before the motions update, wherever no animation wrote over it.
+    struct QLFootIKLeg
+    {
+        LLQuaternion hip_pre, knee_pre, ankle_pre;    // the animation's locals
+        LLQuaternion hip_set, knee_set, ankle_set;    // what the IK wrote
+        F32          ground = 0.f;   // smoothed: ground under the foot minus the reference ground (m)
+        F32          fade = 0.f;     // smoothed: how much the IK takes this foot (0..1)
+    };
+    QLFootIKLeg mQLFootIKLeg[2];
+    LLVector3   mQLFootIKPelvisPre;
+    LLVector3   mQLFootIKPelvisSet;
+    bool        mQLFootIKApplied = false;    // the joints hold an IK write
+    bool        mQLFootIKTracking = false;   // the smoothed values follow the feet
+    bool        mQLFootIKSelected = false;   // this frame's ranking gave this avatar foot IK
+    static void qlFootIKRank();             // once a frame: self, and the closest others
+    void        qlFootIKRestore();
+    void        qlFootIKApply(bool visible);
+    void        qlGroundUnder(const LLVector3& pos_agent, F32 up, F32 down, F32& out_z, LLVector3& out_norm);
+public:
+    // Whether foot IK applies to this avatar this frame (LLCleanAnimStore keeps such an
+    // avatar on the CPU animation path, which the IK writes into).
+    bool        qlFootIKSelected();
 public:
 // [RLVa:KB] - Checked: RLVa-2.4 (@setcam_avdist)
     mutable bool mNeedsImpostorUpdate;

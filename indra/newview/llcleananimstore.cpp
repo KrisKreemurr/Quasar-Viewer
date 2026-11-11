@@ -262,8 +262,10 @@ void LLCleanAnimStore::beginAvatar(LLVOAvatar* av)
     U32 slot = 0xFFFFFFFFu;
     // A locally posed avatar (FS poser) stays on the CPU path: its pose is written by a
     // procedural motion every frame and the poser/gizmos read joints back immediately.
+    // So does an avatar Quasar's foot IK applies to (the closest few, QuasarFootIK*):
+    // the IK reads the finished pose and writes the legs on the CPU.
     if (enabled() && !av->isDead() && !av->isSelf() && !av->isUIAvatar() && av->mSpecialRenderMode == 0
-        && !FSPoserAnimator::isAvatarPosedLocally(av))
+        && !FSPoserAnimator::isAvatarPosedLocally(av) && !av->qlFootIKSelected())
     {
         bool own_animesh = false;
         if (av->isControlAvatar())

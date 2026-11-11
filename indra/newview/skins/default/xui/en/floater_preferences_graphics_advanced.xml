@@ -701,6 +701,97 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="30"
             top="274" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AvatarMotionText"
+            width="300"
+            left="10"
+            top="306">
+            Avatar motion (Quasar)
+          </text>
+          <check_box
+            control_name="QuasarFootIK"
+            height="16"
+            label="Foot IK"
+            layout="topleft"
+            name="QuasarFootIK"
+            tool_tip="Bends the legs (and lowers the hips) so feet land on the ground under them on slopes and uneven ground, on top of whatever animation is playing. Feet the animation lifts stay lifted. Visual only: every Quasar viewer works it out for the avatars it shows."
+            width="300"
+            left="30"
+            top="328" />
+          <check_box
+            control_name="QuasarFootIKOthers"
+            enabled_control="QuasarFootIK"
+            height="16"
+            label="Apply to other avatars"
+            layout="topleft"
+            name="QuasarFootIKOthers"
+            tool_tip="Foot IK for the closest other avatars too (see the distance and count below). Those avatars animate on the CPU while it applies, so a lower count costs less in crowds."
+            width="250"
+            left="334"
+            top="328" />
+          <slider
+            control_name="QuasarFootIKStrength"
+            enabled_control="QuasarFootIK"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="Foot IK strength:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="1"
+            name="QuasarFootIKStrength"
+            show_text="true"
+            tool_tip="0 leaves the animation as it is, 1 puts the feet fully on the ground."
+            width="350"
+            left="30"
+            top="350" />
+          <slider
+            control_name="QuasarFootIKDistance"
+            enabled_control="QuasarFootIKOthers"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="15"
+            label="Other avatars within (m):"
+            label_width="185"
+            layout="topleft"
+            min_val="2"
+            max_val="40"
+            name="QuasarFootIKDistance"
+            show_text="true"
+            tool_tip="Other avatars get foot IK only this close to the camera."
+            width="350"
+            left="30"
+            top="372" />
+          <slider
+            control_name="QuasarFootIKMaxAvatars"
+            enabled_control="QuasarFootIKOthers"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="8"
+            label="Max. # other avatars:"
+            label_width="185"
+            layout="topleft"
+            min_val="1"
+            max_val="32"
+            name="QuasarFootIKMaxAvatars"
+            show_text="true"
+            tool_tip="At most this many other avatars (the closest) get foot IK."
+            width="350"
+            left="30"
+            top="394" />
         </panel>
       </scroll_container>
     </panel>

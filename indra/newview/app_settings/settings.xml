@@ -12467,6 +12467,61 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarFootIK</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: foot IK. After the animations pose an avatar, bend its legs (and lower its pelvis) so the feet the animation has near the ground land on the ground under them. Visual only, worked out by each viewer; the animation itself is untouched.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarFootIKOthers</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: apply foot IK to other avatars too (the closest QuasarFootIKMaxAvatars within QuasarFootIKDistance). They animate on the CPU while it applies.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarFootIKDistance</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: foot IK reaches other avatars this close to the camera (metres).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>15.0</real>
+  </map>
+  <key>QuasarFootIKMaxAvatars</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: at most this many other avatars (the closest) get foot IK.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>8</integer>
+  </map>
+  <key>QuasarFootIKStrength</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: how much of the foot IK correction is applied (0 = the animation as it is, 1 = feet fully on the ground).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
   <key>QuasarStreamline</key>
   <map>
     <key>Comment</key>

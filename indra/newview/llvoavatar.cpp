@@ -111,6 +111,7 @@
 #include "llvolumemgr.h"
 #include "gmdxattachprobe.h" // GunMetal-DX
 #include "llworld.h"
+#include "fsposeranimator.h"     // Quasar foot IK: a locally posed avatar keeps its pose
 #include "pipeline.h"
 #include "llsky.h"
 #include "llanimstatelabels.h"
@@ -4837,6 +4838,10 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
         return false;
     }
 
+    // Quasar foot IK: this frame starts from the animation's own pose, not last frame's
+    // IK -- before the GPU animation path may seed itself from the CPU joints.
+    qlFootIKRestore();
+
     // VK GPU animation: decide whether this frame's pose is GPU-evaluated (the motion
     // controller then exports its blend instead of sampling + applying it).
     LLCleanAnimStore::instance().beginAvatar(this);
@@ -5165,6 +5170,8 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     // lazily, only where something reads them.
     if (!LLCleanAnimStore::instance().gpuDriven(this))
     {
+        // Quasar foot IK corrects the finished pose (CPU path only: the IK writes joints).
+        qlFootIKApply(visible);
         mRoot->updateWorldMatrixChildren();
     }
     else
@@ -5189,6 +5196,322 @@ bool LLVOAvatar::vkOwnAnimesh() const
     }
     const LLVOAvatar* wearer = static_cast<const LLControlAvatar*>(this)->getAttachedAvatar();
     return wearer && wearer->isSelf();
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR FOOT IK (QuasarFootIK)
+//
+// A correction layer over the finished animation, worked out by each viewer for the
+// avatars it shows (nothing is sent): after the motions have posed an avatar, every
+// foot the animation holds near the ground is moved by how much the ground under it
+// differs from the ground under the pelvis (the ground the animation was made for).
+// The pelvis lowers by the deepest such step, so the lower leg can reach, and each leg
+// is solved as a two-bone chain IN THE PLANE THE ANIMATION BENDS IT IN (the animated
+// knee is the pole), so a wide stance stays wide and a cocked hip stays cocked; the
+// ankle keeps the animation's foot rotation and tilts toward the ground's slope.
+// Nothing above the pelvis is touched. A foot the animation lifts (a step's swing, a
+// kick, a raised-leg pose) is left to the animation, fading in only near the ground.
+//
+// Each frame starts from the animation's own pose: qlFootIKRestore puts back the
+// animation's locals before the motions update wherever no animation wrote over them,
+// so the blend never starts from an IK result and turning the IK off leaves the
+// animation exactly as it was.
+//
+// Ground: the land and the avatar's foot collision plane from the simulator
+// (LLWorld::resolveStepHeightGlobal), the only CPU ground this renderer keeps --
+// slopes, ramps and uneven terrain. Steps and object edges need a ground of their own
+// under each foot (per-foot GPU rays, next).
+//
+// Cost: self animates on the CPU anyway. Another avatar only gets foot IK while it is
+// among the closest QuasarFootIKMaxAvatars within QuasarFootIKDistance of the camera,
+// and LLCleanAnimStore keeps it on the CPU animation path while it does.
+//-----------------------------------------------------------------------------
+namespace
+{
+    // Rotation taking direction a onto direction b (LL convention: a * q = b).
+    LLQuaternion ql_arc(const LLVector3& a, const LLVector3& b)
+    {
+        LLQuaternion q;
+        q.shortestArc(a, b);
+        return q;
+    }
+
+    F32 ql_smoothstep(F32 e0, F32 e1, F32 x)
+    {
+        const F32 t = llclamp((x - e0) / (e1 - e0), 0.f, 1.f);
+        return t * t * (3.f - 2.f * t);
+    }
+
+    // The joint writes of the IK are the pose's, like the blender's: no GPU ext write.
+    struct QLAnimApplyScope
+    {
+        bool saved;
+        QLAnimApplyScope() : saved(LLJoint::sAnimApply) { LLJoint::sAnimApply = true; }
+        ~QLAnimApplyScope() { LLJoint::sAnimApply = saved; }
+    };
+}
+
+// static
+void LLVOAvatar::qlFootIKRank()
+{
+    static U32 s_frame = 0xFFFFFFFFu;
+    if (s_frame == gFrameCount) return;
+    s_frame = gFrameCount;
+
+    static LLCachedControl<bool> s_on(gSavedSettings, "QuasarFootIK", true);
+    static LLCachedControl<bool> s_others(gSavedSettings, "QuasarFootIKOthers", true);
+    static LLCachedControl<F32>  s_dist(gSavedSettings, "QuasarFootIKDistance", 15.f);
+    static LLCachedControl<U32>  s_max(gSavedSettings, "QuasarFootIKMaxAvatars", 8);
+
+    const LLVector3 cam = LLViewerCamera::getInstance()->getOrigin();
+    // Hysteresis: an avatar that had the IK keeps it a metre further and wins ties,
+    // so one standing at the edge of the reach does not switch paths every frame.
+    const F32 KEEP = 1.f;
+    std::vector<std::pair<F32, LLVOAvatar*>> candidates;
+    for (LLCharacter* character : LLCharacter::sInstances)
+    {
+        LLVOAvatar* av = static_cast<LLVOAvatar*>(character);
+        const bool had = av->mQLFootIKSelected;
+        av->mQLFootIKSelected = false;
+        if (!s_on || av->isDead()) continue;
+        if (av->isSelf())
+        {
+            av->mQLFootIKSelected = true;
+            continue;
+        }
+        if (!s_others || av->isUIAvatar() || av->mIsDummy || av->isControlAvatar()
+            || av->mSpecialRenderMode != 0 || !av->mIsBuilt
+            || av->isSitting() || av->getParent() || av->mInAir)   // the IK would not run: keep it on the GPU
+        {
+            continue;
+        }
+        if (av->mVKLastVisibleTime < gFrameTimeSeconds - 0.5) continue;   // off screen
+        const F32 dist = dist_vec(av->getPositionAgent(), cam);
+        const F32 bias = had ? KEEP : 0.f;
+        if (dist <= (F32)s_dist + bias)
+        {
+            candidates.emplace_back(dist - bias, av);
+        }
+    }
+    const size_t keep = llmin(candidates.size(), (size_t)(U32)s_max);
+    if (keep < candidates.size())
+    {
+        std::nth_element(candidates.begin(), candidates.begin() + keep, candidates.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
+    for (size_t i = 0; i < keep; ++i)
+    {
+        candidates[i].second->mQLFootIKSelected = true;
+    }
+}
+
+bool LLVOAvatar::qlFootIKSelected()
+{
+    qlFootIKRank();
+    return mQLFootIKSelected;
+}
+
+void LLVOAvatar::qlGroundUnder(const LLVector3& pos_agent, F32 up, F32 down, F32& out_z, LLVector3& out_norm)
+{
+    const LLVector3d at = gAgent.getPosGlobalFromAgent(pos_agent);
+    LLVector3d top = at, bottom = at;
+    top.mdV[VZ] += up;
+    bottom.mdV[VZ] -= down;
+    LLVector3d hit;
+    LLViewerObject* obj = nullptr;
+    LLWorld::getInstance()->resolveStepHeightGlobal(this, top, bottom, hit, out_norm, &obj);
+    out_z = gAgent.getPosAgentFromGlobal(hit).mV[VZ];
+    if (!out_norm.isFinite() || out_norm.mV[VZ] <= 0.01f)
+    {
+        out_norm = LLVector3::z_axis;
+    }
+    out_norm.normVec();
+}
+
+void LLVOAvatar::qlFootIKRestore()
+{
+    if (!mQLFootIKApplied) return;
+    mQLFootIKApplied = false;
+    QLAnimApplyScope scope;
+    // Only where the joint still holds what the IK wrote: a value something else wrote
+    // since (an animation, a reset) is newer than the animation's we kept.
+    if (mPelvisp && mPelvisp->getPosition() == mQLFootIKPelvisSet)
+    {
+        mPelvisp->setPosition(mQLFootIKPelvisPre);
+    }
+    LLJoint* hips[2]   = { mHipLeftp, mHipRightp };
+    LLJoint* knees[2]  = { mKneeLeftp, mKneeRightp };
+    LLJoint* ankles[2] = { mAnkleLeftp, mAnkleRightp };
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLFootIKLeg& leg = mQLFootIKLeg[i];
+        if (hips[i] && hips[i]->getRotation() == leg.hip_set)       hips[i]->setRotation(leg.hip_pre);
+        if (knees[i] && knees[i]->getRotation() == leg.knee_set)    knees[i]->setRotation(leg.knee_pre);
+        if (ankles[i] && ankles[i]->getRotation() == leg.ankle_set) ankles[i]->setRotation(leg.ankle_pre);
+    }
+}
+
+void LLVOAvatar::qlFootIKApply(bool visible)
+{
+    static LLCachedControl<F32> s_strength(gSavedSettings, "QuasarFootIKStrength", 1.f);
+    const F32 strength = llclamp((F32)s_strength, 0.f, 1.f);
+
+    LLJoint* hips[2]   = { mHipLeftp, mHipRightp };
+    LLJoint* knees[2]  = { mKneeLeftp, mKneeRightp };
+    LLJoint* ankles[2] = { mAnkleLeftp, mAnkleRightp };
+
+    qlFootIKRank();
+    const bool wanted = mQLFootIKSelected && visible && strength > 0.f && mRoot && mPelvisp
+        && hips[0] && hips[1] && knees[0] && knees[1] && ankles[0] && ankles[1]
+        && getRegion() && !isSitting() && !getParent() && !mInAir
+        && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
+        && !FSPoserAnimator::isAvatarPosedLocally(this);
+    if (!wanted)
+    {
+        mQLFootIKTracking = false;
+        return;
+    }
+
+    // The animation's pose in world space.
+    mRoot->updateWorldMatrixChildren();
+
+    // The ground the animation stands on: under the pelvis.
+    const LLVector3 pelvis_pos = mPelvisp->getWorldPosition();
+    F32 ref_z = 0.f;
+    LLVector3 ref_norm;
+    qlGroundUnder(pelvis_pos, 0.5f, 3.f, ref_z, ref_norm);
+
+    LLVector3 hip_p[2], knee_p[2], ankle_p[2];
+    LLQuaternion hip_q[2], knee_q[2], ankle_q[2];
+    for (S32 i = 0; i < 2; ++i)
+    {
+        hip_p[i] = hips[i]->getWorldPosition();
+        knee_p[i] = knees[i]->getWorldPosition();
+        ankle_p[i] = ankles[i]->getWorldPosition();
+        hip_q[i] = hips[i]->getWorldRotation();
+        knee_q[i] = knees[i]->getWorldRotation();
+        ankle_q[i] = ankles[i]->getWorldRotation();
+    }
+    const F32 low_ankle = llmin(ankle_p[0].mV[VZ], ankle_p[1].mV[VZ]);
+
+    // Smoothing: about a tenth of a second to follow a change of ground.
+    const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+    const F32 follow = mQLFootIKTracking ? 1.f - expf(-dt * 12.f) : 1.f;
+
+    // Both feet off the ground in the animation (a hover pose, a jump): the animation's.
+    const F32 float_fade = 1.f - ql_smoothstep(0.30f, 0.50f, low_ankle - ref_z);
+
+    F32 step[2];
+    LLVector3 ground_norm[2];
+    for (S32 i = 0; i < 2; ++i)
+    {
+        F32 ground_z = ref_z;
+        qlGroundUnder(ankle_p[i], 0.6f, 1.5f, ground_z, ground_norm[i]);
+        const F32 raw = ground_z - ref_z;
+        // A foot the animation lifts above the other stays lifted; a drop past what a
+        // leg can take (a ledge, a cliff edge) is not reached for.
+        const F32 lift_fade = 1.f - ql_smoothstep(0.08f, 0.25f, ankle_p[i].mV[VZ] - low_ankle);
+        const F32 reach_fade = 1.f - ql_smoothstep(0.35f, 0.55f, fabsf(raw));
+        QLFootIKLeg& leg = mQLFootIKLeg[i];
+        leg.ground += (raw - leg.ground) * follow;
+        leg.fade += (lift_fade * reach_fade * float_fade - leg.fade) * follow;
+        step[i] = leg.ground * leg.fade * strength;
+    }
+    mQLFootIKTracking = true;
+
+    // The pelvis lowers by the deepest step down, so that leg can reach its ground.
+    const F32 drop = llclamp(llmin(0.f, llmin(step[0], step[1])), -0.4f, 0.f);
+    bool needed = false;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < 0.9999f;
+        needed = needed || fabsf(step[i]) >= 0.001f || tilts;
+    }
+    if (!needed)
+    {
+        return;   // level ground, or the feet are the animation's: the animation as it is
+    }
+
+    QLAnimApplyScope scope;
+    mQLFootIKPelvisPre = mPelvisp->getPosition();
+    if (drop < 0.f)
+    {
+        LLVector3 delta(0.f, 0.f, drop);
+        if (LLJoint* parent = mPelvisp->getParent())
+        {
+            delta = delta * ~parent->getWorldRotation();
+        }
+        mPelvisp->setPosition(mQLFootIKPelvisPre + delta);
+    }
+    mQLFootIKPelvisSet = mPelvisp->getPosition();
+
+    const LLVector3 forward = LLVector3::x_axis * mRoot->getWorldRotation();
+    const LLVector3 drop_v(0.f, 0.f, drop);
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLFootIKLeg& leg = mQLFootIKLeg[i];
+        leg.hip_pre = hips[i]->getRotation();
+        leg.knee_pre = knees[i]->getRotation();
+        leg.ankle_pre = ankles[i]->getRotation();
+        leg.hip_set = leg.hip_pre;
+        leg.knee_set = leg.knee_pre;
+        leg.ankle_set = leg.ankle_pre;
+
+        // The chain after the pelvis drop, and where the ankle should end up.
+        const LLVector3 hip = hip_p[i] + drop_v;
+        const LLVector3 knee = knee_p[i] + drop_v;
+        const LLVector3 ankle = ankle_p[i] + drop_v;
+        const LLVector3 target = ankle_p[i] + LLVector3(0.f, 0.f, step[i]);
+
+        const LLVector3 thigh = knee - hip;
+        const LLVector3 shin = ankle - knee;
+        const F32 a = thigh.length();
+        const F32 b = shin.length();
+        LLVector3 to_target = target - hip;
+        F32 c = to_target.length();
+        if (a < 0.01f || b < 0.01f || c < 0.01f) continue;
+        to_target /= c;
+        c = llclamp(c, fabsf(a - b) + 0.001f, a + b - 0.001f);
+
+        // The bend plane: the animated knee's side of the hip-ankle line (forward for a
+        // straight leg).
+        LLVector3 hip_to_ankle = ankle - hip;
+        hip_to_ankle.normVec();
+        LLVector3 pole = thigh - hip_to_ankle * (thigh * hip_to_ankle);
+        if (pole.lengthSquared() < 1.0e-6f) pole = forward;
+        LLVector3 side = pole - to_target * (pole * to_target);
+        if (side.lengthSquared() < 1.0e-8f) continue;
+        side.normVec();
+
+        const F32 cos_hip = llclamp((a * a + c * c - b * b) / (2.f * a * c), -1.f, 1.f);
+        const F32 sin_hip = sqrtf(llmax(0.f, 1.f - cos_hip * cos_hip));
+        const LLVector3 new_knee = hip + (to_target * cos_hip + side * sin_hip) * a;
+        const LLVector3 new_ankle = hip + to_target * c;
+
+        // Hip: the thigh onto its new direction; knee: the shin (carried by the hip's
+        // turn) onto its new direction; ankle: the animation's foot rotation, tilted
+        // toward the ground's slope (at most 25 degrees).
+        const LLQuaternion hip_turn = ql_arc(thigh, new_knee - hip);
+        const LLQuaternion knee_turn = ql_arc(shin * hip_turn, new_ankle - new_knee);
+        hips[i]->setWorldRotation(hip_q[i] * hip_turn);
+        knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
+
+        const F32 tilt_amount = leg.fade * strength;
+        LLQuaternion tilt;
+        const F32 slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
+        if (tilt_amount > 0.f && slope > 0.001f)
+        {
+            const F32 MAX_TILT = 25.f * DEG_TO_RAD;
+            const F32 t = tilt_amount * llmin(1.f, MAX_TILT / slope);
+            tilt = slerp(t, LLQuaternion::DEFAULT, ql_arc(LLVector3::z_axis, ground_norm[i]));
+        }
+        ankles[i]->setWorldRotation(ankle_q[i] * tilt);
+
+        leg.hip_set = hips[i]->getRotation();
+        leg.knee_set = knees[i]->getRotation();
+        leg.ankle_set = ankles[i]->getRotation();
+    }
+    mQLFootIKApplied = true;
 }
 
 //-----------------------------------------------------------------------------
