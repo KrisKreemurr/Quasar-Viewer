@@ -5443,7 +5443,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // and under the pelvis, and a nearly straight walking leg turns 2.5 cm into ~20
         // degrees of knee. A difference under the dead zone is level ground (nothing to
         // correct), fading in to the full difference by 1.5 times it.
-        static LLCachedControl<F32> s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.04f);
+        static LLCachedControl<F32> s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.01f);
         const F32 measured = ground_z - ref_z;
         level_gap = llmax(level_gap, fabsf(measured));
         const F32 dz = llmax(0.f, (F32)s_dead_zone);
@@ -5535,7 +5535,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     // fades in with the steps (from half the dead zone to 1.5 times it).
     F32 level_gate = 1.f;
     {
-        static LLCachedControl<F32> s_level_dz(gSavedSettings, "QuasarFootIKDeadZone", 0.04f);
+        static LLCachedControl<F32> s_level_dz(gSavedSettings, "QuasarFootIKDeadZone", 0.01f);
         const F32 dz = llmax(0.f, (F32)s_level_dz);
         level_gate = dz > 0.f ? ql_smoothstep(0.5f * dz, 1.5f * dz, level_gap) : 1.f;
     }
