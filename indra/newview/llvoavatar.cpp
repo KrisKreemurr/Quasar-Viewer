@@ -5510,17 +5510,51 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         LLVector3 side = lead - to_target * (lead * to_target);
         if (side.lengthSquared() < 1.0e-8f) continue;
         side.normVec();
+        // The same plane through the animated leg: its normal is the axis the knee bends
+        // about, before (old_axis) and after the solve (new_axis).
+        LLVector3 old_side = lead - hip_to_ankle * (lead * hip_to_ankle);
+        if (old_side.lengthSquared() < 1.0e-8f) continue;
+        old_side.normVec();
+        LLVector3 old_axis = hip_to_ankle % old_side;
+        LLVector3 new_axis = to_target % side;
+        if (old_axis.lengthSquared() < 1.0e-8f || new_axis.lengthSquared() < 1.0e-8f) continue;
+        old_axis.normVec();
+        new_axis.normVec();
 
         const F32 cos_hip = llclamp((a * a + c * c - b * b) / (2.f * a * c), -1.f, 1.f);
         const F32 sin_hip = sqrtf(llmax(0.f, 1.f - cos_hip * cos_hip));
         const LLVector3 new_knee = hip + (to_target * cos_hip + side * sin_hip) * a;
         const LLVector3 new_ankle = hip + to_target * c;
 
-        // Hip: the thigh onto its new direction; knee: the shin (carried by the hip's
-        // turn) onto its new direction; ankle: the animation's foot rotation, tilted
-        // toward the ground's slope (at most 25 degrees).
-        const LLQuaternion hip_turn = ql_arc(thigh, new_knee - hip);
-        const LLQuaternion knee_turn = ql_arc(shin * hip_turn, new_ankle - new_knee);
+        // Hip (swing-twist): the thigh onto its new direction (swing), then rolled about
+        // itself until the leg's bend axis is the planned one (twist) -- a bare swing
+        // rolls the thigh by however its turn happens to go, and the knee's hinge with it.
+        // Knee: a hinge, turning only about the bend axis, so the shin swings forward or
+        // back in the leg's plane and never sideways. Ankle: the animation's foot
+        // rotation, tilted toward the ground's slope (at most 25 degrees).
+        const LLVector3 new_thigh = new_knee - hip;
+        LLVector3 thigh_dir = new_thigh;
+        thigh_dir.normVec();
+        const LLQuaternion swing = ql_arc(thigh, new_thigh);
+        LLVector3 axis_from = old_axis * swing;
+        axis_from -= thigh_dir * (axis_from * thigh_dir);
+        LLVector3 axis_to = new_axis - thigh_dir * (new_axis * thigh_dir);
+        LLQuaternion twist;
+        if (axis_from.lengthSquared() > 1.0e-8f && axis_to.lengthSquared() > 1.0e-8f)
+        {
+            twist = ql_arc(axis_from, axis_to);
+        }
+        const LLQuaternion hip_turn = swing * twist;
+
+        LLVector3 shin_from = shin * hip_turn;
+        shin_from -= new_axis * (shin_from * new_axis);
+        LLVector3 shin_to = new_ankle - new_knee;
+        shin_to -= new_axis * (shin_to * new_axis);
+        LLQuaternion knee_turn;
+        if (shin_from.lengthSquared() > 1.0e-8f && shin_to.lengthSquared() > 1.0e-8f)
+        {
+            knee_turn = ql_arc(shin_from, shin_to);
+        }
         hips[i]->setWorldRotation(hip_q[i] * hip_turn);
         knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
 
