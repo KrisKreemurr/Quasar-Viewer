@@ -12555,6 +12555,17 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarFootIKMaxBendRate</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK: how fast the IK may bend or straighten a knee (degrees a second; 0 = no limit). Stops a nearly straight walking leg snapping many degrees in one frame.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>400.0</real>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

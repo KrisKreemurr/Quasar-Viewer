@@ -5369,6 +5369,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     if (!wanted)
     {
         mQLFootIKTracking = false;
+        mQLFootIKLeg[0].bend_last = mQLFootIKLeg[1].bend_last = -1.f;
         return;
     }
 
@@ -5464,6 +5465,18 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 weight = 1.f - moving * (1.f - mQLFootIKLeg[i].plant);
         drop_target = llmin(drop_target, step[i] * weight);
     }
+    // Walking (whatever the walk layer says): the hips drop by the AVERAGE of the two
+    // steps, not the deeper one. With the deeper one, the other leg bent by the whole
+    // difference -- on a slope up to 70 degrees more than the animation, the two legs
+    // trading it every step -- and the drop turned a corner each time the lower foot
+    // changed. With the average each leg takes half, and nothing switches. (Standing
+    // and stepping up keep the deeper step: the hard bend on a step up stays.)
+    const F32 walking = ql_smoothstep(0.15f, 0.5f, mSpeed);
+    if (walking > 0.f)
+    {
+        const F32 average = llmin(0.f, 0.5f * (step[0] + step[1]));
+        drop_target += (average - drop_target) * walking;
+    }
     drop_target = llclamp(drop_target, -0.4f, 0.f);
     const F32 drop_rate = 12.f + (3.f - 12.f) * moving;
     const F32 drop_follow = mQLFootIKTracking ? 1.f - expf(-dt * drop_rate) : 1.f;
@@ -5478,7 +5491,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         LL_INFOS("QuasarFootIK") << llformat("t=%.3f spd=%.2f mov=%.2f ref=%.3f drop=%.3f/%.3f"
             " | L raw=%.3f gnd=%.3f fade=%.2f plant=%.2f fspd=%.2f step=%.3f"
             " | R raw=%.3f gnd=%.3f fade=%.2f plant=%.2f fspd=%.2f step=%.3f",
-            gFrameTimeSeconds, mSpeed, moving, ref_z, drop_target, drop,
+            (F64)gFrameTimeSeconds.value(), mSpeed, moving, ref_z, drop_target, drop,
             dbg_raw[0], mQLFootIKLeg[0].ground, mQLFootIKLeg[0].fade, mQLFootIKLeg[0].plant, dbg_speed[0], step[0],
             dbg_raw[1], mQLFootIKLeg[1].ground, mQLFootIKLeg[1].fade, mQLFootIKLeg[1].plant, dbg_speed[1], step[1]) << LL_ENDL;
     }
@@ -5549,6 +5562,26 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         else
         {
             c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.001f);
+        }
+        // How fast the knee may bend or straighten (QuasarFootIKMaxBendRate, degrees a
+        // second). A walking leg is nearly straight, where a centimetre of reach is many
+        // degrees of knee: the log showed 18 degrees in one frame from a 1.5 cm change.
+        {
+            static LLCachedControl<F32> s_bend_rate(gSavedSettings, "QuasarFootIKMaxBendRate", 400.f);
+            const F32 cos_knee = llclamp((a * a + b * b - c * c) / (2.f * a * b), -1.f, 1.f);
+            F32 bend = F_PI - acosf(cos_knee);
+            if ((F32)s_bend_rate > 0.f && leg.bend_last >= 0.f && mQLFootIKTracking)
+            {
+                const F32 max_change = (F32)s_bend_rate * DEG_TO_RAD * dt;
+                const F32 limited = llclamp(bend, leg.bend_last - max_change, leg.bend_last + max_change);
+                if (limited != bend)
+                {
+                    bend = limited;
+                    c = sqrtf(llmax(0.f, a * a + b * b + 2.f * a * b * cosf(bend)));
+                    c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.0005f);
+                }
+            }
+            leg.bend_last = bend;
         }
 
         // The bend plane. The knee bends toward its kneecap -- the knee joint's own forward
