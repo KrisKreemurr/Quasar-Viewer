@@ -88,12 +88,7 @@ fi
 rm -rf /mnt/c/dev/QuasarSlipstream
 7z x -o/mnt/c/dev/QuasarSlipstream build-windows-x86_64/package/*_win64.zip >/dev/null
 # Streamline's DLLs beside the viewer (NVIDIA's licences for them are in the SDK)
-if [ -f "$SL_DIR/include/sl.h" ]; then
-  VIEWER_DIR=$(dirname "$(ls /mnt/c/dev/QuasarSlipstream/*/SlipstreamViewer.exe | head -1)")
-  for f in sl.interposer.dll sl.common.dll sl.pcl.dll sl.reflex.dll sl.dlss_g.dll nvngx_dlssg.dll; do
-    if [ -f "$SL_DIR/bin/x64/$f" ]; then cp "$SL_DIR/bin/x64/$f" "$VIEWER_DIR/"; fi
-  done
-fi
+if [ -f "$SL_DIR/include/sl.h" ]; then bash scripts/quasar/copy_streamline.sh || true; fi
 # A desktop shortcut straight to the exe, wherever the zip put it
 EXE=$(find /mnt/c/dev/QuasarSlipstream -maxdepth 3 -iname "SlipstreamViewer.exe" | head -1)
 if [ -n "$EXE" ]; then
