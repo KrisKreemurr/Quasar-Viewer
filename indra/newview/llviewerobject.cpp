@@ -1508,7 +1508,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
                     if (new_text || mHudText != temp_string || mHudTextColor != LLColor4(coloru))
                     {
                         mText->setColor(LLColor4(coloru));
-                        mText->setString(SLParcelSpeakers::displayText(temp_string));   // #892: tags are not drawn
+                        mText->setString(SLParcelSpeakers::displayText(LLVOAvatar::qlStripPhysTag(temp_string)));   // #892: tags are not drawn
 // [RLVa:KB] - Checked: 2010-03-27 (RLVa-1.4.0a) | Added: RLVa-1.0.0f
                         if (RlvActions::isRlvEnabled())
                         {
@@ -1879,7 +1879,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
                     dp->unpackBinaryDataFixed(coloru.mV, 4, "Color");
                     coloru.mV[3] = 255 - coloru.mV[3];
                     mText->setColor(LLColor4(coloru));
-                    mText->setString(SLParcelSpeakers::displayText(temp_string));   // #892: tags are not drawn
+                    mText->setString(SLParcelSpeakers::displayText(LLVOAvatar::qlStripPhysTag(temp_string)));   // #892: tags are not drawn
 // [RLVa:KB] - Checked: 2010-03-27 (RLVa-1.4.0a) | Added: RLVa-1.0.0f
                     if (RlvActions::isRlvEnabled())
                     {
@@ -6265,7 +6265,7 @@ void LLViewerObject::restoreHudText()
             mText->setDoFade(true);
         }
         mText->setColor(mHudTextColor);
-        mText->setString(SLParcelSpeakers::displayText(mHudText));   // #892: tags are not drawn
+        mText->setString(SLParcelSpeakers::displayText(LLVOAvatar::qlStripPhysTag(mHudText)));   // #892: tags are not drawn
     }
 }
 

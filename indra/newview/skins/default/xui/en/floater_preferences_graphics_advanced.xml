@@ -967,6 +967,17 @@ Only used with a DLSS upscaling mode.
             <combo_box.item label="No physics worn: dent only" name="NoPhysicsDent" value="1" />
             <combo_box.item label="No physics worn: default physics" name="NoPhysicsDefault" value="2" />
           </combo_box>
+          <check_box
+            control_name="QuasarAvatarTags"
+            enabled_control="QuasarSoftContact"
+            height="16"
+            label="Follow people's own Quasar physics tags"
+            layout="topleft"
+            name="QuasarAvatarTags"
+            tool_tip="Someone wearing a Quasar physics tag (a small worn object) chooses how soft and wobbly their own body is in Quasar Viewer; that replaces your Softness and Wobble sliders for them. Off: everyone uses your sliders."
+            width="400"
+            left="30"
+            top="598" />
           <slider
             control_name="QuasarBodyCollisionChest"
             enabled_control="QuasarBodyCollision"

@@ -121,6 +121,9 @@ class ViewerManifest(LLManifest):
                 # ... and the parcel stage speaker setup scripts (#892)
                 self.path("slspeakers")
 
+                # ... and the Quasar physics tag script (doc/quasar_physics_tag.md)
+                self.path("quasar")
+
                 # ... and the "which viewer did you use before?" presets (#132)
                 self.path("viewer_presets")
 

@@ -793,6 +793,25 @@ private:
     QLSoftPart  mQLSoft[10];
     bool        mQLSoftDrawn = false;
     void        qlSoftContactDraw();
+    // QUASAR PHYSICS TAG (QuasarAvatarTags, doc/quasar_physics_tag.md): a worn object's
+    // hover text may hold "[qlphys soft=0.6 wobble=1.4 breast=0.7 butt=0.4 belly=0.3]" --
+    // how that avatar's owner wants their body to feel in Quasar Viewer. Read from this
+    // avatar's own attachments every 2 s; values already clamped; < 0 = not set.
+public:
+    struct QLPhysTag
+    {
+        bool present = false;
+        bool off = false;           // "off": no soft contact on this avatar
+        F32  soft = -1.f;           // 0..1, every part
+        F32  wobble = -1.f;         // 0..2
+        F32  part_soft[3] = { -1.f, -1.f, -1.f };   // breast, butt, belly (0..1)
+    };
+    static bool        qlParsePhysTag(const std::string& text, QLPhysTag& out);
+    static std::string qlStripPhysTag(const std::string& text);   // the text without the tag (what is drawn)
+private:
+    QLPhysTag   mQLPhysTag;
+    F64         mQLPhysTagNextCheck = 0.0;
+    void        qlReadPhysTag();
     void        qlBodyCollisionApply(bool visible);
     static F32  qlBodyAreaScale(const std::string& volume);   // per-area size multiplier (settings)
     void        qlBodyCollisionFit(const void* torso, const S32* kind, const char* const* names, S32 count);

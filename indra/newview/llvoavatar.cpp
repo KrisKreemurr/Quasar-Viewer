@@ -135,7 +135,9 @@
 #include "llskinningutil.h"
 #include "llcleanmeshasset.h"   // Quasar body collision auto-fit: raw mesh bytes of released geometry
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -7019,8 +7021,15 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         static LLCachedControl<F32>  s_wobble(gSavedSettings, "QuasarSoftContactWobble", 1.f);
         static LLCachedControl<S32>  s_no_physics(gSavedSettings, "QuasarSoftContactNoPhysics", 1);
         const F32 soft_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
-        const F32 give = llclamp((F32)s_give, 0.f, 1.f);
-        const F32 wobble = llclamp((F32)s_wobble, 0.f, 2.f);
+        // The avatar's own wishes, if they wear a Quasar physics tag (and tags are on): their
+        // values replace this viewer's sliders for them; "off" turns soft contact off on them.
+        static LLCachedControl<bool> s_tags(gSavedSettings, "QuasarAvatarTags", true);
+        qlReadPhysTag();
+        const QLPhysTag& tag = mQLPhysTag;
+        const bool use_tag = s_tags && tag.present;
+        const bool tag_off = use_tag && tag.off;
+        const F32 give_all = use_tag && tag.soft >= 0.f ? tag.soft : llclamp((F32)s_give, 0.f, 1.f);
+        const F32 wobble = use_tag && tag.wobble >= 0.f ? tag.wobble : llclamp((F32)s_wobble, 0.f, 2.f);
         for (S32 t = 0; t < torso_count; ++t)
         {
             const S32 kind = torso_kind[t];
@@ -7032,7 +7041,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             part.shape_c = torso[t].c;
             for (S32 k = 0; k < 3; ++k) part.shape_a[k] = torso[t].axis[k];
             LLJoint* parent = torso_vol[t] ? torso_vol[t]->getParent() : nullptr;
-            if (!s_soft || !parent || give <= 0.f)
+            const F32 give = use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all;
+            if (!s_soft || tag_off || !parent || give <= 0.f)
             {
                 part.x.clearVec();
                 part.v.clearVec();
@@ -7250,6 +7260,124 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         arm.shoulder_set = shoulders[i]->getRotation();
     }
     mQLBodyApplied = true;
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR PHYSICS TAG (doc/quasar_physics_tag.md). The same convention as Slipstream's
+// speaker tags (doc/parcel_speakers_protocol.md): a tag in a prim's hover text, set faintly
+// visible (the simulator drops near-invisible text), never drawn by this viewer, sent to
+// every viewer in range in the normal object updates and kept on the prim after the script
+// that set it is gone. Here the prim is an attachment the avatar wears: only that avatar's
+// own worn objects are read, so nobody can set someone else's. The first tag counts; tokens
+// are space separated; unknown keys are ignored (later versions can add some); a bad value
+// drops that one token; values are clamped.
+//-----------------------------------------------------------------------------
+namespace
+{
+    size_t ql_phys_tag_start(const std::string& s)
+    {
+        static const char PREFIX[] = "[qlphys";
+        constexpr size_t n = sizeof(PREFIX) - 1;
+        for (size_t i = s.find('['); i != std::string::npos && i + n <= s.size(); i = s.find('[', i + 1))
+        {
+            size_t k = 1;
+            while (k < n && (char)std::tolower((unsigned char)s[i + k]) == PREFIX[k]) ++k;
+            if (k < n) continue;
+            if (i + n == s.size()) return std::string::npos;   // unterminated
+            const char after = s[i + n];
+            if (after == ']' || std::isspace((unsigned char)after)) return i;
+        }
+        return std::string::npos;
+    }
+
+    bool ql_parse_number(const std::string& v, F32& out)
+    {
+        if (v.empty() || v.size() > 12) return false;
+        char* end = nullptr;
+        const double d = strtod(v.c_str(), &end);
+        if (!end || *end != '\0' || !std::isfinite(d)) return false;
+        out = (F32)d;
+        return true;
+    }
+}
+
+// static
+bool LLVOAvatar::qlParsePhysTag(const std::string& text, QLPhysTag& out)
+{
+    const size_t at = ql_phys_tag_start(text);
+    if (at == std::string::npos) return false;
+    const size_t end = text.find(']', at);
+    if (end == std::string::npos) return false;
+    std::string body = text.substr(at + 7, end - at - 7);
+    std::transform(body.begin(), body.end(), body.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
+    QLPhysTag tag;
+    tag.present = true;
+    size_t i = 0;
+    while (i < body.size())
+    {
+        while (i < body.size() && std::isspace((unsigned char)body[i])) ++i;
+        size_t j = i;
+        while (j < body.size() && !std::isspace((unsigned char)body[j])) ++j;
+        if (j == i) break;
+        const std::string token = body.substr(i, j - i);
+        i = j;
+        if (token == "off")
+        {
+            tag.off = true;
+            continue;
+        }
+        const size_t eq = token.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        const std::string key = token.substr(0, eq);
+        F32 value = 0.f;
+        if (!ql_parse_number(token.substr(eq + 1), value)) continue;
+        if (key == "soft") tag.soft = llclamp(value, 0.f, 1.f);
+        else if (key == "wobble") tag.wobble = llclamp(value, 0.f, 2.f);
+        else if (key == "breast") tag.part_soft[0] = llclamp(value, 0.f, 1.f);
+        else if (key == "butt") tag.part_soft[1] = llclamp(value, 0.f, 1.f);
+        else if (key == "belly") tag.part_soft[2] = llclamp(value, 0.f, 1.f);
+    }
+    out = tag;
+    return true;
+}
+
+// static
+std::string LLVOAvatar::qlStripPhysTag(const std::string& text)
+{
+    const size_t at = ql_phys_tag_start(text);
+    if (at == std::string::npos) return text;
+    const size_t end = text.find(']', at);
+    if (end == std::string::npos) return text;
+    std::string out = text.substr(0, at) + text.substr(end + 1);
+    const size_t first = out.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return std::string();
+    const size_t last = out.find_last_not_of(" \t\r\n");
+    return out.substr(first, last - first + 1);
+}
+
+// Every 2 s: this avatar's worn objects (and their linked prims), the first tag found.
+void LLVOAvatar::qlReadPhysTag()
+{
+    if (gFrameTimeSeconds < mQLPhysTagNextCheck) return;
+    mQLPhysTagNextCheck = gFrameTimeSeconds + 2.0;
+    QLPhysTag found;
+    auto consider = [&](LLViewerObject* object)
+    {
+        if (found.present || !object || object->mHudText.empty()) return;
+        qlParsePhysTag(object->mHudText, found);
+    };
+    for (const auto& [point, attachment] : mAttachmentPoints)
+    {
+        if (!attachment || !attachment->getValid()) continue;
+        for (const auto& attached : attachment->mAttachedObjects)
+        {
+            LLViewerObject* object = attached.get();
+            if (!object || object->isHUDAttachment()) continue;
+            consider(object);
+            for (const LLPointer<LLViewerObject>& child : object->getChildren()) consider(child.get());
+        }
+    }
+    mQLPhysTag = found;
 }
 
 //-----------------------------------------------------------------------------
