@@ -64,6 +64,9 @@ public:
     // then presentPaced() hands both images to the pacing thread and advances the frame slot
     // (in place of present()).
     bool acquireGen(VkDeviceContext& ctx, uint32_t* outImageIndex, bool* outNeedsRecreate);
+    // The live chain was created for frame generation (enough images, its present mode):
+    // until a rebuild after QuasarFrameGen turns on, frames present normally.
+    bool builtForFrameGen() const { return mBuiltForFrameGen; }
     VkSemaphore imageAvailableGenSemaphore() const { return mImageAvailableGen[mFrame]; }
     VkFence     genFence() const { return mGenFence[mFrame]; }
     void presentPaced(VkDeviceContext& ctx, uint32_t genIndex, uint32_t realIndex);
@@ -199,6 +202,7 @@ private:
     VkResult lockedAcquire(VkDeviceContext& ctx, VkSemaphore sem, uint32_t* outImageIndex);
     void pacerLoop();
     void pacerStop();
+    bool                     mBuiltForFrameGen = false;
     std::vector<VkSemaphore> mImageAvailableGen;
     std::vector<VkFence>     mGenFence;
     std::vector<std::atomic<bool>> mGenSlotBusy;   // the pacing thread still owns the slot's fence

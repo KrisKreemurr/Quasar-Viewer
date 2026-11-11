@@ -160,6 +160,7 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
     // Quasar frame generation: two images a frame (the generated one and the real one) for
     // every frame in flight, plus the ones the presentation engine holds.
     uint32_t imageCount = caps.minImageCount + (sFrameGen ? 3u : 1u);
+    mBuiltForFrameGen = sFrameGen;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount) {
         imageCount = caps.maxImageCount;
     }

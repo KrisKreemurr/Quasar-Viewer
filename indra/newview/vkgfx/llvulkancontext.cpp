@@ -3682,7 +3682,8 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
                                << " (QuasarFrameGen changed; rebuilding the swapchain)" << LL_ENDL;
         }
     }
-    if (VkSwapchain::sFrameGen && doWorld && !mImpl->mHdrOutputActive && slot < mImpl->mFgCmds.size())
+    if (VkSwapchain::sFrameGen && mImpl->mSwapchain.builtForFrameGen() && doWorld && !mImpl->mHdrOutputActive
+        && slot < mImpl->mFgCmds.size())
     {
         static LLCachedControl<F32> fgScale(gSavedSettings, "QuasarFrameGenMotionScale", 1.f);
         static LLCachedControl<bool> fgFlipY(gSavedSettings, "QuasarFrameGenFlipMotionY", false);
