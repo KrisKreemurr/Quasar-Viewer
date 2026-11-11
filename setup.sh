@@ -71,6 +71,8 @@ if [ ! -f "$SL_DIR/include/sl.h" ]; then
   rm -f /tmp/streamline.zip
 fi
 # The whole log is kept (also on C:), and a failure prints only the real errors
+# Local builds: no Windows installer, and a quick zip (both only slow the build down here)
+export QUASAR_NO_INSTALLER=1 QUASAR_ZIP_LEVEL=1
 if ! make windows 2>&1 | tee ~/quasar-build.log; then
   cp ~/quasar-build.log /mnt/c/dev/quasar-build.log 2>/dev/null || true
   echo; echo "===== BUILD FAILED: the errors (full log in C:\\dev\\quasar-build.log) ====="

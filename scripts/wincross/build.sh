@@ -29,12 +29,12 @@ rm -rf "$PWD/$B/package"; mkdir -p "$STAGE"
     --build="$OLDPWD/$B/newview" --buildtype=Release "--channel=$VIEWER_CHANNEL" --configuration=. \
     --dest="$STAGE" --grid=agni --source="$OLDPWD/indra/newview" \
     --versionfile="$OLDPWD/$B/newview/viewer_version.txt" )
-( cd "$B/package" && 7z a -tzip -mx=7 "${V_ARTIFACT_BASE}_win64.zip" Slipstream_win64 >/dev/null )
+( cd "$B/package" && 7z a -tzip -mx=${QUASAR_ZIP_LEVEL:-7} "${V_ARTIFACT_BASE}_win64.zip" Slipstream_win64 >/dev/null )
 ls -la "$B/package/${V_ARTIFACT_BASE}_win64.zip"
 
 # Installer (#168), an extra asset beside the zip. Needs makensis (apt install nsis);
 # without it the zip is still produced and the installer is skipped.
-if command -v makensis >/dev/null; then
+if command -v makensis >/dev/null && [ -z "${QUASAR_NO_INSTALLER:-}" ]; then   # Quasar: setup.sh skips it
     DISPVER="$V_FULL_VERSION"
     [ "$V_KIND" = "release" ] || DISPVER="$V_FULL_VERSION ${V_KIND^}"
     APPNAME="Slipstream"
