@@ -12588,6 +12588,17 @@
     <key>Value</key>
     <real>0.04</real>
   </map>
+  <key>QuasarFootIKTilt</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK: tilt the feet to the ground's slope (slopes over 5 degrees). Off keeps the animation's foot angle.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>
