@@ -12500,6 +12500,61 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarFootIKWalkLayer</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK refinement (off = the first version): while walking, both feet follow the ground, a foot counts as standing by its speed, and the hips follow slowly (no stair-step hop).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFootIKSmoothSlope</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK refinement (off = the first version): smooth the slope the feet tilt to.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFootIKKneecap</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK refinement (off = the first version): bend the knee toward its kneecap as the leg straightens, instead of the animated knee's offset alone.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFootIKSoftReach</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK refinement (off = the first version): approach a straight leg softly instead of the hard limit.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarFootIKTwist</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK refinement (off = the first version): swing-twist hip and hinge knee, so the knee turns only about the leg's bend axis.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

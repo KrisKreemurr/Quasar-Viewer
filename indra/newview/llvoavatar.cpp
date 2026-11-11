@@ -5407,7 +5407,15 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     // follow the ground under them -- the swinging foot keeps the animation's lift, but
     // above the real ground, so it clears a slope and lands without a snap -- and which
     // foot stands is told by its speed in the world (a planted foot is nearly still).
-    const F32 moving = ql_smoothstep(0.15f, 0.5f, mSpeed);
+    // The later refinements, each behind its own switch (all off = the first version:
+    // fast hips, height-told feet, the animated knee as the pole, a bare shortest-arc
+    // hip and knee), so each can be tried live against the walking twitch.
+    static LLCachedControl<bool> s_walk(gSavedSettings, "QuasarFootIKWalkLayer", false);
+    static LLCachedControl<bool> s_smooth_slope(gSavedSettings, "QuasarFootIKSmoothSlope", false);
+    static LLCachedControl<bool> s_kneecap(gSavedSettings, "QuasarFootIKKneecap", false);
+    static LLCachedControl<bool> s_soft_reach(gSavedSettings, "QuasarFootIKSoftReach", false);
+    static LLCachedControl<bool> s_twist(gSavedSettings, "QuasarFootIKTwist", false);
+    const F32 moving = s_walk ? ql_smoothstep(0.15f, 0.5f, mSpeed) : 0.f;
     const F32 inv_dt = dt > 0.001f ? 1.f / dt : 0.f;
 
     static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarFootIKDebug", false);
@@ -5442,7 +5450,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         leg.normal += (ground_norm[i] - leg.normal) * follow;
         if (leg.normal.lengthSquared() < 1.0e-6f) leg.normal = LLVector3::z_axis;
         leg.normal.normVec();
-        ground_norm[i] = leg.normal;
+        if (s_smooth_slope) ground_norm[i] = leg.normal;
         step[i] = leg.ground * leg.fade * strength;
     }
 
@@ -5460,6 +5468,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     const F32 drop_rate = 12.f + (3.f - 12.f) * moving;
     const F32 drop_follow = mQLFootIKTracking ? 1.f - expf(-dt * drop_rate) : 1.f;
     mQLFootIKDrop += (drop_target - mQLFootIKDrop) * drop_follow;
+    if (!s_walk) mQLFootIKDrop = drop_target;   // the first version: the hips follow the feet at once
     const F32 drop = llclamp(mQLFootIKDrop, -0.4f, 0.f);
     mQLFootIKTracking = true;
     if (debug)
@@ -5527,13 +5536,20 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // walk straightens each leg every step): approach the straight leg softly, never
         // reaching it, so the solve has no singular point to snap through.
         const F32 reach = a + b;
-        const F32 soft_start = 0.985f * reach;
-        const F32 soft_range = reach - soft_start;
-        if (c > soft_start)
+        if (s_soft_reach)
         {
-            c = soft_start + soft_range * (1.f - expf(-(c - soft_start) / soft_range));
+            const F32 soft_start = 0.985f * reach;
+            const F32 soft_range = reach - soft_start;
+            if (c > soft_start)
+            {
+                c = soft_start + soft_range * (1.f - expf(-(c - soft_start) / soft_range));
+            }
+            c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.0005f);
         }
-        c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.0005f);
+        else
+        {
+            c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.001f);
+        }
 
         // The bend plane. The knee bends toward its kneecap -- the knee joint's own forward
         // axis, which stays put however straight the leg is. Where the animation bends the
@@ -5549,7 +5565,12 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 bent = pole.length();
         const F32 bent_weight = ql_smoothstep(0.03f * a, 0.10f * a, bent);
         LLVector3 lead = kneecap;
-        if (bent_weight > 0.f)
+        if (!s_kneecap)
+        {
+            // the first version: the animated knee's side of the line, forward when straight
+            lead = pole.lengthSquared() < 1.0e-6f ? forward : pole;
+        }
+        else if (bent_weight > 0.f)
         {
             lead = pole * (bent_weight / bent) + kneecap * (1.f - bent_weight);
         }
@@ -5559,13 +5580,16 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         // The same plane through the animated leg: its normal is the axis the knee bends
         // about, before (old_axis) and after the solve (new_axis).
         LLVector3 old_side = lead - hip_to_ankle * (lead * hip_to_ankle);
-        if (old_side.lengthSquared() < 1.0e-8f) continue;
-        old_side.normVec();
+        if (old_side.lengthSquared() > 1.0e-8f) old_side.normVec();
         LLVector3 old_axis = hip_to_ankle % old_side;
         LLVector3 new_axis = to_target % side;
-        if (old_axis.lengthSquared() < 1.0e-8f || new_axis.lengthSquared() < 1.0e-8f) continue;
-        old_axis.normVec();
-        new_axis.normVec();
+        const bool axes = old_axis.lengthSquared() > 1.0e-8f && new_axis.lengthSquared() > 1.0e-8f;
+        if (axes)
+        {
+            old_axis.normVec();
+            new_axis.normVec();
+        }
+        const bool twist_on = s_twist && axes;
 
         const F32 cos_hip = llclamp((a * a + c * c - b * b) / (2.f * a * c), -1.f, 1.f);
         const F32 sin_hip = sqrtf(llmax(0.f, 1.f - cos_hip * cos_hip));
@@ -5586,20 +5610,28 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         axis_from -= thigh_dir * (axis_from * thigh_dir);
         LLVector3 axis_to = new_axis - thigh_dir * (new_axis * thigh_dir);
         LLQuaternion twist;
-        if (axis_from.lengthSquared() > 1.0e-8f && axis_to.lengthSquared() > 1.0e-8f)
+        if (twist_on && axis_from.lengthSquared() > 1.0e-8f && axis_to.lengthSquared() > 1.0e-8f)
         {
             twist = ql_arc(axis_from, axis_to);
         }
         const LLQuaternion hip_turn = swing * twist;
 
-        LLVector3 shin_from = shin * hip_turn;
-        shin_from -= new_axis * (shin_from * new_axis);
-        LLVector3 shin_to = new_ankle - new_knee;
-        shin_to -= new_axis * (shin_to * new_axis);
         LLQuaternion knee_turn;
-        if (shin_from.lengthSquared() > 1.0e-8f && shin_to.lengthSquared() > 1.0e-8f)
+        if (twist_on)
         {
-            knee_turn = ql_arc(shin_from, shin_to);
+            LLVector3 shin_from = shin * hip_turn;
+            shin_from -= new_axis * (shin_from * new_axis);
+            LLVector3 shin_to = new_ankle - new_knee;
+            shin_to -= new_axis * (shin_to * new_axis);
+            if (shin_from.lengthSquared() > 1.0e-8f && shin_to.lengthSquared() > 1.0e-8f)
+            {
+                knee_turn = ql_arc(shin_from, shin_to);
+            }
+        }
+        else
+        {
+            // the first version: the shin, carried by the hip's turn, onto its new direction
+            knee_turn = ql_arc(shin * hip_turn, new_ankle - new_knee);
         }
         hips[i]->setWorldRotation(hip_q[i] * hip_turn);
         knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
@@ -5608,7 +5640,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
             // How far each turn goes (degrees), and how far the knee sits off the plane the
             // animation bent it in (cm): a twitch shows here as a jump between frames.
             auto deg = [](const LLQuaternion& q) { return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f)) * RAD_TO_DEG; };
-            const F32 off_plane = (new_knee - knee) * old_axis * 100.f;
+            const F32 off_plane = axes ? (new_knee - knee) * old_axis * 100.f : 0.f;
             LL_INFOS("QuasarFootIK") << llformat("    %s swing=%.1f twist=%.1f knee=%.1f c/reach=%.3f knee_off_plane=%.1fcm",
                 i == 0 ? "L" : "R", deg(swing), deg(twist), deg(knee_turn), c / reach, off_plane) << LL_ENDL;
         }
