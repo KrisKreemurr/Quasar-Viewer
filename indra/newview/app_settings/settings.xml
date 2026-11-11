@@ -12698,6 +12698,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionFitShape</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision auto-fit: match each body area's own width, depth and height and where it sits (a breast that sticks out forward and hangs low, wide hips, a butt that sticks back), not only how much bigger it is. Kept only where it fits the mesh better than growing the area evenly. Needs QuasarBodyCollisionAutoFit.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionDebugOthers</key>
   <map>
     <key>Comment</key>

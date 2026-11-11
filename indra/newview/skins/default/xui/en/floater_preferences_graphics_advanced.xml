@@ -873,6 +873,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="464" />
+          <check_box
+            control_name="QuasarBodyCollisionFitShape"
+            enabled_control="QuasarBodyCollisionAutoFit"
+            height="16"
+            label="Match each body part's shape"
+            layout="topleft"
+            name="QuasarBodyCollisionFitShape"
+            tool_tip="Fit each body part's own width, depth and height and where it sits (a breast that sticks out and hangs low, wide hips, a butt that sticks back), not only its size. Used only where it fits the mesh better. Off: each part just grows evenly."
+            width="300"
+            left="30"
+            top="530" />
           <slider
             control_name="QuasarBodyCollisionChest"
             enabled_control="QuasarBodyCollision"

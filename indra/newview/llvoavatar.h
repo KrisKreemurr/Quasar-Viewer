@@ -784,6 +784,19 @@ private:
     // is than each body volume (PELVIS .. R_UPPER_LEG, body collision's TORSO order),
     // measured from the mesh itself when what is worn changes; 1 = as the volume is.
     F32         mQLBodyFit[10] = { 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f };
+    // Shaped fit (QuasarBodyCollisionFitShape): the egg shape that best matches each area's
+    // mesh -- its own width, depth and height, and where it sits -- in the volume's own
+    // units (half sizes; centre offset along the volume's axes). Unset: the even fit above.
+    // (Public only so the measuring job in llvoavatar.cpp can hold one per area.)
+public:
+    struct QLBodyShape
+    {
+        bool shaped = false;
+        F32  half[3] = { 1.f, 1.f, 1.f };
+        F32  centre[3] = { 0.f, 0.f, 0.f };
+    };
+private:
+    QLBodyShape mQLBodyShape[10];
     U64         mQLBodyFitKey = 0;           // what was worn when last measured
     F64         mQLBodyFitNextCheck = 0.0;   // next look at what is worn (gFrameTimeSeconds)
 
