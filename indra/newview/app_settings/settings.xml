@@ -12566,6 +12566,17 @@
     <key>Value</key>
     <real>400.0</real>
   </map>
+  <key>QuasarFootIKWalkHips</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK, walking: how far the hips follow the lower foot (1 = the lower foot: the body steps down and up with the feet like on real stairs; 0 = the average of both feet: smoothest).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

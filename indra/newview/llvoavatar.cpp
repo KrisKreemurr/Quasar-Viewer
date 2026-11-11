@@ -5471,11 +5471,22 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     // trading it every step -- and the drop turned a corner each time the lower foot
     // changed. With the average each leg takes half, and nothing switches. (Standing
     // and stepping up keep the deeper step: the hard bend on a step up stays.)
+    // QuasarFootIKWalkHips blends it back toward the lower foot (1 = the lower foot: the
+    // body steps down and up with the feet, as on real stairs; 0 = the average). The lower
+    // foot is taken as a SOFT minimum -- within 6 cm of each other the two steps blend --
+    // so the hips round the corner when the lower foot changes instead of turning it; the
+    // knee's bend rate cap (below) keeps what is left from snapping.
     const F32 walking = ql_smoothstep(0.15f, 0.5f, mSpeed);
     if (walking > 0.f)
     {
-        const F32 average = llmin(0.f, 0.5f * (step[0] + step[1]));
-        drop_target += (average - drop_target) * walking;
+        static LLCachedControl<F32> s_walk_hips(gSavedSettings, "QuasarFootIKWalkHips", 1.f);
+        const F32 hips = llclamp((F32)s_walk_hips, 0.f, 1.f);
+        const F32 average = 0.5f * (step[0] + step[1]);
+        const F32 SOFT = 0.06f;
+        const F32 h = llmax(SOFT - fabsf(step[0] - step[1]), 0.f) / SOFT;
+        const F32 soft_low = llmin(step[0], step[1]) - h * h * SOFT * 0.25f;
+        const F32 walk_target = llmin(0.f, average + (soft_low - average) * hips);
+        drop_target += (walk_target - drop_target) * walking;
     }
     drop_target = llclamp(drop_target, -0.4f, 0.f);
     const F32 drop_rate = 12.f + (3.f - 12.f) * moving;
