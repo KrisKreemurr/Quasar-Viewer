@@ -12621,6 +12621,17 @@
     <key>Value</key>
     <real>0.01</real>
   </map>
+  <key>QuasarBodyCollisionBodySize</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: how big the torso's collision shapes are compared with the avatar's collision volumes (1 = as the shape sliders make them). The volumes follow the sliders, not the mesh, and on bulky shapes come out wider than the body, pushing hanging arms out; lower fits them to the mesh.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.85</real>
+  </map>
   <key>QuasarBodyCollisionDebug</key>
   <map>
     <key>Comment</key>

@@ -5932,6 +5932,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     static LLCachedControl<bool> s_arms(gSavedSettings, "QuasarBodyCollisionArms", true);
     static LLCachedControl<F32>  s_overlap(gSavedSettings, "QuasarBodyCollisionOverlap", 0.01f);
     static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarBodyCollisionDebug", false);
+    // The collision volumes follow the shape sliders, not the mesh: on a bulky shape they
+    // come out wider than the body drawn over them (hands hanging at the sides read as
+    // "inside the hips"). QuasarBodyCollisionBodySize shrinks the torso's shapes to fit.
+    static LLCachedControl<F32>  s_body_size(gSavedSettings, "QuasarBodyCollisionBodySize", 0.85f);
+    const F32 body_size = llclamp((F32)s_body_size, 0.3f, 1.5f);
 
     LLJoint* shoulders[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
     qlFootIKRank();
@@ -5953,6 +5958,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                                            { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
     constexpr S32 MAX_TORSO = 8;
     QLEllipsoid torso[MAX_TORSO];
+    const char* torso_name[MAX_TORSO] = {};
     S32 torso_count = 0;
     LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
     for (S32 v = 0; v < mNumCollisionVolumes; ++v)
@@ -5964,7 +5970,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         {
             if (name == t)
             {
-                if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count])) ++torso_count;
+                if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count]))
+                {
+                    for (LLVector3& axis : torso[torso_count].axis) axis *= body_size;
+                    torso_name[torso_count++] = t;
+                }
                 matched = true;
                 break;
             }
@@ -5987,9 +5997,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
 
     // Solve: a few passes, each turning each arm out of its deepest torso contact, then the
     // deepest arm-against-arm contact apart (half each).
-    const F32 overlap = llclamp((F32)s_overlap, 0.f, 0.1f);
+    const F32 overlap = llclamp((F32)s_overlap, 0.f, 0.25f);
     LLQuaternion turn[2] = { LLQuaternion::DEFAULT, LLQuaternion::DEFAULT };
     F32 first_depth[2] = { 0.f, 0.f };
+    const char* first_hit[2] = { "-", "-" };
     F32 first_arms = 0.f;
     auto posed = [&](S32 i, S32 k)
     {
@@ -6013,7 +6024,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     LLVector3 p, d;
                     if (!ql_penetration(c, torso[t], p, d)) continue;
                     const F32 depth = d.length();
-                    if (depth > deepest) { deepest = depth; at = p; push = d; }
+                    if (depth > deepest)
+                    {
+                        deepest = depth; at = p; push = d;
+                        if (pass == 0) first_hit[i] = torso_name[t];
+                    }
                 }
             }
             if (pass == 0) first_depth[i] = deepest;
@@ -6088,8 +6103,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
 
     if (s_debug && isSelf())
     {
-        LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm R torso=%.1fcm arms=%.1fcm | L turn=%.1f R turn=%.1f deg",
-            first_depth[0] * 100.f, first_depth[1] * 100.f, first_arms * 100.f,
+        LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm (%s) R torso=%.1fcm (%s) arms=%.1fcm | L turn=%.1f R turn=%.1f deg",
+            first_depth[0] * 100.f, first_hit[0], first_depth[1] * 100.f, first_hit[1], first_arms * 100.f,
             ql_quat_angle(mQLBodyArm[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyArm[1].correction) * RAD_TO_DEG) << LL_ENDL;
     }
     if (!any) return;   // nothing to push out: the animation as it is
