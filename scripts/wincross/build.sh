@@ -21,7 +21,7 @@ source scripts/wincross/env.sh
 ninja -C "$B" ${NINJA_JOBS:+-j"$NINJA_JOBS"}
 
 # Stage exactly what viewer_manifest.py ships, then zip it.
-STAGE="$PWD/$B/package/Slipstream_win64"
+STAGE="$PWD/$B/package/Quasar_win64"
 rm -rf "$PWD/$B/package"; mkdir -p "$STAGE"
 ( cd "$B/newview" && "$OLDPWD/.venv/bin/python" "$OLDPWD/indra/newview/viewer_manifest.py" \
     "--actions=copy package" --arch=x86_64 --platform=windows \
@@ -29,7 +29,7 @@ rm -rf "$PWD/$B/package"; mkdir -p "$STAGE"
     --build="$OLDPWD/$B/newview" --buildtype=Release "--channel=$VIEWER_CHANNEL" --configuration=. \
     --dest="$STAGE" --grid=agni --source="$OLDPWD/indra/newview" \
     --versionfile="$OLDPWD/$B/newview/viewer_version.txt" )
-( cd "$B/package" && 7z a -tzip -mx=${QUASAR_ZIP_LEVEL:-7} "${V_ARTIFACT_BASE}_win64.zip" Slipstream_win64 >/dev/null )
+( cd "$B/package" && 7z a -tzip -mx=${QUASAR_ZIP_LEVEL:-7} "${V_ARTIFACT_BASE}_win64.zip" Quasar_win64 >/dev/null )
 ls -la "$B/package/${V_ARTIFACT_BASE}_win64.zip"
 
 # Installer (#168), an extra asset beside the zip. Needs makensis (apt install nsis);
@@ -37,8 +37,8 @@ ls -la "$B/package/${V_ARTIFACT_BASE}_win64.zip"
 if command -v makensis >/dev/null && [ -z "${QUASAR_NO_INSTALLER:-}" ]; then   # Quasar: setup.sh skips it
     DISPVER="$V_FULL_VERSION"
     [ "$V_KIND" = "release" ] || DISPVER="$V_FULL_VERSION ${V_KIND^}"
-    APPNAME="Slipstream"
-    [ "$V_KIND" != "jetstream" ] || APPNAME="Slipstream Jetstream"   # installs beside Beta / Release
+    APPNAME="Quasar Viewer"
+    [ "$V_KIND" != "jetstream" ] || APPNAME="Quasar Viewer Jetstream"   # installs beside Beta / Release
     bash scripts/wincross/make_installer.sh "$STAGE" "$B/package/${V_ARTIFACT_BASE}_Setup.exe" "$V_FULL_VERSION" "$DISPVER" "$APPNAME"
 else
     echo "makensis not found: skipping the Windows installer (apt install nsis)"

@@ -509,27 +509,27 @@
      max_val="5"
      min_val="0"
      name="edit_ease_spin"
-     tool_tip="Seconds a bone change eases in over instead of snapping (0 = at once): typed or stepped dial values, undo / redo. Dragging a dial or IK handle follows the mouse. Shared poses send it, so other Slipstream viewers see the same ease."
+     tool_tip="Seconds a bone change eases in over instead of snapping (0 = at once): typed or stepped dial values, undo / redo. Dragging a dial or IK handle follows the mouse. Shared poses send it, so other Quasar and Slipstream viewers see the same ease."
      top="271"
      width="66" />
     <check_box
      follows="left|top"
      height="16"
-     label="Share my pose with Slipstream users nearby"
+     label="Share my pose with Quasar and Slipstream users nearby"
      layout="topleft"
      left="320"
      name="share_check"
-     tool_tip="Show your pose to other Slipstream users nearby who have 'Show poses' on. Uses a small helper object (#Slipstream Helper) while sharing."
+     tool_tip="Show your pose to other Quasar and Slipstream users nearby who have 'Show poses' on. Uses a small helper object (#Slipstream Helper) while sharing."
      top="298"
      width="250" />
     <check_box
      follows="left|top"
      height="16"
-     label="Show poses other Slipstream users share"
+     label="Show poses other Quasar and Slipstream users share"
      layout="topleft"
      left="320"
      name="show_others_check"
-     tool_tip="See the poses other Slipstream users share with you (uses a small helper object while on)"
+     tool_tip="See the poses other Quasar and Slipstream users share with you (uses a small helper object while on)"
      top="316"
      width="290" />
     <combo_box
@@ -856,7 +856,7 @@
      layout="topleft"
      left="8"
      name="lookat_send_check"
-     tool_tip="Other Slipstream users with 'Show look-at' on see your mesh body turn its own neck and head (pony, Bento neck, human) toward what you look at, even over animations. Sends a direction only, never what you look at. Cannot be switched on while 'Don&apos;t send my Look At target to others' (Preferences, Privacy) is on; nothing is sent while your AO holds your head either. Uses the small helper object while on."
+     tool_tip="Other Quasar and Slipstream users with 'Show look-at' on see your mesh body turn its own neck and head (pony, Bento neck, human) toward what you look at, even over animations. Sends a direction only, never what you look at. Cannot be switched on while 'Don&apos;t send my Look At target to others' (Preferences, Privacy) is on; nothing is sent while your AO holds your head either. Uses the small helper object while on."
      top="618"
      width="155" />
     <check_box
@@ -867,7 +867,7 @@
      layout="topleft"
      left="8"
      name="lookat_show_check"
-     tool_tip="Turn other Slipstream users' heads by the look-at they send (needs 'Show poses' on). A bone that a Pose Studio pose holds keeps the pose."
+     tool_tip="Turn other Quasar and Slipstream users' heads by the look-at they send (needs 'Show poses' on). A bone that a Pose Studio pose holds keeps the pose."
      top="638"
      width="155" />
     <check_box

@@ -7,8 +7,8 @@
 
 	<!-- Default Args - these arguments will be replaced in all strings -->
 	<string name="SECOND_LIFE">Second Life</string>
-    <string name="APP_NAME">Slipstream</string>
-	<string name="CAPITALIZED_APP_NAME">SLIPSTREAM</string>
+    <string name="APP_NAME">Quasar Viewer</string>
+	<string name="CAPITALIZED_APP_NAME">QUASAR VIEWER</string>
 	<string name="SECOND_LIFE_GRID">Second Life Grid</string>
 	<string name="SUPPORT_SITE">Second Life Support Portal</string>
 
@@ -20,12 +20,11 @@
 
 	<!-- about dialog/support string-->
 	<string name="AboutHeader">
-Brought to you by Sky Line. Copyright (C) 2026 Bluefast Studios.
+Quasar Viewer by Kris Kreemurr, built on Slipstream by Sky Line (Copyright (C) 2026 Bluefast Studios), which is built on the Alchemy Viewer and Linden Lab's Second Life viewer.
 
 [CHANNEL] [VIEWER_VERSION_0].[VIEWER_VERSION_1].[VIEWER_VERSION_2].[VIEWER_VERSION_3] ([ADDRESS_SIZE]bit) ([ARCHITECTURE])
-[[VIEWER_RELEASE_NOTES_URL] [ReleaseNotes]]
-Source code: https://git.slipstreamviewer.org/sky_line/Slipstream
-Privacy: https://slipstreamviewer.org/privacy.html
+Quasar Viewer source code: https://github.com/KrisKreemurr/Quasar-Viewer
+Slipstream source code: https://git.slipstreamviewer.org/sky_line/Slipstream
 
 This software is not provided or supported by Linden Lab, the makers of Second Life.
 	</string>
@@ -3143,12 +3142,12 @@ If you continue to receive this message, contact the [SUPPORT_SITE].
     <string name="MBOutOfMemoryErr">
         [APP_NAME]'s request for memory failed. Application can't proceed and will be closed.
 
-If your computer's RAM is low, quit any heavy applications before running Slipstream, allocate a page file or reduce graphical settings like draw distance.
+If your computer's RAM is low, quit any heavy applications before running Quasar, allocate a page file or reduce graphical settings like draw distance.
     </string>
     <string name="MBMissingFile">
         [APP_NAME] couldn't access or find some of the files it needs and will be closed.
 
-Please reinstall viewer from https://git.slipstreamviewer.org/sky_line/Slipstream/releases and contact the Slipstream Viewer team if issue persists after reinstall.
+Please reinstall the viewer from https://github.com/KrisKreemurr/Quasar-Viewer and contact the Quasar Viewer team if issue persists after reinstall.
     </string>
 
     <!-- Avatar Shape Information -->

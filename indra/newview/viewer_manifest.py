@@ -304,14 +304,14 @@ class ViewerManifest(LLManifest):
         return CHANNEL_VENDOR_BASE + ' ' + app_suffix
 
     def exec_name(self):
-        return "SlipstreamViewer"
+        return "QuasarViewer"
 
     def app_name_oneword(self):
         return ''.join(self.app_name().split())
 
     def icon_path(self):
-        # Slipstream: one in-tree icon set for every channel.
-        return os.path.join(self.args['source'], 'icons', 'slipstream')
+        # Quasar: one in-tree icon set for every channel (the Quasar logo).
+        return os.path.join(self.args['source'], 'icons', 'quasar')
 
     def extract_names(self,src):
         """Extract contributor names from source file, returns string"""
@@ -572,7 +572,7 @@ class Windows_x86_64_Manifest(ViewerManifest):
             # Without them every custom cursor falls back to the arrow.
             self.path("res-sdl")
             with self.prefix(src=self.icon_path(), dst="res-sdl"):
-                self.path("slipstream_256.BMP", "ll_icon.BMP")
+                self.path("quasar_256.BMP", "ll_icon.BMP")
 
             GITHUB_OUTPUT = os.getenv('GITHUB_OUTPUT')
             if GITHUB_OUTPUT:
@@ -935,7 +935,7 @@ class Darwin_x86_64_Manifest(ViewerManifest):
 
                 # need .icns file referenced by Info.plist
                 with self.prefix(src=self.icon_path(), dst="") :
-                    self.path("slipstream.icns")
+                    self.path("quasar.icns")
 
                 # # Copy in the updater script and helper modules
                 # self.path(src=os.path.join(pkgdir, 'VMP'), dst="updater")
@@ -1122,16 +1122,16 @@ class LinuxManifest(ViewerManifest):
         # Get the icons based on the channel type
         icon_path = self.icon_path()
         with self.prefix(src=icon_path) :
-            self.path("slipstream_256.png","slipstream_icon.png")
+            self.path("quasar_256.png","quasar_icon.png")
             with self.prefix(dst="res-sdl") :
-                self.path("slipstream_256.BMP","ll_icon.BMP")
+                self.path("quasar_256.BMP","ll_icon.BMP")
 
         # hicolor icon theme set, for distribution packages to install under
         # /usr/share/icons (scripts/packaging/aur/PKGBUILD, #248).
         for size in ("16x16", "24x24", "32x32", "48x48", "64x64", "128x128", "256x256", "512x512", "scalable"):
             subdir = os.path.join("hicolor", size, "apps")
             with self.prefix(src=os.path.join(icon_path, "linux", subdir), dst=os.path.join("share", "icons", subdir)):
-                self.path("slipstream.svg" if size == "scalable" else "slipstream.png")
+                self.path("quasar.svg" if size == "scalable" else "quasar.png")
 
         with self.prefix(src=os.path.join(self.args['build'], os.pardir, "llwebrtc" ), dst="lib"):
             self.path("libllwebrtc.so")

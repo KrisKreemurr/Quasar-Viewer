@@ -495,6 +495,10 @@ namespace SLUpdateChecker
 {
     void idle()
     {
+        // Quasar Viewer: the feed is Slipstream's releases, which would offer (and could
+        // install) Slipstream over Quasar. Quasar builds never check on their own.
+        constexpr bool QUASAR_NO_UPDATE_CHECK = true;
+        if (QUASAR_NO_UPDATE_CHECK) return;
         if (LLStartUp::getStartupState() < STATE_STARTED || is_test_build()) return;
         static LLCachedControl<bool> enabled(gSavedSettings, "UpdateCheckEnabled", true);
         if (!enabled) return;
@@ -511,7 +515,8 @@ namespace SLUpdateChecker
 
     void checkNow()
     {
-        start_check(true);
+        // Quasar Viewer: no update feed of its own yet -- show Quasar Viewer's GitHub.
+        LLWeb::loadURLExternal("https://github.com/KrisKreemurr/Quasar-Viewer");
     }
 
     void showReleaseNotes()

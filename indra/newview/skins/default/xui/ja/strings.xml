@@ -11,10 +11,10 @@ that are returned from one component and may appear in many places
 		Second Life
 	</string>
 	<string name="APP_NAME">
-		Slipstream
+		Quasar Viewer
 	</string>
 	<string name="CAPITALIZED_APP_NAME">
-		SLIPSTREAM
+		QUASAR VIEWER
 	</string>
 	<string name="SECOND_LIFE_GRID">
 		Second Lifeグリッド

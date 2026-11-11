@@ -9713,6 +9713,13 @@ void handle_report_bug(const LLSD& param)
 {
     // Account-free report window (files through the report relay); ReportBugURL, the
     // tracker's new-issue page, is linked from it for people with an account.
+    // Quasar: no relay of its own (Slipstream's files on Slipstream's tracker), so the
+    // new-issue page on Quasar Viewer's GitHub opens instead.
+    if (gSavedSettings.getString("ReportBugRelayURL").empty())
+    {
+        LLWeb::loadURLExternal(gSavedSettings.getString("ReportBugURL"));
+        return;
+    }
     LLFloaterReg::showInstance("report_bug");
 }
 

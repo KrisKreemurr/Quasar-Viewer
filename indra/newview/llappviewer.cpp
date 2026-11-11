@@ -520,7 +520,7 @@ const std::string LOGOUT_MARKER_FILE_NAME("Slipstream.logout_marker");
 static std::string gLaunchFileOnQuit;
 
 // Used on Win32 for other apps to identify our window (eg, win_setup)
-const char* const VIEWER_WINDOW_CLASSNAME = "Slipstream Viewer";
+const char* const VIEWER_WINDOW_CLASSNAME = "Quasar Viewer";
 
 //----------------------------------------------------------------------------
 
@@ -823,41 +823,49 @@ static void migrateDlssRayReconstruction()
     gSavedSettings.setU32("RenderVKDlssSettingsVersion", 1);
 }
 
-// Slipstream was forked from Alchemy and used Alchemy's per-user data directory
-// ("AlchemyViewer": ~/.alchemyviewer, %APPDATA%\AlchemyViewer, ~/Library/Application
-// Support/AlchemyViewer). It now has its own ("SlipstreamViewer"). On the first run
-// with no Slipstream directory yet, copy the old one over -- settings, accounts, chat
-// logs, presets -- minus the viewer logs. It is COPIED, not moved: an upstream Alchemy
-// install may still be using it. Runs before the log system exists (stderr only).
-static void migrateAlchemyUserDir()
+// Quasar Viewer has its own per-user data directory ("QuasarViewer": ~/.quasarviewer,
+// %APPDATA%\QuasarViewer, ~/Library/Application Support/QuasarViewer). On the first run
+// with no Quasar directory yet, copy the newest older one over -- settings, accounts,
+// chat logs, presets -- minus the viewer logs and caches: Slipstream's ("SlipstreamViewer",
+// which Quasar builds used before the rename), else Alchemy's ("AlchemyViewer", which
+// Slipstream was forked from and used at first). It is COPIED, not moved: Slipstream or
+// Alchemy may still be installed and using it. Runs before the log system exists
+// (stderr only).
+static void migrateOlderUserDir()
 {
     namespace fs = std::filesystem;
     const std::string base = gDirUtilp->getOSUserDir();
     if (base.empty()) return;
 #if LL_LINUX
-    if (getenv("SLIPSTREAMVIEWER_USER_DIR")) return;   // user-chosen location: leave it alone
-    const fs::path old_dir = fs::u8path(base + "/.alchemyviewer");
-    const fs::path new_dir = fs::u8path(base + "/.slipstreamviewer");
+    if (getenv("QUASARVIEWER_USER_DIR")) return;   // user-chosen location: leave it alone
+    const fs::path new_dir = fs::u8path(base + "/.quasarviewer");
+    const fs::path older[] = { fs::u8path(base + "/.slipstreamviewer"), fs::u8path(base + "/.alchemyviewer") };
 #else
-    const fs::path old_dir = fs::u8path(base) / "AlchemyViewer";
-    const fs::path new_dir = fs::u8path(base) / "SlipstreamViewer";
+    const fs::path new_dir = fs::u8path(base) / "QuasarViewer";
+    const fs::path older[] = { fs::u8path(base) / "SlipstreamViewer", fs::u8path(base) / "AlchemyViewer" };
 #endif
     auto utf8 = [](const fs::path& p) { const auto u = p.u8string(); return std::string(u.begin(), u.end()); };
     std::error_code ec;
-    if (fs::exists(new_dir, ec) || !fs::is_directory(old_dir, ec)) return;
-    fs::create_directories(new_dir, ec);
-    for (const fs::directory_entry& e : fs::directory_iterator(old_dir, ec))
+    if (fs::exists(new_dir, ec)) return;
+    for (const fs::path& old_dir : older)
     {
-        const std::string name = utf8(e.path().filename());
-        if (name == "logs" || name == "cache" || name == "wine") continue;   // logs, caches, old WINE prefix
-        std::error_code cec;
-        fs::copy(e.path(), new_dir / e.path().filename(),
-                 fs::copy_options::recursive | fs::copy_options::skip_existing, cec);
-        if (cec)
-            fprintf(stderr, "Slipstream: could not copy %s from the Alchemy data directory: %s\n",
-                    name.c_str(), cec.message().c_str());
+        if (!fs::is_directory(old_dir, ec)) continue;
+        fs::create_directories(new_dir, ec);
+        for (const fs::directory_entry& e : fs::directory_iterator(old_dir, ec))
+        {
+            const std::string name = utf8(e.path().filename());
+            // logs, caches, the old WINE prefix, Slipstream's staged updates
+            if (name == "logs" || name == "cache" || name == "wine" || name.rfind("update", 0) == 0) continue;
+            std::error_code cec;
+            fs::copy(e.path(), new_dir / e.path().filename(),
+                     fs::copy_options::recursive | fs::copy_options::skip_existing, cec);
+            if (cec)
+                fprintf(stderr, "Quasar Viewer: could not copy %s from %s: %s\n",
+                        name.c_str(), utf8(old_dir).c_str(), cec.message().c_str());
+        }
+        fprintf(stderr, "Quasar Viewer: copied settings from %s to %s\n", utf8(old_dir).c_str(), utf8(new_dir).c_str());
+        return;
     }
-    fprintf(stderr, "Slipstream: copied settings from %s to %s\n", utf8(old_dir).c_str(), utf8(new_dir).c_str());
 }
 
 LLAppViewer::LLAppViewer()
@@ -894,8 +902,8 @@ LLAppViewer::LLAppViewer()
 
     // Need to do this initialization before we do anything else, since anything
     // that touches files should really go through the lldir API
-    migrateAlchemyUserDir();
-    gDirUtilp->initAppDirs("SlipstreamViewer");
+    migrateOlderUserDir();
+    gDirUtilp->initAppDirs("QuasarViewer");
     //
     // IMPORTANT! Do NOT put anything that will write
     // into the log files during normal startup until AFTER
@@ -960,7 +968,7 @@ static void exitGraphicsUnsupported(const std::string& text)
     {
         LLAppViewer::instance()->removeMarkerFiles();
     }
-    LL_WARNS("Vulkan") << "Exiting: this computer's graphics do not meet Slipstream's requirements "
+    LL_WARNS("Vulkan") << "Exiting: this computer's graphics do not meet Quasar's requirements "
                        << "(clean exit, not a crash)" << LL_ENDL;
     _exit(0);
 }
@@ -4342,11 +4350,11 @@ void gpuLostAppState()   // sGpuLostMutex held
 // background, and a box owned by it can stay hidden behind other windows.
 bool gpuLostAskRestart()
 {
-    const std::string title = "Slipstream: the graphics driver stopped responding";
+    const std::string title = "Quasar: the graphics driver stopped responding";
     const std::string text =
-        "Slipstream lost contact with the graphics card: the graphics driver stopped responding "
+        "Quasar lost contact with the graphics card: the graphics driver stopped responding "
         "or was reset (on Windows: \"Display driver stopped responding and has recovered\").\n\n"
-        "Slipstream cannot draw anything more in this session, so it will log out and close.\n\n"
+        "Quasar cannot draw anything more in this session, so it will log out and close.\n\n"
         "Likely causes, and what usually helps:\n"
         "- An out-of-date or faulty graphics driver: install the latest driver from NVIDIA, AMD or Intel.\n"
         "- Settings too heavy for the graphics card: lower the graphics quality, turn off ray tracing "
@@ -4363,7 +4371,7 @@ bool gpuLostAskRestart()
         win->beforeDialog();
     }
     const SDL_MessageBoxButtonData buttons[2] = {
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Restart Slipstream"},
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Restart Quasar"},
         {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
     SDL_MessageBoxData data{};
     data.flags = SDL_MESSAGEBOX_ERROR;
@@ -4462,7 +4470,7 @@ void onGpuLostSafeSettings(const LLSD& notification, const LLSD& response)
     LL_INFOS("Vulkan") << "Previous session's graphics device loss: safer settings applied:" << list << LL_ENDL;
     LLSD args;
     args["CHANGES"] = list.empty() ? std::string("\n(nothing needed changing)") : list;
-    args["RESTART"] = restart ? std::string("Restart Slipstream for ray tracing / the async compute queue to change.")
+    args["RESTART"] = restart ? std::string("Restart Quasar for ray tracing / the async compute queue to change.")
                               : std::string("");
     LLNotificationsUtil::add("VKGpuLostSafeSettingsApplied", args);
 }
@@ -8414,7 +8422,7 @@ void displayVulkanUI()
             {
                 LLSD args;
                 args["MESSAGE"] = llformat("The graphics driver ran out of memory while preparing shaders (%u could not "
-                                           "be built). Slipstream kept running, but some visual effects or surfaces may "
+                                           "be built). Quasar kept running, but some visual effects or surfaces may "
                                            "be missing this session.\n\nRestarting the viewer usually fixes this: the "
                                            "shaders built so far are kept. Closing other memory-hungry programs helps.",
                                            pipe_failed);
@@ -9713,7 +9721,7 @@ void LLAppViewer::processMarkerFiles()
 
 std::string LLAppViewer::getInstanceLogBaseName() const
 {
-    return mInstanceSlot > 1 ? llformat("Slipstream-%d", mInstanceSlot) : std::string("Slipstream");
+    return mInstanceSlot > 1 ? llformat("Quasar-%d", mInstanceSlot) : std::string("Quasar");
 }
 
 std::string LLAppViewer::getLogFilePath() const
@@ -9734,7 +9742,7 @@ void LLAppViewer::acquireInstanceSlot()
     mInstanceSlot = 0;
     for (S32 slot = 2; slot <= MAX_INSTANCE_SLOTS; ++slot)
     {
-        const std::string name = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, llformat("Slipstream-%d.instance_lock", slot));
+        const std::string name = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, llformat("Quasar-%d.instance_lock", slot));
         if (mInstanceSlotFile.open(name, LL_APR_WB) != APR_SUCCESS || !mInstanceSlotFile.getFileHandle())
         {
             mInstanceSlotFile.close();

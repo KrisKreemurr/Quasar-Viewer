@@ -510,12 +510,12 @@ void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsRe
         {
             if (pref < 0)
                 out.preferenceNote = "The graphics card chosen in the settings is not available (device " + gPreferredDevice +
-                                     "). Slipstream is using Automatic selection instead; your choice is kept for when it is back.";
+                                     "). Quasar is using Automatic selection instead; your choice is kept for when it is back.";
             else
                 out.preferenceNote = "The graphics card chosen in the settings (" + out.gpus[pref].name +
-                                     ") does not meet Slipstream's requirements (" +
+                                     ") does not meet Quasar's requirements (" +
                                      (out.gpus[pref].missing.empty() ? std::string("unknown") : out.gpus[pref].missing.front()) +
-                                     "). Slipstream is using Automatic selection instead.";
+                                     "). Quasar is using Automatic selection instead.";
             gPendingPreferenceNote = out.preferenceNote;
         }
     }
@@ -594,7 +594,7 @@ std::vector<std::string> vkRequirementsLogLines(const VkRequirementsReport& r)
     if (r.best >= 0)
         out.push_back("Vulkan requirements: chose " + r.bestWhy);
     else if (r.instanceOk)
-        out.push_back("Vulkan requirements: NO device meets Slipstream's minimum (Vulkan 1.3, or 1.2 with the extensions listed above, plus the required features)");
+        out.push_back("Vulkan requirements: NO device meets Quasar's minimum (Vulkan 1.3, or 1.2 with the extensions listed above, plus the required features)");
     if (!r.failure.empty())
         out.push_back("Vulkan requirements: bring-up failed: " + r.failure);
     return out;
@@ -602,7 +602,7 @@ std::vector<std::string> vkRequirementsLogLines(const VkRequirementsReport& r)
 
 const char* vkRequirementsUserTitle()
 {
-    return "Slipstream can't start: graphics not supported";
+    return "Quasar can't start: graphics not supported";
 }
 
 std::string vkRequirementsUserMessage(const VkRequirementsReport& r)
@@ -610,22 +610,22 @@ std::string vkRequirementsUserMessage(const VkRequirementsReport& r)
     std::string s;
     if (!r.instanceOk)
     {
-        s = "Slipstream needs a graphics driver with Vulkan support (Vulkan 1.3, or Vulkan 1.2 with dynamic rendering), but no working Vulkan driver was found";
+        s = "Quasar needs a graphics driver with Vulkan support (Vulkan 1.3, or Vulkan 1.2 with dynamic rendering), but no working Vulkan driver was found";
         s += std::string(" (") + vkResultString(r.instanceResult) + ").\n";
     }
     else if (r.gpus.empty())
     {
-        s = "Slipstream needs a graphics card with Vulkan support (Vulkan 1.3, or Vulkan 1.2 with dynamic rendering), but the Vulkan driver reported no graphics "
+        s = "Quasar needs a graphics card with Vulkan support (Vulkan 1.3, or Vulkan 1.2 with dynamic rendering), but the Vulkan driver reported no graphics "
             "devices.\n";
     }
     else if (r.best < 0)
     {
-        s = "Slipstream needs a graphics card and driver with Vulkan 1.3 support (or Vulkan 1.2 with the VK_KHR_dynamic_rendering extension). None of the graphics devices on "
+        s = "Quasar needs a graphics card and driver with Vulkan 1.3 support (or Vulkan 1.2 with the VK_KHR_dynamic_rendering extension). None of the graphics devices on "
             "this computer meets that yet.\n";
     }
     else
     {
-        s = "Slipstream could not start the graphics device";
+        s = "Quasar could not start the graphics device";
         s += r.failure.empty() ? std::string(".\n") : " (" + r.failure + ").\n";
     }
 
@@ -673,7 +673,7 @@ std::string vkRequirementsUserMessage(const VkRequirementsReport& r)
     if (nvidia) s += "- NVIDIA: install the latest driver from nvidia.com/drivers.\n";
     if (amd) s += "- AMD: install the latest driver from amd.com/support.\n";
 #elif defined(__APPLE__)
-    s += "- macOS is not supported by Slipstream.\n";
+    s += "- macOS is not supported by Quasar.\n";
 #else
     if (intel || amd)
         s += "- Update Mesa (your distribution's graphics drivers) to a current version.\n";
@@ -681,7 +681,7 @@ std::string vkRequirementsUserMessage(const VkRequirementsReport& r)
 #endif
     s += "- If your computer has a second (dedicated) graphics card, make sure it is enabled and its driver is "
          "installed.\n";
-    s += "\nYou do NOT need to install the Vulkan SDK to run Slipstream (it is for programmers); the graphics driver "
+    s += "\nYou do NOT need to install the Vulkan SDK to run Quasar (it is for programmers); the graphics driver "
          "from your graphics card maker is what is needed.\n";
     s += "\nMore help: ";
     s += kVkRequirementsHelpURL;
@@ -692,7 +692,7 @@ std::string vkRequirementsUserMessage(const VkRequirementsReport& r)
 
 const char* vkDriverCheckTitle()
 {
-    return "Slipstream: your graphics driver may not be set up correctly";
+    return "Quasar: your graphics driver may not be set up correctly";
 }
 
 namespace
@@ -812,28 +812,28 @@ VkDriverCheck vkClassifyDriverSetup(const VkRequirementsReport& r, const std::ve
     switch (out.issue)
     {
     case VkSetupIssue::Translation:
-        s = "Slipstream is drawing with \"" + c.name + "\", which is not your computer's real graphics driver. "
+        s = "Quasar is drawing with \"" + c.name + "\", which is not your computer's real graphics driver. "
             "It is a compatibility layer that borrows another graphics system (for example Microsoft's \"Direct3D 12\" translation), "
             "and it often shows the world wrongly -- for example every texture white or missing -- and runs slowly.\n";
         if (!out.realGpuName.empty())
-            s += "Your computer has " + out.realGpuName + ", but Slipstream could not use its own driver.\n";
+            s += "Your computer has " + out.realGpuName + ", but Quasar could not use its own driver.\n";
         break;
     case VkSetupIssue::Software:
-        s = "Slipstream is drawing with \"" + c.name + "\", a software renderer that uses your processor instead of a graphics card. "
+        s = "Quasar is drawing with \"" + c.name + "\", a software renderer that uses your processor instead of a graphics card. "
             "It is very slow and may show the world wrongly.\n";
         if (!out.realGpuName.empty())
-            s += "Your computer has " + out.realGpuName + ", but Slipstream could not use its own driver.\n";
+            s += "Your computer has " + out.realGpuName + ", but Quasar could not use its own driver.\n";
         break;
     case VkSetupIssue::DriverNotInstalled:
-        s = "Your computer has " + out.realGpuName + ", but the graphics driver that lets Slipstream use it does not seem to be installed "
-            "(or is not available to Slipstream). Slipstream is running on \"" + c.name + "\" instead, which is slower and may show the world wrongly.\n";
+        s = "Your computer has " + out.realGpuName + ", but the graphics driver that lets Quasar use it does not seem to be installed "
+            "(or is not available to Quasar). Quasar is running on \"" + c.name + "\" instead, which is slower and may show the world wrongly.\n";
         break;
     case VkSetupIssue::IntegratedWhileDiscrete:
-        s = "Slipstream is running on the basic graphics built into your processor (\"" + c.name + "\") although your computer also has " +
+        s = "Quasar is running on the basic graphics built into your processor (\"" + c.name + "\") although your computer also has " +
             out.realGpuName + ". That is usually much slower.\n";
         break;
     case VkSetupIssue::DiscreteUnusable:
-        s = "Your computer has " + out.realGpuName + ", but its graphics driver is too old for Slipstream, so Slipstream is running on the "
+        s = "Your computer has " + out.realGpuName + ", but its graphics driver is too old for Quasar, so Quasar is running on the "
             "basic graphics built into your processor (\"" + c.name + "\") instead. That is usually much slower.\n";
         break;
     default: break;
@@ -847,13 +847,13 @@ VkDriverCheck vkClassifyDriverSetup(const VkRequirementsReport& r, const std::ve
         s += "- Install or update the graphics driver for your graphics card: NVIDIA: nvidia.com/drivers; AMD: amd.com/support; "
              "Intel: intel.com/support. Then restart your computer.\n";
 #if defined(_WIN32)
-    s += "- On a laptop: open Windows Settings > System > Display > Graphics, add Slipstream to the list, choose Options, "
+    s += "- On a laptop: open Windows Settings > System > Display > Graphics, add Quasar to the list, choose Options, "
          "and set it to \"High performance\".\n";
 #else
-    s += "- On a laptop with two graphics chips: start Slipstream on the dedicated one (for example with the "
+    s += "- On a laptop with two graphics chips: start Quasar on the dedicated one (for example with the "
          "\"Launch using Dedicated Graphics Card\" menu entry, or prime-run / DRI_PRIME=1).\n";
 #endif
-    s += "\nYou do NOT need to install the Vulkan SDK to run Slipstream -- it is for programmers, and installing it does not "
+    s += "\nYou do NOT need to install the Vulkan SDK to run Quasar -- it is for programmers, and installing it does not "
          "fix this.\n";
     s += "\nMore help: ";
     s += kVkRequirementsHelpURL;

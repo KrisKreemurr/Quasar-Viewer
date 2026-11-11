@@ -258,7 +258,7 @@ Only used with a DLSS upscaling mode.
             height="20"
             layout="topleft"
             name="GraphicsCardText"
-            tool_tip="Which graphics card Slipstream renders on. Automatic picks the most capable type that meets the requirements (discrete before integrated). Pick a card to force it, for example the integrated GPU to save battery.&#10;If the chosen card is not found next time Slipstream starts, it uses Automatic and tells you.&#10;On Windows the system Graphics settings (Settings &gt; System &gt; Display &gt; Graphics) can override the choice for hybrid laptops; on Linux, MESA_VK_DEVICE_SELECT / DRI_PRIME still work when this is Automatic.&#10;Requires a restart."
+            tool_tip="Which graphics card Quasar renders on. Automatic picks the most capable type that meets the requirements (discrete before integrated). Pick a card to force it, for example the integrated GPU to save battery.&#10;If the chosen card is not found next time Quasar starts, it uses Automatic and tells you.&#10;On Windows the system Graphics settings (Settings &gt; System &gt; Display &gt; Graphics) can override the choice for hybrid laptops; on Linux, MESA_VK_DEVICE_SELECT / DRI_PRIME still work when this is Automatic.&#10;Requires a restart."
             width="165"
             left="30"
             top="158">
@@ -269,7 +269,7 @@ Only used with a DLSS upscaling mode.
             height="20"
             layout="topleft"
             name="GraphicsCardSelect"
-            tool_tip="Requires a restart. Cards that do not meet Slipstream's requirements are greyed out."
+            tool_tip="Requires a restart. Cards that do not meet Quasar's requirements are greyed out."
             width="180"
             left="205"
             top="158">

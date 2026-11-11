@@ -2406,47 +2406,48 @@ if (WINDOWS)
     set(ICON_PATH "test")
     set(VIEWER_MACOSX_PHASE "d")
     string(TOLOWER ${VIEWER_CHANNEL} channel_lower)
-    if(channel_lower MATCHES "^slipstream release")
+    if(channel_lower MATCHES "^quasar release")
         set(ICON_PATH "release")
         set(VIEWER_MACOSX_PHASE "f")
-    elseif(channel_lower MATCHES "^slipstream beta")
+    elseif(channel_lower MATCHES "^quasar beta")
         set(ICON_PATH "beta")
         set(VIEWER_MACOSX_PHASE "b")
-    elseif(channel_lower MATCHES "^slipstream project")
+    elseif(channel_lower MATCHES "^quasar project")
         set(ICON_PATH "project")
         set(VIEWER_MACOSX_PHASE "a")
     endif()
-    # Slipstream branding: one in-tree icon set for every channel (indra/newview/icons/slipstream).
-    set(SLIPSTREAM_ICON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/icons/slipstream")
+    # Quasar branding: one in-tree icon set for every channel (indra/newview/icons/quasar,
+    # the Quasar logo; Slipstream's set stays in icons/slipstream).
+    set(SLIPSTREAM_ICON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/icons/quasar")
     message(STATUS "Copying icons for ${ICON_PATH}")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream.ico"
+        "${SLIPSTREAM_ICON_DIR}/quasar.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/res/ll_icon.ico"
       )
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream_256.BMP"
+        "${SLIPSTREAM_ICON_DIR}/quasar_256.BMP"
         "${CMAKE_CURRENT_SOURCE_DIR}/res/ll_icon.BMP"
       )
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream_256.BMP"
+        "${SLIPSTREAM_ICON_DIR}/quasar_256.BMP"
         "${CMAKE_CURRENT_SOURCE_DIR}/res-sdl/ll_icon.BMP"
       )
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream.ico"
+        "${SLIPSTREAM_ICON_DIR}/quasar.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/installers/windows/install_icon.ico"
       )
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream.ico"
+        "${SLIPSTREAM_ICON_DIR}/quasar.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/installers/windows/uninstall_icon.ico"
       )
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SLIPSTREAM_ICON_DIR}/slipstream_256.png"
+        "${SLIPSTREAM_ICON_DIR}/quasar_256.png"
         "${CMAKE_CURRENT_SOURCE_DIR}/installers/windows/install_wizard_small.png"
       )
 
@@ -3035,10 +3036,10 @@ if (DARWIN)
   set(product "${VIEWER_CHANNEL}")
   set(MACOSX_EXECUTABLE_NAME "${VIEWER_CHANNEL}")
   set(MACOSX_BUNDLE_INFO_STRING "${VIEWER_CHANNEL}")
-  set(MACOSX_BUNDLE_ICON_FILE "slipstream.icns")
+  set(MACOSX_BUNDLE_ICON_FILE "quasar.icns")
   set(MACOSX_BUNDLE_GUI_IDENTIFIER "org.slipstreamviewer.viewer")
   set(MACOSX_BUNDLE_LONG_VERSION_STRING "${VIEWER_CHANNEL} ${VIEWER_SHORT_VERSION}.${VIEWER_VERSION_REVISION}")
-  set(MACOSX_BUNDLE_BUNDLE_NAME "Slipstream")
+  set(MACOSX_BUNDLE_BUNDLE_NAME "Quasar Viewer")
   set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${VIEWER_SHORT_VERSION}.${VIEWER_VERSION_REVISION}")
   set(MACOSX_BUNDLE_BUNDLE_VERSION "${VIEWER_SHORT_VERSION}${VIEWER_MACOSX_PHASE}${VIEWER_REVISION}")
   set(MACOSX_BUNDLE_COPYRIGHT "Copyright (C) 2013-2025 Alchemy Development Group")

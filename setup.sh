@@ -80,9 +80,9 @@ if ! make windows 2>&1 | tee ~/quasar-build.log; then
   exit 1
 fi
 # Windows won't let a running viewer's files be replaced: wait for it to close
-if tasklist.exe 2>/dev/null | grep -qi -E "SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; then
+if tasklist.exe 2>/dev/null | grep -qi -E "QuasarViewer.exe|SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; then
   echo ">>> The viewer is running: close it and the new build will be copied in."
-  while tasklist.exe 2>/dev/null | grep -qi -E "SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; do sleep 2; done
+  while tasklist.exe 2>/dev/null | grep -qi -E "QuasarViewer.exe|SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; do sleep 2; done
   sleep 2
 fi
 rm -rf /mnt/c/dev/QuasarSlipstream
@@ -90,15 +90,16 @@ rm -rf /mnt/c/dev/QuasarSlipstream
 # Streamline's DLLs beside the viewer (NVIDIA's licences for them are in the SDK)
 if [ -f "$SL_DIR/include/sl.h" ]; then bash scripts/quasar/copy_streamline.sh || true; fi
 # A desktop shortcut straight to the exe, wherever the zip put it
-EXE=$(find /mnt/c/dev/QuasarSlipstream -maxdepth 3 -iname "SlipstreamViewer.exe" | head -1)
+EXE=$(find /mnt/c/dev/QuasarSlipstream -maxdepth 3 -iname "QuasarViewer.exe" | head -1)
 if [ -n "$EXE" ]; then
   WEXE=$(wslpath -w "$EXE")
-  powershell.exe -NoProfile -Command "\$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\\Quasar (Slipstream build).lnk'); \$s.TargetPath='$WEXE'; \$s.WorkingDirectory=(Split-Path '$WEXE'); \$s.Save()" >/dev/null 2>&1 || true
-  echo "Viewer: $WEXE  (shortcut on your desktop: Quasar (Slipstream build))"
+  # (the old "Quasar (Slipstream build)" shortcut pointed at SlipstreamViewer.exe, gone since the rename)
+  powershell.exe -NoProfile -Command "\$d=[Environment]::GetFolderPath('Desktop'); Remove-Item -ErrorAction SilentlyContinue (\$d+'\\Quasar (Slipstream build).lnk'); \$s=(New-Object -ComObject WScript.Shell).CreateShortcut(\$d+'\\Quasar Viewer.lnk'); \$s.TargetPath='$WEXE'; \$s.WorkingDirectory=(Split-Path '$WEXE'); \$s.Save()" >/dev/null 2>&1 || true
+  echo "Viewer: $WEXE  (shortcut on your desktop: Quasar Viewer)"
 fi
 # A "Quasar" shortcut on the Windows desktop to the built viewer (best effort)
 cat > /mnt/c/dev/make-quasar-shortcut.ps1 <<'PS1'
-$exe = Get-ChildItem 'C:\dev\QuasarSlipstream' -Recurse -Filter 'SlipstreamViewer.exe' | Select-Object -First 1
+$exe = Get-ChildItem 'C:\dev\QuasarSlipstream' -Recurse -Filter 'QuasarViewer.exe' | Select-Object -First 1
 if ($exe) {
   $s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Quasar.lnk')
   $s.TargetPath = $exe.FullName
@@ -108,5 +109,6 @@ if ($exe) {
 PS1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\dev\make-quasar-shortcut.ps1' >/dev/null 2>&1 || true
 # A double-click rebuild for Windows, so Linux never has to be opened again
-printf '@echo off\r\nwsl -d Ubuntu-24.04 -- bash -lc "cd ~/quasar-slipstream && git fetch -q origin quasar/slipstream && git reset -q --hard FETCH_HEAD && bash ./setup.sh --updated"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
+# It closes a running viewer first (taskkill), so its files can be replaced.
+printf '@echo off\r\nrem Close any running viewer so its files can be replaced\r\ntaskkill /F /T /IM QuasarViewer.exe >nul 2>&1\r\ntaskkill /F /T /IM SLVoice.exe >nul 2>&1\r\ntimeout /t 2 /nobreak >nul\r\n\r\nwsl -d Ubuntu-24.04 -- bash -lc "cd ~/quasar-slipstream && git fetch -q origin quasar/slipstream && git reset -q --hard FETCH_HEAD && bash ./setup.sh --updated"\r\npause\r\n' > /mnt/c/dev/Build-Quasar.bat
 echo "Done: C:\\dev\\QuasarSlipstream  (next time, double-click C:\\dev\\Build-Quasar.bat)"

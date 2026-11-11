@@ -15,7 +15,7 @@ function install_desktop_entry()
 Name=Slipstream Viewer\n\
 Comment=Vulkan viewer for Second Life\n\
 Exec=${installation_prefix}/slipstream\n\
-Icon=${installation_prefix}/slipstream_icon.png\n\
+Icon=${installation_prefix}/quasar_icon.png\n\
 Terminal=false\n\
 Type=Application\n\
 Categories=Application;Network;\n\

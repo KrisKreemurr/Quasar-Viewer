@@ -45,7 +45,7 @@ bool LLTransUtil::parseStrings(const std::string& xml_filename, const std::set<s
     if (!success)
     {
         const std::string error_string =
-            "Slipstream couldn't access some of the files it needs and will be closed."
+            "Quasar couldn't access some of the files it needs and will be closed."
             "\n\nPlease reinstall viewer from  https://secondlife.com/support/downloads/ and "
             "contact https://support.secondlife.com if issue persists after reinstall.";
         LLError::LLUserWarningMsg::show(error_string, LLError::LLUserWarningMsg::ERROR_MISSING_FILES);

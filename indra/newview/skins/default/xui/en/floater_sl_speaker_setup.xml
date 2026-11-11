@@ -234,7 +234,7 @@
      layout="topleft"
      left="10"
      name="apply"
-     tool_tip="Put a small script into this prim that sets the tag as faint hover text (Slipstream does not draw it) and then deletes itself. No script keeps running."
+     tool_tip="Put a small script into this prim that sets the tag as faint hover text (Quasar does not draw it) and then deletes itself. No script keeps running."
      top_pad="8"
      width="150" />
     <button

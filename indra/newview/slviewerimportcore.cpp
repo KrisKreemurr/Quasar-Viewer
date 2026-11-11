@@ -632,13 +632,13 @@ std::string sandboxHint(const Sandbox& sandbox, const std::string& folder)
     {
         const std::string id = sandbox.app_id.empty() ? std::string("<app id>") : sandbox.app_id;
         const std::string arg = shown.find(' ') != std::string::npos ? "\"" + shown + ":ro\"" : shown + ":ro";
-        return "Slipstream is running in a Flatpak sandbox and can't read " + shown + ". Grant access with: flatpak override --user --filesystem="
-               + arg + " " + id + " (or --filesystem=home:ro for every viewer), then restart Slipstream.";
+        return "Quasar is running in a Flatpak sandbox and can't read " + shown + ". Grant access with: flatpak override --user --filesystem="
+               + arg + " " + id + " (or --filesystem=home:ro for every viewer), then restart Quasar.";
     }
     if (sandbox.kind == "Snap")
     {
-        return "Slipstream is running as a Snap, which can't read hidden folders in your home such as " + shown
-               + ". Import with a non-Snap build of Slipstream.";
+        return "Quasar is running as a Snap, which can't read hidden folders in your home such as " + shown
+               + ". Import with a non-Snap build of Quasar.";
     }
     return {};
 }

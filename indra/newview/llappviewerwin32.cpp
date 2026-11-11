@@ -103,7 +103,7 @@ LONG WINAPI catchallCrashHandler(EXCEPTION_POINTERS * /*ExceptionInfo*/)
     return 0;
 }
 
-const std::string LLAppViewerWin32::sWindowClass = "Slipstream";
+const std::string LLAppViewerWin32::sWindowClass = "Quasar";   // not Slipstream's: SLURLs reach the right viewer
 
 /*
     This function is used to print to the command line a text message

@@ -56,7 +56,7 @@ namespace
     {
 #if LL_WINDOWS
         const char* local = std::getenv("LOCALAPPDATA");
-        const char* leaf = SLUpdateApply::isJetstreamBuild() ? "\\SlipstreamViewer\\update-jetstream" : "\\SlipstreamViewer\\update";
+        const char* leaf = SLUpdateApply::isJetstreamBuild() ? "\\QuasarViewer\\update-jetstream" : "\\QuasarViewer\\update";   // never Slipstream's staged updates
         return local && *local ? std::string(local) + leaf : std::string();
 #else
         return SLUpdateApply::stateDir();

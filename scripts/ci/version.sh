@@ -32,8 +32,8 @@
 # prints KEY=value lines: VERSION BUILD FULL_VERSION CHANNEL KIND PRERELEASE LABEL ARTIFACT_BASE
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-CHANNEL_BASE="Slipstream"
-ARTIFACT_PREFIX="Slipstream"
+CHANNEL_BASE="Quasar"
+ARTIFACT_PREFIX="Quasar"
 
 TAG="${1:-}"
 if [ -z "$TAG" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then TAG="${GITHUB_REF_NAME:-}"; fi

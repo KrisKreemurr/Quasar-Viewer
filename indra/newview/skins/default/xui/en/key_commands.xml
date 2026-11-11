@@ -15,7 +15,7 @@
   <group name="interface" label="Interface" />
   <group name="chat" label="Chat" />
   <group name="floaters" label="Floaters" />
-  <group name="slipstream" label="Slipstream features" />
+  <group name="slipstream" label="Quasar features" />
 
   <!-- Menu files that are not a menu bar of their own: one heading for the whole file -->
   <scope_group scope="login" label="Login screen menu" prefix="true" />

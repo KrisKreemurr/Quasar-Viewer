@@ -175,7 +175,7 @@
        layout="topleft"
        left="8"
        name="attach_log"
-       tool_tip="The end of this viewer's log (Slipstream.log, or Slipstream-2.log and so on for further viewers). Personal information is removed: names, chat and IM text, IP addresses, e-mail addresses, tokens, account and session handles, and the secret parts of web addresses. Hardware, graphics and audio details are kept. See the WHAT WILL BE SENT tab."
+       tool_tip="The end of this viewer's log (Quasar.log, or Quasar-2.log and so on for further viewers). Personal information is removed: names, chat and IM text, IP addresses, e-mail addresses, tokens, account and session handles, and the secret parts of web addresses. Hardware, graphics and audio details are kept. See the WHAT WILL BE SENT tab."
        top_pad="8"
        width="530" />
       <check_box

@@ -117,7 +117,7 @@
          parameter="viewer_import" />
       </menu_item_call>
       <menu_item_call
-       label="Set up Slipstream like my old viewer..."
+       label="Set up Quasar like my old viewer..."
        name="Set Up Like Old Viewer">
         <menu_item_call.on_click
          function="Floater.Show"
@@ -2464,7 +2464,7 @@ function="World.EnvPreset"
              parameter="https://slipstreamviewer.org/" />
         </menu_item_call>
         <menu_item_call
-         label="Set up Slipstream like my old viewer..."
+         label="Set up Quasar like my old viewer..."
          name="First Run Chooser">
             <menu_item_call.on_click
              function="Floater.Show"

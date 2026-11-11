@@ -64,7 +64,7 @@ LLDir_Mac::LLDir_Mac()
 {
     mDirDelimiter = "/";
 
-    const std::string     secondLifeString = "SlipstreamViewer";
+    const std::string     secondLifeString = "QuasarViewer";
 
     std::string executablepathstr = getSystemExecutableFolder();
 

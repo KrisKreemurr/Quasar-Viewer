@@ -389,7 +389,7 @@ std::string LLDir::buildSLOSCacheDir() const
     }
     else
     {
-        res = add(getOSCacheDir(), "SlipstreamViewer");
+        res = add(getOSCacheDir(), "QuasarViewer");
     }
     return res;
 }

@@ -24192,18 +24192,18 @@
 			<key>Type</key>
 			<string>String</string>
 			<key>Value</key>
-			<string>https://git.slipstreamviewer.org/sky_line/Slipstream/issues/new</string>
+			<string>https://github.com/KrisKreemurr/Quasar-Viewer/issues/new</string>
 		</map>
 		<key>ReportBugRelayURL</key>
 		<map>
 			<key>Comment</key>
-			<string>Report relay endpoint for Help &gt; Report Bug (files the report as an issue on the tracker)</string>
+			<string>Report relay endpoint for Help &gt; Report Bug (files the report as an issue on the tracker). Quasar: empty -- Slipstream's relay files on Slipstream's tracker; Help &gt; Report Bug opens ReportBugURL instead.</string>
 			<key>Persist</key>
 			<integer>0</integer>
 			<key>Type</key>
 			<string>String</string>
 			<key>Value</key>
-			<string>https://slipstreamviewer.org/api/report/viewer</string>
+			<string></string>
 		</map>
 		<key>ReportTrackEnabled</key>
 		<map>

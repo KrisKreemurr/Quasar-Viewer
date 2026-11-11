@@ -1678,9 +1678,9 @@ namespace LLError
     {
         // Files Are missing, likely can't localize.
         const std::string error_string =
-            "Slipstream Viewer couldn't access some of the files it needs and will be closed."
+            "Quasar Viewer couldn't access some of the files it needs and will be closed."
             "\n\nPlease reinstall the viewer from https://git.slipstreamviewer.org/sky_line/Slipstream/releases and "
-            "contact the Slipstream Viewer team if the issue persists after reinstall.";
+            "contact the Quasar Viewer team if the issue persists after reinstall.";
         sHandler("Missing Files", error_string, ERROR_MISSING_FILES);
     }
 

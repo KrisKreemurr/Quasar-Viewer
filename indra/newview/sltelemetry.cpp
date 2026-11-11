@@ -130,6 +130,10 @@ void warning() { LL_WARNS("SLTelemetry") << "report_dropped" << LL_ENDL; }
 
 bool excluded()
 {
+    // Quasar Viewer: usage statistics go to Slipstream's server (a fixed endpoint, for
+    // Slipstream's own builds). A Quasar build sends none, never asks, and never collects.
+    constexpr bool QUASAR_NO_TELEMETRY = true;
+    if (QUASAR_NO_TELEMETRY) return true;
     // --bench belongs to a newer harness; inspect argv without introducing that dependency.
     // This also excludes the older in-viewer A/B benchmark.
     if (LLAppViewer::instance()->isSecondInstance()) return true;

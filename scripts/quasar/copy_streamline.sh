@@ -9,7 +9,7 @@ SDK=build-windows-x86_64/_deps/streamline
 SRC=$(find "$SDK" -iname 'sl.interposer.dll' | grep -iv -E 'debug|develop' | head -1)
 [ -n "$SRC" ] || { echo "sl.interposer.dll not found in the SDK"; find "$SDK" -maxdepth 3 -type d; exit 1; }
 SRC=$(dirname "$SRC")
-EXE=$(ls /mnt/c/dev/QuasarSlipstream/*/SlipstreamViewer.exe 2>/dev/null | head -1)
+EXE=$(ls /mnt/c/dev/QuasarSlipstream/*/QuasarViewer.exe 2>/dev/null | head -1)
 [ -n "$EXE" ] || { echo "no viewer in C:\\dev\\QuasarSlipstream"; exit 1; }
 DST=$(dirname "$EXE")
 echo "Streamline DLLs from $SRC"

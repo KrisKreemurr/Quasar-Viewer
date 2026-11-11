@@ -89,7 +89,7 @@ std::string valueLabel(const RiskySetting& r, S32 v)
 std::string filePath()
 {
     LLAppViewer* app = LLAppViewer::instance();
-    const std::string base = app ? app->getInstanceLogBaseName() : std::string("Slipstream");
+    const std::string base = app ? app->getInstanceLogBaseName() : std::string("Quasar");
     return gDirUtilp->getExpandedFilename(LL_PATH_LOGS, base + ".risky_settings");
 }
 

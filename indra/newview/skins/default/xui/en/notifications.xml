@@ -4154,7 +4154,7 @@ Graphics settings applied. Optimized shaders for them are still compiling in the
    icon="alertmodal.tga"
    name="VKGpuLostLastSession"
    type="alertmodal">
-Slipstream closed last time because the graphics driver stopped responding ([WHAT]).
+Quasar closed last time because the graphics driver stopped responding ([WHAT]).
 
 This usually comes from the graphics driver, overlays (Overwolf, Discord, recording tools), another graphics-heavy program, an unstable overclock or undervolt, or settings that are too heavy for the graphics card. Updating the graphics driver often helps.
 
@@ -4172,7 +4172,7 @@ You can turn them back on in Preferences &gt; Graphics. The previous session's r
    icon="alertmodal.tga"
    name="VKOomLastSession"
    type="alertmodal">
-Slipstream closed last time because the computer ran out of memory.
+Quasar closed last time because the computer ran out of memory.
 
 Lowering the graphics settings in Preferences &gt; Graphics (texture memory, draw distance, shadows, reflections) reduces the memory it needs, and closing other programs helps too.
 
@@ -4186,7 +4186,7 @@ If it keeps happening, please use Help &gt; Report Bug: the report includes the 
    icon="alertmodal.tga"
    name="VKGpuLostLastSessionInfo"
    type="alertmodal">
-Slipstream closed last time because the graphics driver stopped responding ([WHAT]).
+Quasar closed last time because the graphics driver stopped responding ([WHAT]).
 
 Ray tracing, the async compute queue and real-time reflections are already off. This usually comes from the graphics driver, overlays (Overwolf, Discord, recording tools), another graphics-heavy program or an unstable overclock or undervolt; updating the graphics driver often helps. Lowering the graphics quality in Preferences &gt; Graphics reduces the load further. The previous session's report is in [FILE] in the logs folder.
     <usetemplate
@@ -4206,7 +4206,7 @@ Safer graphics settings applied and saved:[CHANGES]
    icon="notify.tga"
    name="VKRiskySettingReverted"
    type="notify">
-The previous session closed unexpectedly soon after a graphics setting was raised, so Slipstream set it back to what it was before:[CHANGES]
+The previous session closed unexpectedly soon after a graphics setting was raised, so Quasar set it back to what it was before:[CHANGES]
 You can turn it on again in Preferences &gt; Graphics &gt; Advanced Settings. If it crashes again, please send a bug report (Help &gt; Report Bug) so we can fix it.
   </notification>
 
@@ -4239,7 +4239,7 @@ Take a colour snapshot instead, or try again once the restriction is lifted.
    icon="notify.tga"
    name="VKPipelineQuarantined"
    type="notify">
-A graphics feature was turned off because the graphics driver ([DRIVER]) crashed twice while preparing it. Slipstream will keep it off on this driver so the viewer can start.
+A graphics feature was turned off because the graphics driver ([DRIVER]) crashed twice while preparing it. Quasar will keep it off on this driver so the viewer can start.
 Updating your graphics driver may fix the problem; the feature is tried again automatically after a driver update.
 Technical name: [NAMES]
   </notification>
@@ -8364,7 +8364,7 @@ Pose names cannot contain any of these characters: / \ : * ? &quot; &lt; &gt; |
    icon="notifytip.tga"
    name="SLPoseStudioBeingPosed"
    type="notifytip">
-[NAME] can pose you now. Slipstream users nearby see the pose. To end it, use Stop being posed in the Pose Studio, or the Stop button on the dialog.
+[NAME] can pose you now. Quasar and Slipstream users nearby see the pose. To end it, use Stop being posed in the Pose Studio, or the Stop button on the dialog.
   </notification>
 
   <notification
@@ -8682,7 +8682,7 @@ The attachment &apos;[NAME]&apos; looks like a scripted AO: it starts animations
    name="SLAOServerAODetected"
    persist="true"
    type="notify">
-A script you wear seems to override your animations server-side (llSetAnimationOverride), like a scripted AO does. Slipstream's AO already stands back for the states it overrides, but the two may still alternate on others.
+A script you wear seems to override your animations server-side (llSetAnimationOverride), like a scripted AO does. Quasar's AO already stands back for the states it overrides, but the two may still alternate on others.
     <form name="form">
       <button
        index="0"

@@ -20,13 +20,13 @@ RequestExecutionLevel user
 !include "FileFunc.nsh"
 
 !ifndef APP_NAME
-  !define APP_NAME    "Slipstream"   ; Jetstream builds: "Slipstream Jetstream" (installs beside it)
+  !define APP_NAME    "Quasar Viewer"   ; Jetstream builds: "Quasar Viewer Jetstream" (installs beside it)
 !endif
-!define APP_EXE       "SlipstreamViewer.exe"
-!define APP_DATA      "SlipstreamViewer"
-!define PUBLISHER     "Slipstream Viewer"
+!define APP_EXE       "QuasarViewer.exe"
+!define APP_DATA      "QuasarViewer"
+!define PUBLISHER     "Quasar Viewer"
 !define WEBSITE       "https://slipstreamviewer.org"
-!define UNINST_EXE    "Uninstall Slipstream.exe"
+!define UNINST_EXE    "Uninstall Quasar Viewer.exe"
 !define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 !define APP_KEY       "Software\${APP_NAME}"
 

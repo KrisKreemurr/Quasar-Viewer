@@ -313,6 +313,8 @@ Dummy Name replaced at run time
        right="-5"
        word_wrap="true"
        parse_urls="true">
+Quasar Viewer is built on Slipstream by Kris Kreemurr, under the GNU LGPL 2.1. Source code: https://github.com/KrisKreemurr/Quasar-Viewer
+
 Slipstream Viewer Copyright (C) 2026 Bluefast Studios. Slipstream is based on the Second Life viewer, Copyright (C) Linden Research, Inc., and includes code from Alchemy Viewer (Alchemy Development Group), Firestorm Viewer (The Phoenix Firestorm Project, Inc.) and Black Dragon Viewer (NiranV Dean), all under the GNU LGPL 2.1. Source code: https://git.slipstreamviewer.org/sky_line/Slipstream
 
 This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser General Public License as published by the Free Software Foundation; version 2.1 of the License only which can be found in doc/LGPL-licence.txt in this distribution (or online at https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt).

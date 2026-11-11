@@ -7,10 +7,10 @@
 # removal list are generated from the stage, so the uninstaller removes exactly what was
 # installed. Inno Setup leftovers from viewer_manifest.py (installers/, *.iss) are skipped.
 set -euo pipefail
-STAGE=$(realpath "$1"); OUT=$(realpath -m "$2"); FILEVER="$3"; DISPVER="$4"; APPNAME="${5:-Slipstream}"
+STAGE=$(realpath "$1"); OUT=$(realpath -m "$2"); FILEVER="$3"; DISPVER="$4"; APPNAME="${5:-Quasar Viewer}"
 SRC="$(cd "$(dirname "$0")/../.." && pwd)/indra/newview/installers/windows"
 command -v makensis >/dev/null || { echo "make_installer: makensis not found (apt install nsis)"; exit 2; }
-[ -f "$STAGE/SlipstreamViewer.exe" ] || { echo "make_installer: $STAGE has no SlipstreamViewer.exe"; exit 1; }
+[ -f "$STAGE/QuasarViewer.exe" ] || { echo "make_installer: $STAGE has no QuasarViewer.exe"; exit 1; }
 
 LISTS=$(mktemp -d); trap 'rm -rf "$LISTS"' EXIT
 : > "$LISTS/install_list.nsh"; : > "$LISTS/uninstall_list.txt"
