@@ -748,6 +748,7 @@ private:
         LLQuaternion hip_set, knee_set, ankle_set;    // what the IK wrote
         F32          ground = 0.f;   // smoothed: ground under the foot minus the reference ground (m)
         F32          fade = 0.f;     // smoothed: how much the IK takes this foot (0..1)
+        LLVector3    normal = LLVector3::z_axis;   // smoothed: the ground's normal under the foot
     };
     QLFootIKLeg mQLFootIKLeg[2];
     LLVector3   mQLFootIKPelvisPre;

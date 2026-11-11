@@ -5415,6 +5415,12 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         QLFootIKLeg& leg = mQLFootIKLeg[i];
         leg.ground += (raw - leg.ground) * follow;
         leg.fade += (lift_fade * reach_fade * float_fade - leg.fade) * follow;
+        // The slope the foot tilts to follows as smoothly: the ground under a moving foot
+        // switches between the land's normal and the foot plane's in a frame.
+        leg.normal += (ground_norm[i] - leg.normal) * follow;
+        if (leg.normal.lengthSquared() < 1.0e-6f) leg.normal = LLVector3::z_axis;
+        leg.normal.normVec();
+        ground_norm[i] = leg.normal;
         step[i] = leg.ground * leg.fade * strength;
     }
     mQLFootIKTracking = true;
@@ -5471,15 +5477,37 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         F32 c = to_target.length();
         if (a < 0.01f || b < 0.01f || c < 0.01f) continue;
         to_target /= c;
-        c = llclamp(c, fabsf(a - b) + 0.001f, a + b - 0.001f);
+        // Near full extension the knee's angle swings far for a millimetre of reach (a
+        // walk straightens each leg every step): approach the straight leg softly, never
+        // reaching it, so the solve has no singular point to snap through.
+        const F32 reach = a + b;
+        const F32 soft_start = 0.985f * reach;
+        const F32 soft_range = reach - soft_start;
+        if (c > soft_start)
+        {
+            c = soft_start + soft_range * (1.f - expf(-(c - soft_start) / soft_range));
+        }
+        c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.0005f);
 
-        // The bend plane: the animated knee's side of the hip-ankle line (forward for a
-        // straight leg).
+        // The bend plane. The knee bends toward its kneecap -- the knee joint's own forward
+        // axis, which stays put however straight the leg is. Where the animation bends the
+        // leg clearly, the animated knee's own side of the hip-ankle line leads (it keeps a
+        // splayed or turned-in knee as animated); as the leg straightens that side shrinks
+        // to nothing and turns at random, so the kneecap takes over smoothly.
+        LLVector3 kneecap = LLVector3::x_axis * knee_q[i];
+        if (kneecap.lengthSquared() < 1.0e-6f) kneecap = forward;
+        kneecap.normVec();
         LLVector3 hip_to_ankle = ankle - hip;
         hip_to_ankle.normVec();
         LLVector3 pole = thigh - hip_to_ankle * (thigh * hip_to_ankle);
-        if (pole.lengthSquared() < 1.0e-6f) pole = forward;
-        LLVector3 side = pole - to_target * (pole * to_target);
+        const F32 bent = pole.length();
+        const F32 bent_weight = ql_smoothstep(0.03f * a, 0.10f * a, bent);
+        LLVector3 lead = kneecap;
+        if (bent_weight > 0.f)
+        {
+            lead = pole * (bent_weight / bent) + kneecap * (1.f - bent_weight);
+        }
+        LLVector3 side = lead - to_target * (lead * to_target);
         if (side.lengthSquared() < 1.0e-8f) continue;
         side.normVec();
 
