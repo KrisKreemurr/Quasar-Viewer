@@ -12654,6 +12654,17 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarFootIKHands</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK: hands the animation holds on the ground -- a four-legged avatar's front legs, crawling, hands on the floor -- get foot IK too (judged by how low the wrist is for the avatar's leg length, so standing hands never count).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

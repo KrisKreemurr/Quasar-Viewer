@@ -5172,6 +5172,7 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     {
         // Quasar foot IK corrects the finished pose (CPU path only: the IK writes joints).
         qlFootIKApply(visible);
+        qlHandFootApply(visible);
         qlBodyCollisionApply(visible);
         mRoot->updateWorldMatrixChildren();
     }
@@ -5352,6 +5353,24 @@ void LLVOAvatar::qlFootIKRestore()
             }
         }
     }
+    // Hands as feet (after body collision's shoulders: their "pre" is the hands' result).
+    if (mQLHandFootApplied)
+    {
+        mQLHandFootApplied = false;
+        QLAnimApplyScope scope;
+        static const char* const NAMES[2][3] = { { "mShoulderLeft", "mElbowLeft", "mWristLeft" },
+                                                 { "mShoulderRight", "mElbowRight", "mWristRight" } };
+        for (S32 i = 0; i < 2; ++i)
+        {
+            QLHandFoot& hand = mQLHandFoot[i];
+            LLJoint* sh = getJoint(NAMES[i][0]);
+            LLJoint* el = getJoint(NAMES[i][1]);
+            LLJoint* wr = getJoint(NAMES[i][2]);
+            if (sh && sh->getRotation() == hand.shoulder_set) sh->setRotation(hand.shoulder_pre);
+            if (el && el->getRotation() == hand.elbow_set) el->setRotation(hand.elbow_pre);
+            if (wr && wr->getRotation() == hand.wrist_set) wr->setRotation(hand.wrist_pre);
+        }
+    }
     if (!mQLFootIKApplied) return;
     mQLFootIKApplied = false;
     QLAnimApplyScope scope;
@@ -5375,6 +5394,7 @@ void LLVOAvatar::qlFootIKRestore()
 
 void LLVOAvatar::qlFootIKApply(bool visible)
 {
+    mQLFootIKDropApplied = 0.f;
     static LLCachedControl<F32> s_strength(gSavedSettings, "QuasarFootIKStrength", 1.f);
     const F32 strength = llclamp((F32)s_strength, 0.f, 1.f);
 
@@ -5581,6 +5601,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
             delta = delta * ~parent->getWorldRotation();
         }
         mPelvisp->setPosition(mQLFootIKPelvisPre + delta);
+        mQLFootIKDropApplied = drop;   // hands as feet: the front feet came down with it
     }
     mQLFootIKPelvisSet = mPelvisp->getPosition();
 
@@ -5771,6 +5792,208 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         leg.ankle_set = ankles[i]->getRotation();
     }
     mQLFootIKApplied = true;
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR HANDS AS FEET (QuasarFootIKHands)
+//
+// A hand the animation holds down on the ground -- a four-legged avatar's front legs (SL
+// quadrupeds stand on their arms), a crawl, hands on the floor -- gets the foot IK the
+// feet get: shoulder - elbow - wrist solved as a two-bone leg in the animation's own bend
+// plane, the wrist keeping the animation's rotation tilted to the ground's slope. The
+// front feet measure the ground under them against the ground under the CHEST (the hind
+// feet use the ground under the pelvis), and come down with any pelvis drop foot IK made.
+//
+// Which hands: by how high the wrist is over the ground under it COMPARED WITH THE LEGS'
+// LENGTH (low: under 15-30 % of it) and how straight down from the shoulder the arm
+// hangs, so a standing human's hands -- a tiny's too -- never count, and a crawl or a
+// quadruped's paw does. It fades in and out with that, like every other part of foot IK
+// (dead zone, smoothing, the bend rate cap): nothing switches on or off between frames.
+// Not while sitting (poseballs keep their poses), as foot IK.
+//-----------------------------------------------------------------------------
+void LLVOAvatar::qlHandFootApply(bool visible)
+{
+    static LLCachedControl<bool> s_foot_on(gSavedSettings, "QuasarFootIK", true);
+    static LLCachedControl<bool> s_hands_on(gSavedSettings, "QuasarFootIKHands", true);
+    static LLCachedControl<F32>  s_strength(gSavedSettings, "QuasarFootIKStrength", 1.f);
+    static LLCachedControl<F32>  s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.01f);
+    static LLCachedControl<F32>  s_bend_rate(gSavedSettings, "QuasarFootIKMaxBendRate", 100.f);
+    static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarFootIKDebug", false);
+    const F32 strength = llclamp((F32)s_strength, 0.f, 1.f);
+
+    LLJoint* sh[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
+    LLJoint* el[2] = { getJoint("mElbowLeft"), getJoint("mElbowRight") };
+    LLJoint* wr[2] = { getJoint("mWristLeft"), getJoint("mWristRight") };
+
+    qlFootIKRank();
+    const bool wanted = s_foot_on && s_hands_on && mQLFootIKSelected && visible && strength > 0.f
+        && mRoot && mPelvisp && mChestp && mHipLeftp && mKneeLeftp && mAnkleLeftp
+        && sh[0] && sh[1] && el[0] && el[1] && wr[0] && wr[1]
+        && getRegion() && !isSitting() && !getParent() && !mInAir
+        && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
+        && !FSPoserAnimator::isAvatarPosedLocally(this);
+    if (!wanted)
+    {
+        mQLHandFootTracking = false;
+        for (QLHandFoot& hand : mQLHandFoot) { hand.fade = 0.f; hand.bend_last = -1000.f; }
+        return;
+    }
+
+    // The pose as it stands (the animation's, after foot IK).
+    mRoot->updateWorldMatrixChildren();
+
+    const F32 leg = dist_vec(mHipLeftp->getWorldPosition(), mKneeLeftp->getWorldPosition())
+                  + dist_vec(mKneeLeftp->getWorldPosition(), mAnkleLeftp->getWorldPosition());
+    if (leg < 0.05f) { mQLHandFootTracking = false; return; }
+
+    F32 ref_z = 0.f;
+    LLVector3 ref_norm;
+    qlGroundUnder(mChestp->getWorldPosition(), 0.5f, 3.f, ref_z, ref_norm);
+
+    const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+    const F32 follow = mQLHandFootTracking ? 1.f - expf(-dt * 12.f) : 1.f;
+    const F32 dz = llmax(0.f, (F32)s_dead_zone);
+    const F32 drop = mQLFootIKDropApplied;
+
+    LLVector3 s_p[2], e_p[2], w_p[2], ground_norm[2];
+    LLQuaternion s_q[2], e_q[2], w_q[2];
+    F32 delta[2] = { 0.f, 0.f };
+    bool needed = false;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLHandFoot& hand = mQLHandFoot[i];
+        s_p[i] = sh[i]->getWorldPosition();
+        e_p[i] = el[i]->getWorldPosition();
+        w_p[i] = wr[i]->getWorldPosition();
+        s_q[i] = sh[i]->getWorldRotation();
+        e_q[i] = el[i]->getWorldRotation();
+        w_q[i] = wr[i]->getWorldRotation();
+
+        F32 ground_z = ref_z;
+        qlGroundUnder(w_p[i], 0.6f, 1.5f, ground_z, ground_norm[i]);
+        // Acting as a foot: the wrist low over its ground for this avatar's size, and the
+        // arm hanging down from the shoulder.
+        const F32 height = w_p[i].mV[VZ] - ground_z;
+        LLVector3 arm = w_p[i] - s_p[i];
+        const F32 arm_len = arm.length();
+        const F32 down = arm_len > 0.01f ? (s_p[i].mV[VZ] - w_p[i].mV[VZ]) / arm_len : 0.f;
+        const F32 low = 1.f - ql_smoothstep(0.15f * leg, 0.30f * leg, height);
+        const F32 hanging = ql_smoothstep(0.4f, 0.7f, down);
+        const F32 measured = ground_z - ref_z;
+        const F32 raw = dz > 0.f ? measured * ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) : measured;
+        const F32 reach_fade = 1.f - ql_smoothstep(0.35f, 0.55f, fabsf(measured));
+        hand.ground += (raw - hand.ground) * follow;
+        hand.fade += (low * hanging * reach_fade - hand.fade) * follow;
+        hand.normal += (ground_norm[i] - hand.normal) * follow;
+        if (hand.normal.lengthSquared() < 1.0e-6f) hand.normal = LLVector3::z_axis;
+        hand.normal.normVec();
+        // Relative to where the hand is now: its ground step, and back up by any pelvis drop
+        // the hind legs made (the drop lowered the shoulders with the pelvis).
+        delta[i] = hand.fade * (hand.ground * strength - drop);
+        const bool tilts = hand.fade * strength > 0.001f && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD)
+                           && ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) > 0.f;
+        needed = needed || fabsf(delta[i]) >= 0.001f || tilts;
+    }
+    mQLHandFootTracking = true;
+
+    if (s_debug && isSelf())
+    {
+        LL_INFOS("QuasarFootIK") << llformat("    hands: L fade=%.2f gnd=%.3f delta=%.3f | R fade=%.2f gnd=%.3f delta=%.3f | leg=%.2f drop=%.3f",
+            mQLHandFoot[0].fade, mQLHandFoot[0].ground, delta[0], mQLHandFoot[1].fade, mQLHandFoot[1].ground, delta[1],
+            leg, drop) << LL_ENDL;
+    }
+    if (!needed)
+    {
+        for (QLHandFoot& hand : mQLHandFoot) hand.bend_last = -1000.f;
+        return;
+    }
+
+    QLAnimApplyScope scope;
+    const LLVector3 backward = LLVector3::x_axis * mRoot->getWorldRotation() * -1.f;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLHandFoot& hand = mQLHandFoot[i];
+        hand.shoulder_pre = sh[i]->getRotation();
+        hand.elbow_pre = el[i]->getRotation();
+        hand.wrist_pre = wr[i]->getRotation();
+        hand.shoulder_set = hand.shoulder_pre;
+        hand.elbow_set = hand.elbow_pre;
+        hand.wrist_set = hand.wrist_pre;
+
+        const LLVector3 upper = e_p[i] - s_p[i];
+        const LLVector3 fore = w_p[i] - e_p[i];
+        const F32 a = upper.length(), b = fore.length();
+        const LLVector3 target = w_p[i] + LLVector3(0.f, 0.f, delta[i]);
+        LLVector3 to_target = target - s_p[i];
+        F32 c = to_target.length();
+        if (a < 0.01f || b < 0.01f || c < 0.01f) continue;
+        to_target /= c;
+        const F32 reach = a + b;
+        c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.001f);
+
+        // The elbow's correction changes at most QuasarFootIKMaxBendRate degrees a second
+        // (the animation's own elbow stays free), as the knees.
+        {
+            const F32 last = hand.bend_last;
+            hand.bend_last = -1000.f;
+            auto bend_of = [a, b](F32 length)
+            {
+                return F_PI - acosf(llclamp((a * a + b * b - length * length) / (2.f * a * b), -1.f, 1.f));
+            };
+            const F32 anim_bend = bend_of((w_p[i] - s_p[i]).length());
+            F32 correction = bend_of(c) - anim_bend;
+            if ((F32)s_bend_rate > 0.f && last > -500.f)
+            {
+                const F32 max_change = (F32)s_bend_rate * DEG_TO_RAD * dt;
+                const F32 limited = llclamp(correction, last - max_change, last + max_change);
+                if (limited != correction)
+                {
+                    correction = limited;
+                    const F32 bend = llclamp(anim_bend + correction, 0.f, F_PI);
+                    c = sqrtf(llmax(0.f, a * a + b * b + 2.f * a * b * cosf(bend)));
+                    c = llclamp(c, fabsf(a - b) + 0.001f, reach - 0.001f);
+                }
+            }
+            hand.bend_last = correction;
+        }
+
+        // The bend plane: the animated elbow's side of the shoulder-wrist line (backward,
+        // where an elbow points, for a straight arm).
+        LLVector3 sw = w_p[i] - s_p[i];
+        sw.normVec();
+        LLVector3 pole = upper - sw * (upper * sw);
+        if (pole.lengthSquared() < 1.0e-6f) pole = backward;
+        LLVector3 side = pole - to_target * (pole * to_target);
+        if (side.lengthSquared() < 1.0e-8f) continue;
+        side.normVec();
+        const F32 cos_s = llclamp((a * a + c * c - b * b) / (2.f * a * c), -1.f, 1.f);
+        const F32 sin_s = sqrtf(llmax(0.f, 1.f - cos_s * cos_s));
+        const LLVector3 new_elbow = s_p[i] + (to_target * cos_s + side * sin_s) * a;
+        const LLVector3 new_wrist = s_p[i] + to_target * c;
+
+        const LLQuaternion s_turn = ql_arc(upper, new_elbow - s_p[i]);
+        const LLQuaternion e_turn = ql_arc(fore * s_turn, new_wrist - new_elbow);
+        sh[i]->setWorldRotation(s_q[i] * s_turn);
+        el[i]->setWorldRotation(e_q[i] * s_turn * e_turn);
+
+        // The wrist: the animation's paw / hand rotation, tilted toward the ground's slope.
+        LLQuaternion tilt;
+        const F32 slope = acosf(llclamp(hand.normal.mV[VZ], -1.f, 1.f));
+        const F32 slope_in = ql_smoothstep(5.f * DEG_TO_RAD, 10.f * DEG_TO_RAD, slope);
+        const F32 tilt_amount = hand.fade * strength;
+        if (tilt_amount > 0.f && slope > 0.001f && slope_in > 0.f)
+        {
+            const F32 MAX_TILT = 25.f * DEG_TO_RAD;
+            tilt = slerp(tilt_amount * slope_in * llmin(1.f, MAX_TILT / slope), LLQuaternion::DEFAULT,
+                         ql_arc(LLVector3::z_axis, hand.normal));
+        }
+        wr[i]->setWorldRotation(w_q[i] * tilt);
+
+        hand.shoulder_set = sh[i]->getRotation();
+        hand.elbow_set = el[i]->getRotation();
+        hand.wrist_set = wr[i]->getRotation();
+    }
+    mQLHandFootApplied = true;
 }
 
 //-----------------------------------------------------------------------------
@@ -6041,9 +6264,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 }
             }
             if (pass == 0) first_depth[i] = deepest;
-            if (deepest > overlap)
+            // An arm standing as a front leg belongs under the chest: no push from the torso.
+            const F32 as_foot = mQLHandFoot[i].fade;
+            if (deepest > overlap && as_foot < 0.999f)
             {
-                const LLVector3 needed = push * ((deepest - overlap) / deepest);
+                const LLVector3 needed = push * ((deepest - overlap) / deepest) * (1.f - as_foot);
                 turn[i] = turn[i] * ql_turn_toward(pivot[i], at, needed);
             }
         }

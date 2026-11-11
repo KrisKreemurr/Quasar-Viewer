@@ -777,6 +777,24 @@ private:
     bool        mQLBodyApplied = false;
     bool        mQLBodyTracking = false;
     void        qlBodyCollisionApply(bool visible);
+
+    // QUASAR HANDS AS FEET (QuasarFootIKHands, llvoavatar.cpp): a hand the animation holds
+    // on the ground -- a four-legged avatar's front legs, crawling, hands on the floor --
+    // gets foot IK of its own (shoulder - elbow - wrist), measured against the ground under
+    // the chest. Body collision leaves such an arm out of the torso test.
+    struct QLHandFoot
+    {
+        LLQuaternion shoulder_pre, shoulder_set, elbow_pre, elbow_set, wrist_pre, wrist_set;
+        F32          ground = 0.f;          // smoothed: ground under the hand minus under the chest
+        F32          fade = 0.f;            // smoothed: how much this hand acts as a foot (0..1)
+        F32          bend_last = -1000.f;   // the elbow correction the last solve gave
+        LLVector3    normal = LLVector3::z_axis;
+    };
+    QLHandFoot  mQLHandFoot[2];
+    bool        mQLHandFootApplied = false;
+    bool        mQLHandFootTracking = false;
+    F32         mQLFootIKDropApplied = 0.f;   // the pelvis drop foot IK wrote this frame (m, <= 0)
+    void        qlHandFootApply(bool visible);
 public:
     // Whether foot IK applies to this avatar this frame (LLCleanAnimStore keeps such an
     // avatar on the CPU animation path, which the IK writes into).

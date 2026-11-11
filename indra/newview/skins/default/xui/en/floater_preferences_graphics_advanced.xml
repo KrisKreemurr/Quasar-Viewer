@@ -754,6 +754,17 @@ Only used with a DLSS upscaling mode.
             width="350"
             left="30"
             top="350" />
+          <check_box
+            control_name="QuasarFootIKHands"
+            enabled_control="QuasarFootIK"
+            height="16"
+            label="Hands as feet (four-legged, crawling)"
+            layout="topleft"
+            name="QuasarFootIKHands"
+            tool_tip="Hands the animation holds on the ground get foot IK too: a four-legged avatar's front legs, crawling, hands on the floor. Standing hands never count (judged by how low the wrist is for the avatar's size)."
+            width="300"
+            left="400"
+            top="350" />
           <slider
             control_name="QuasarFootIKDistance"
             enabled_control="QuasarFootIKOthers"
