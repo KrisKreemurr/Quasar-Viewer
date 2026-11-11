@@ -5525,8 +5525,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     bool needed = false;
     for (S32 i = 0; i < 2; ++i)
     {
-        static LLCachedControl<bool> s_tilt(gSavedSettings, "QuasarFootIKTilt", true);
-        const bool tilts = s_tilt && mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD);
+        const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD);
         needed = needed || fabsf(step[i]) >= 0.001f || tilts || drop < -0.001f;
     }
     if (!needed)
@@ -5573,11 +5572,6 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         LLVector3 to_target = target - hip;
         F32 c = to_target.length();
         if (a < 0.01f || b < 0.01f || c < 0.01f) continue;
-        // Nothing to move this leg by (level ground, or only the foot's tilt is wanted):
-        // leave the hip and knee exactly as animated. Solving anyway re-derived the knee
-        // from the reach, and the reach limit alone (a millimetre short of straight) bent
-        // a straight walking leg by a few degrees.
-        const bool solve_leg = fabsf(step[i] - drop) >= 0.001f;
         to_target /= c;
         // Near full extension the knee's angle swings far for a millimetre of reach (a
         // walk straightens each leg every step): approach the straight leg softly, never
@@ -5710,15 +5704,8 @@ void LLVOAvatar::qlFootIKApply(bool visible)
             // the first version: the shin, carried by the hip's turn, onto its new direction
             knee_turn = ql_arc(shin * hip_turn, new_ankle - new_knee);
         }
-        if (solve_leg)
-        {
-            hips[i]->setWorldRotation(hip_q[i] * hip_turn);
-            knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
-        }
-        else
-        {
-            leg.bend_last = QL_NO_BEND;
-        }
+        hips[i]->setWorldRotation(hip_q[i] * hip_turn);
+        knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
         if (debug)
         {
             // How far each turn goes (degrees), and how far the knee sits off the plane the
@@ -5729,8 +5716,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
                 i == 0 ? "L" : "R", deg(swing), deg(twist), deg(knee_turn), c / reach, off_plane) << LL_ENDL;
         }
 
-        static LLCachedControl<bool> s_tilt_on(gSavedSettings, "QuasarFootIKTilt", true);
-        const F32 tilt_amount = s_tilt_on ? leg.fade * strength : 0.f;
+        const F32 tilt_amount = leg.fade * strength;
         LLQuaternion tilt;
         const F32 slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
         // Slopes under 5 degrees count as level for the foot's tilt (fading in to 10).
