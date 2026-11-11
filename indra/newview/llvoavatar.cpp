@@ -6149,6 +6149,24 @@ namespace
     }
 }
 
+// Per-area sizes on top of QuasarBodyCollisionBodySize (multipliers, 1 = as the volumes
+// are): a body is rarely bigger or smaller than its volumes everywhere alike -- a huge butt
+// and thighs over slim hips, a big chest -- so each area scales on its own. Written as
+// multipliers so a later auto-fit from the mesh can set the base under them unchanged.
+F32 LLVOAvatar::qlBodyAreaScale(const std::string& volume)
+{
+    static LLCachedControl<F32> s_chest(gSavedSettings, "QuasarBodyCollisionChest", 1.f);
+    static LLCachedControl<F32> s_belly(gSavedSettings, "QuasarBodyCollisionBelly", 1.f);
+    static LLCachedControl<F32> s_hips(gSavedSettings, "QuasarBodyCollisionHips", 1.f);
+    static LLCachedControl<F32> s_thighs(gSavedSettings, "QuasarBodyCollisionThighs", 1.f);
+    F32 scale = 1.f;
+    if (volume == "CHEST" || volume == "LEFT_PEC" || volume == "RIGHT_PEC" || volume == "UPPER_BACK") scale = s_chest;
+    else if (volume == "BELLY") scale = s_belly;
+    else if (volume == "PELVIS" || volume == "BUTT" || volume == "LOWER_BACK") scale = s_hips;
+    else if (volume == "L_UPPER_LEG" || volume == "R_UPPER_LEG") scale = s_thighs;
+    return llclamp(scale, 0.3f, 3.f);
+}
+
 void LLVOAvatar::qlBodyCollisionApply(bool visible)
 {
     static LLCachedControl<bool> s_on(gSavedSettings, "QuasarBodyCollision", true);
@@ -6204,7 +6222,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 }
                 if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count]))
                 {
-                    for (LLVector3& axis : torso[torso_count].axis) axis *= body_size;
+                    const F32 size = body_size * qlBodyAreaScale(name);
+                    for (LLVector3& axis : torso[torso_count].axis) axis *= size;
                     torso_name[torso_count++] = t;
                 }
                 matched = true;

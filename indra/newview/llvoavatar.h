@@ -777,6 +777,7 @@ private:
     bool        mQLBodyApplied = false;
     bool        mQLBodyTracking = false;
     void        qlBodyCollisionApply(bool visible);
+    static F32  qlBodyAreaScale(const std::string& volume);   // per-area size multiplier (settings)
 
     // QUASAR HANDS AS FEET (QuasarFootIKHands, llvoavatar.cpp): a hand the animation holds
     // on the ground -- a four-legged avatar's front legs, crawling, hands on the floor --

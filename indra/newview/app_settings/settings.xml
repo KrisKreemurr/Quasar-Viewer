@@ -12643,6 +12643,50 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionChest</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: size of the chest (chest, breasts, upper back) for the arms, times Body size (1 = as the collision volumes are). Raise for a big chest the hands sink into.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>QuasarBodyCollisionBelly</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: size of the belly for the arms, times Body size (1 = as the collision volume is).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>QuasarBodyCollisionHips</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: size of the hips and butt (pelvis, butt, lower back) for the arms, times Body size. Lower if hanging arms are pushed out at the hips; raise for a big butt the hands sink into.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>QuasarBodyCollisionThighs</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: size of the thighs for the arms, times Body size. Raise for big thighs the hands sink into.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
   <key>QuasarBodyCollisionDebug</key>
   <map>
     <key>Comment</key>
