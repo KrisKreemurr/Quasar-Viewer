@@ -56,9 +56,9 @@ if ! make windows 2>&1 | tee ~/quasar-build.log; then
   exit 1
 fi
 # Windows won't let a running viewer's files be replaced: wait for it to close
-if tasklist.exe 2>/dev/null | grep -qi "SlipstreamViewer.exe"; then
+if tasklist.exe 2>/dev/null | grep -qi -E "SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; then
   echo ">>> The viewer is running: close it and the new build will be copied in."
-  while tasklist.exe 2>/dev/null | grep -qi "SlipstreamViewer.exe"; do sleep 2; done
+  while tasklist.exe 2>/dev/null | grep -qi -E "SlipstreamViewer.exe|SLPlugin.exe|SLVoice.exe"; do sleep 2; done
   sleep 2
 fi
 rm -rf /mnt/c/dev/QuasarSlipstream
