@@ -778,6 +778,13 @@ private:
     bool        mQLBodyTracking = false;
     void        qlBodyCollisionApply(bool visible);
     static F32  qlBodyAreaScale(const std::string& volume);   // per-area size multiplier (settings)
+    void        qlBodyCollisionFit(const void* torso, const S32* kind, const char* const* names, S32 count);
+    // Auto-fit (QuasarBodyCollisionAutoFit): how many times bigger this avatar's worn mesh
+    // is than each body volume (PELVIS .. R_UPPER_LEG, body collision's TORSO order),
+    // measured from the mesh itself when what is worn changes; 1 = as the volume is.
+    F32         mQLBodyFit[10] = { 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f };
+    U64         mQLBodyFitKey = 0;           // what was worn when last measured
+    F64         mQLBodyFitNextCheck = 0.0;   // next look at what is worn (gFrameTimeSeconds)
 
     // QUASAR HANDS AS FEET (QuasarFootIKHands, llvoavatar.cpp): a hand the animation holds
     // on the ground -- a four-legged avatar's front legs, crawling, hands on the floor --

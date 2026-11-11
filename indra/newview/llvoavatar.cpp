@@ -6149,6 +6149,202 @@ namespace
     }
 }
 
+// QUASAR BODY COLLISION AUTO-FIT (QuasarBodyCollisionAutoFit)
+//
+// How many times bigger the avatar's worn mesh is than each body volume, measured from the
+// mesh. Every 2 seconds the worn rigged meshes are listed (what they are and how many
+// vertices they have now: a mesh that finishes loading, changes LOD or comes off changes
+// that); when the list changed, they are measured again -- one avatar a frame, so a crowd
+// arriving spreads out. Measuring: a sample of the vertices (about 12,000 per avatar,
+// spread evenly), each skinned to the current pose with SL's own skinning
+// (LLSkinningUtil, the bind shape matrix first), and given to a volume -- the body volume
+// fitted mesh weights it to most (half its weight or more: "BELLY", "BUTT", "LEFT_PEC",
+// ...), or, for mesh rigged to the main bones (pelvis, torso, chest, spine, hips), the
+// nearest volume within 3 times its size. Each vertex's distance from its volume's centre
+// in the volume's own unit (1 = on the volume's surface) goes into a histogram; the 60th
+// percentile is the fit (0.6 - 4): most of the surface lies within the shape, a little
+// out of it -- a hand rests slightly into a body rather than hovering off it, and a skirt
+// or a loose sleeve weighted to the hips moves the fit only a little. Fewer than 30 vertices
+// for a volume keep its fit at 1.
+void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const char* const* names, S32 count)
+{
+    static LLCachedControl<bool> s_autofit(gSavedSettings, "QuasarBodyCollisionAutoFit", true);
+    static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarBodyCollisionDebug", false);
+    static U32 s_fit_frame = 0xFFFFFFFFu;   // one avatar measured a frame
+    if (!s_autofit)
+    {
+        for (F32& fit : mQLBodyFit) fit = 1.f;
+        mQLBodyFitKey = 0;
+        return;
+    }
+    if (gFrameTimeSeconds < mQLBodyFitNextCheck) return;
+    mQLBodyFitNextCheck = gFrameTimeSeconds + 2.0;
+
+    const QLEllipsoid* torso = static_cast<const QLEllipsoid*>(torso_in);
+
+    // What is worn: the rigged meshes and how many vertices each has now.
+    std::vector<LLVOVolume*> rigged;
+    U64 key = 1469598103934665603ULL;
+    U32 total = 0;
+    auto consider = [&](LLViewerObject* object)
+    {
+        LLVOVolume* vo = dynamic_cast<LLVOVolume*>(object);
+        if (!vo || !vo->isRiggedMesh() || !vo->getVolume() || !vo->getSkinInfo()) return;
+        LLVolume* volume = vo->getVolume();
+        U32 vertices = 0;
+        for (S32 f = 0; f < volume->getNumVolumeFaces(); ++f) vertices += (U32)volume->getVolumeFace(f).mNumVertices;
+        key = (key ^ vo->getID().getCRC32()) * 1099511628211ULL;
+        key = (key ^ vertices) * 1099511628211ULL;
+        total += vertices;
+        rigged.push_back(vo);
+    };
+    for (const auto& [point, attachment] : mAttachmentPoints)
+    {
+        if (!attachment || !attachment->getValid()) continue;
+        for (const auto& attached : attachment->mAttachedObjects)
+        {
+            LLViewerObject* object = attached.get();
+            if (!object || object->isHUDAttachment()) continue;
+            consider(object);
+            for (const LLPointer<LLViewerObject>& child : object->getChildren()) consider(child.get());
+        }
+    }
+    if (key == mQLBodyFitKey) return;
+    if (s_fit_frame == gFrameCount)
+    {
+        mQLBodyFitNextCheck = gFrameTimeSeconds;   // another avatar was measured this frame: next frame
+        return;
+    }
+    s_fit_frame = gFrameCount;
+    mQLBodyFitKey = key;
+
+    constexpr S32 BINS = 120;            // distance 0 - 6 in steps of 0.05
+    constexpr F32 BIN = 0.05f;
+    constexpr S32 MAX_SLOTS = 10;
+    std::vector<U32> hist((size_t)MAX_SLOTS * BINS, 0);
+    U32 samples[MAX_SLOTS] = {};
+    const U32 stride = llmax(1u, total / 12000u);
+    auto unit_distance = [&](S32 t, const LLVector3& p)
+    {
+        const QLEllipsoid& e = torso[t];
+        const LLVector3 d = p - e.c;
+        F32 sum = 0.f;
+        for (const LLVector3& axis : e.axis)
+        {
+            const F32 u = (d * axis) / axis.lengthSquared();
+            sum += u * u;
+        }
+        return sqrtf(sum);
+    };
+    static const char* const TRUNK[] = { "mPelvis", "mTorso", "mChest", "mSpine1", "mSpine2", "mSpine3", "mSpine4",
+                                         "mHipLeft", "mHipRight" };
+    U32 phase = 0;
+    for (LLVOVolume* vo : rigged)
+    {
+        const LLMeshSkinInfo* skin = vo->getSkinInfo();
+        LLVolume* volume = vo->getVolume();
+        const U32 joints = LLSkinningUtil::getMeshJointCount(skin);
+        if (!joints || skin->mJointNames.size() < joints || skin->mInvBindMatrix.size() < joints) continue;
+        LLMatrix4a palette[LL_CHARACTER_MAX_ANIMATED_JOINTS];
+        LLSkinningUtil::initSkinningMatrixPalette(palette, (S32)joints, skin, this);
+        S8 slot_of[LL_CHARACTER_MAX_ANIMATED_JOINTS];
+        bool trunk[LL_CHARACTER_MAX_ANIMATED_JOINTS];
+        for (U32 j = 0; j < joints; ++j)
+        {
+            const std::string& joint = skin->mJointNames[j];
+            slot_of[j] = -1;
+            for (S32 t = 0; t < count; ++t)
+            {
+                if (joint == names[t]) { slot_of[j] = (S8)t; break; }
+            }
+            trunk[j] = false;
+            for (const char* name : TRUNK)
+            {
+                if (joint == name) { trunk[j] = true; break; }
+            }
+        }
+        const LLMatrix4a bind = skin->mBindShapeMatrix;
+        for (S32 f = 0; f < volume->getNumVolumeFaces(); ++f)
+        {
+            const LLVolumeFace& face = volume->getVolumeFace(f);
+            if (!face.mWeights || !face.mPositions) continue;
+            const U32 n = (U32)face.mNumVertices;
+            U32 v = phase % stride;
+            for (; v < n; v += stride)
+            {
+                F32* w = face.mWeights[v].getF32ptr();
+                S32 body = -1, dominant = -1;
+                F32 body_w = 0.f, dominant_w = 0.f, sum = 0.f;
+                for (S32 k = 0; k < 4; ++k)
+                {
+                    const S32 j = llclamp((S32)floorf(w[k]), 0, (S32)joints - 1);
+                    const F32 wk = w[k] - floorf(w[k]);
+                    sum += wk;
+                    if (wk > dominant_w) { dominant_w = wk; dominant = j; }
+                    if (slot_of[j] >= 0 && wk > body_w) { body_w = wk; body = slot_of[j]; }
+                }
+                if (sum <= 0.f) continue;
+                const bool fitted = body >= 0 && body_w / sum >= 0.5f;
+                if (!fitted && !(dominant >= 0 && trunk[dominant])) continue;   // not the body's surface (hair, a tail, a prop)
+
+                LLMatrix4a skinning;
+                LLSkinningUtil::getPerVertexSkinMatrix(w, palette, true, skinning, joints);
+                LLVector4a bound, posed;
+                bind.affineTransform(face.mPositions[v], bound);
+                skinning.affineTransform(bound, posed);
+                const LLVector3 p(posed.getF32ptr());
+                if (!p.isFinite()) continue;
+
+                S32 slot = -1;
+                F32 dist = 0.f;
+                if (fitted)
+                {
+                    slot = body;
+                    dist = unit_distance(slot, p);
+                }
+                else
+                {
+                    F32 best = 3.f;
+                    for (S32 t = 0; t < count; ++t)
+                    {
+                        const F32 d = unit_distance(t, p);
+                        if (d < best) { best = d; slot = t; }
+                    }
+                    dist = best;
+                }
+                if (slot < 0 || slot >= MAX_SLOTS) continue;
+                hist[(size_t)slot * BINS + llclamp((S32)(dist / BIN), 0, BINS - 1)]++;
+                samples[slot]++;
+            }
+            phase += n;
+        }
+    }
+
+    for (S32 t = 0; t < count && t < MAX_SLOTS; ++t)
+    {
+        F32 fit = 1.f;
+        if (samples[t] >= 30)
+        {
+            const U32 want = (U32)(samples[t] * 0.6f);
+            U32 seen = 0;
+            for (S32 b = 0; b < BINS; ++b)
+            {
+                seen += hist[(size_t)t * BINS + b];
+                if (seen >= want) { fit = (b + 0.5f) * BIN; break; }
+            }
+            fit = llclamp(fit, 0.6f, 4.f);
+        }
+        mQLBodyFit[kind[t]] = fit;
+    }
+    if (s_debug && isSelf())
+    {
+        std::string line;
+        for (S32 t = 0; t < count; ++t) line += llformat(" %s=%.2f(%u)", names[t], mQLBodyFit[kind[t]], samples[t]);
+        LL_INFOS("QuasarBodyCollision") << "auto-fit from " << rigged.size() << " meshes, " << total
+                                        << " vertices (every " << stride << "):" << line << LL_ENDL;
+    }
+}
+
 // Per-area sizes on top of QuasarBodyCollisionBodySize (multipliers, 1 = as the volumes
 // are): a body is rarely bigger or smaller than its volumes everywhere alike -- a huge butt
 // and thighs over slim hips, a big chest -- so each area scales on its own. Written as
@@ -6176,7 +6372,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     // The collision volumes follow the shape sliders, not the mesh: on a bulky shape they
     // come out wider than the body drawn over them (hands hanging at the sides read as
     // "inside the hips"). QuasarBodyCollisionBodySize shrinks the torso's shapes to fit.
-    static LLCachedControl<F32>  s_body_size(gSavedSettings, "QuasarBodyCollisionBodySize", 0.85f);
+    static LLCachedControl<F32>  s_body_size(gSavedSettings, "QuasarBodyCollisionBodySize", 1.f);
     const F32 body_size = llclamp((F32)s_body_size, 0.3f, 1.5f);
 
     LLJoint* shoulders[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
@@ -6204,6 +6400,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     constexpr S32 MAX_TORSO = 10;
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
+    S32 torso_kind[MAX_TORSO] = {};   // index into TORSO (mQLBodyFit's order)
     S32 torso_count = 0;
     LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
     for (S32 v = 0; v < mNumCollisionVolumes; ++v)
@@ -6211,8 +6408,9 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         LLAvatarJointCollisionVolume* volume = &mCollisionVolumes[v];
         const std::string& name = volume->getName();
         bool matched = false;
-        for (const char* t : TORSO)
+        for (S32 kind = 0; kind < (S32)LL_ARRAY_SIZE(TORSO); ++kind)
         {
+            const char* t = TORSO[kind];
             if (name == t)
             {
                 if (!s_legs && (name == "L_UPPER_LEG" || name == "R_UPPER_LEG"))
@@ -6222,8 +6420,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 }
                 if (torso_count < MAX_TORSO && ql_volume(volume, torso[torso_count]))
                 {
-                    const F32 size = body_size * qlBodyAreaScale(name);
-                    for (LLVector3& axis : torso[torso_count].axis) axis *= size;
+                    torso_kind[torso_count] = kind;
                     torso_name[torso_count++] = t;
                 }
                 matched = true;
@@ -6234,6 +6431,18 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         for (S32 i = 0; i < 2; ++i)
             for (S32 k = 0; k < 3; ++k)
                 if (name == ARM[i][k]) arm_volume[i][k] = volume;
+    }
+
+    // AUTO-FIT: measure how far the worn mesh reaches from each body volume (when what is
+    // worn changes), then size every shape: the volume x the fit x its area's slider x Body
+    // size. The volumes follow the shape sliders, not the mesh -- a body made big by its own
+    // HUD, or fitted clothes over it, is bigger than its volumes; measuring the mesh is the
+    // only way to know by how much, for every avatar, with nobody tuning anything.
+    qlBodyCollisionFit(torso, torso_kind, torso_name, torso_count);
+    for (S32 t = 0; t < torso_count; ++t)
+    {
+        const F32 size = body_size * qlBodyAreaScale(torso_name[t]) * mQLBodyFit[torso_kind[t]];
+        for (LLVector3& axis : torso[t].axis) axis *= size;
     }
 
     // The arms' capsules as animated; the upper arm without its top third (in the shoulder).

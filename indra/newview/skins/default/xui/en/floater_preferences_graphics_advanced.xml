@@ -850,7 +850,7 @@ Only used with a DLSS upscaling mode.
             follows="left|top"
             height="16"
             increment="0.05"
-            initial_value="0.85"
+            initial_value="1"
             label="Body size:"
             label_width="185"
             layout="topleft"
@@ -858,9 +858,20 @@ Only used with a DLSS upscaling mode.
             max_val="1.5"
             name="QuasarBodyCollisionBodySize"
             show_text="true"
-            tool_tip="How big the body counts as for the arms. Lower if the arms are pushed out away from the body; higher if they still sink in. 1 = the size your shape sliders give."
+            tool_tip="How big the body counts as for the arms, on top of the fit to each avatar's mesh. Lower if the arms are pushed out away from the body; higher if they still sink in."
             width="350"
             left="30"
+            top="464" />
+          <check_box
+            control_name="QuasarBodyCollisionAutoFit"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Fit to each avatar's mesh"
+            layout="topleft"
+            name="QuasarBodyCollisionAutoFit"
+            tool_tip="Measure each avatar's worn mesh (when what it wears changes) and size its body shapes to match, so big or small bodies fit without tuning, including bodies sized by their own HUD. Body size and the area sliders adjust on top."
+            width="300"
+            left="400"
             top="464" />
           <slider
             control_name="QuasarBodyCollisionChest"

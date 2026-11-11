@@ -12630,7 +12630,7 @@
     <key>Type</key>
     <string>F32</string>
     <key>Value</key>
-    <real>0.85</real>
+    <real>1.0</real>
   </map>
   <key>QuasarBodyCollisionLegs</key>
   <map>
@@ -12686,6 +12686,17 @@
     <string>F32</string>
     <key>Value</key>
     <real>1.0</real>
+  </map>
+  <key>QuasarBodyCollisionAutoFit</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: size each avatar's body shapes from its worn mesh (measured when what it wears changes), so big or small bodies -- shaped by sliders or by a mesh body's own HUD -- fit without tuning. Body size and the area sliders adjust on top.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
   </map>
   <key>QuasarBodyCollisionDebug</key>
   <map>
