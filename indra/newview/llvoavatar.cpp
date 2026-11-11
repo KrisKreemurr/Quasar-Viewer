@@ -5401,6 +5401,15 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     // Both feet off the ground in the animation (a hover pose, a jump): the animation's.
     const F32 float_fade = 1.f - ql_smoothstep(0.30f, 0.50f, low_ankle - ref_z);
 
+    // WALKING. Standing, which foot is down is told by height (a foot the animation
+    // raises is left raised). In a walk the feet trade places every step, so that test
+    // flips each half second and the fades and the pelvis chased it. Moving, both feet
+    // follow the ground under them -- the swinging foot keeps the animation's lift, but
+    // above the real ground, so it clears a slope and lands without a snap -- and which
+    // foot stands is told by its speed in the world (a planted foot is nearly still).
+    const F32 moving = ql_smoothstep(0.15f, 0.5f, mSpeed);
+    const F32 inv_dt = dt > 0.001f ? 1.f / dt : 0.f;
+
     F32 step[2];
     LLVector3 ground_norm[2];
     for (S32 i = 0; i < 2; ++i)
@@ -5413,8 +5422,15 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 lift_fade = 1.f - ql_smoothstep(0.08f, 0.25f, ankle_p[i].mV[VZ] - low_ankle);
         const F32 reach_fade = 1.f - ql_smoothstep(0.35f, 0.55f, fabsf(raw));
         QLFootIKLeg& leg = mQLFootIKLeg[i];
+        LLVector3 travel = ankle_p[i] - leg.last_ankle;
+        travel.mV[VZ] = 0.f;
+        const F32 foot_speed = mQLFootIKTracking ? travel.length() * inv_dt : 0.f;
+        leg.last_ankle = ankle_p[i];
+        const F32 plant = 1.f - ql_smoothstep(0.4f, 1.2f, foot_speed);
+        leg.plant += (plant - leg.plant) * follow;
+        const F32 takes = lift_fade + (1.f - lift_fade) * moving;
         leg.ground += (raw - leg.ground) * follow;
-        leg.fade += (lift_fade * reach_fade * float_fade - leg.fade) * follow;
+        leg.fade += (takes * reach_fade * float_fade - leg.fade) * follow;
         // The slope the foot tilts to follows as smoothly: the ground under a moving foot
         // switches between the land's normal and the foot plane's in a frame.
         leg.normal += (ground_norm[i] - leg.normal) * follow;
@@ -5423,15 +5439,28 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         ground_norm[i] = leg.normal;
         step[i] = leg.ground * leg.fade * strength;
     }
-    mQLFootIKTracking = true;
 
     // The pelvis lowers by the deepest step down, so that leg can reach its ground.
-    const F32 drop = llclamp(llmin(0.f, llmin(step[0], step[1])), -0.4f, 0.f);
+    // Walking, only by the steps of the feet that stand (a swinging foot bends to its
+    // ground), and slowly (about a third of a second): the steps change with every stride,
+    // and the hips would bob with them.
+    F32 drop_target = 0.f;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        const F32 weight = 1.f - moving * (1.f - mQLFootIKLeg[i].plant);
+        drop_target = llmin(drop_target, step[i] * weight);
+    }
+    drop_target = llclamp(drop_target, -0.4f, 0.f);
+    const F32 drop_rate = 12.f + (3.f - 12.f) * moving;
+    const F32 drop_follow = mQLFootIKTracking ? 1.f - expf(-dt * drop_rate) : 1.f;
+    mQLFootIKDrop += (drop_target - mQLFootIKDrop) * drop_follow;
+    const F32 drop = llclamp(mQLFootIKDrop, -0.4f, 0.f);
+    mQLFootIKTracking = true;
     bool needed = false;
     for (S32 i = 0; i < 2; ++i)
     {
         const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < 0.9999f;
-        needed = needed || fabsf(step[i]) >= 0.001f || tilts;
+        needed = needed || fabsf(step[i]) >= 0.001f || tilts || drop < -0.001f;
     }
     if (!needed)
     {

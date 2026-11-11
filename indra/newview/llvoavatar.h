@@ -749,8 +749,11 @@ private:
         F32          ground = 0.f;   // smoothed: ground under the foot minus the reference ground (m)
         F32          fade = 0.f;     // smoothed: how much the IK takes this foot (0..1)
         LLVector3    normal = LLVector3::z_axis;   // smoothed: the ground's normal under the foot
+        LLVector3    last_ankle;     // the animated ankle last frame (world): the foot's speed
+        F32          plant = 1.f;    // smoothed: 1 = the foot stands (still in the world), 0 = it swings
     };
     QLFootIKLeg mQLFootIKLeg[2];
+    F32         mQLFootIKDrop = 0.f;         // smoothed pelvis drop (m, <= 0)
     LLVector3   mQLFootIKPelvisPre;
     LLVector3   mQLFootIKPelvisSet;
     bool        mQLFootIKApplied = false;    // the joints hold an IK write
