@@ -12489,6 +12489,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarFootIKDebug</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: log the foot IK's inputs and turns for your own avatar every frame (category QuasarFootIK in the viewer log). For diagnosing; leave off.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>

@@ -5410,6 +5410,10 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     const F32 moving = ql_smoothstep(0.15f, 0.5f, mSpeed);
     const F32 inv_dt = dt > 0.001f ? 1.f / dt : 0.f;
 
+    static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarFootIKDebug", false);
+    const bool debug = s_debug && isSelf();
+    F32 dbg_raw[2] = { 0.f, 0.f }, dbg_speed[2] = { 0.f, 0.f };
+
     F32 step[2];
     LLVector3 ground_norm[2];
     for (S32 i = 0; i < 2; ++i)
@@ -5427,6 +5431,8 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 foot_speed = mQLFootIKTracking ? travel.length() * inv_dt : 0.f;
         leg.last_ankle = ankle_p[i];
         const F32 plant = 1.f - ql_smoothstep(0.4f, 1.2f, foot_speed);
+        dbg_raw[i] = raw;
+        dbg_speed[i] = foot_speed;
         leg.plant += (plant - leg.plant) * follow;
         const F32 takes = lift_fade + (1.f - lift_fade) * moving;
         leg.ground += (raw - leg.ground) * follow;
@@ -5456,6 +5462,17 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     mQLFootIKDrop += (drop_target - mQLFootIKDrop) * drop_follow;
     const F32 drop = llclamp(mQLFootIKDrop, -0.4f, 0.f);
     mQLFootIKTracking = true;
+    if (debug)
+    {
+        // One line a frame: t, speed, moving, ground under the pelvis, drop (target / applied),
+        // then per foot (L, R): ground step raw / smoothed, fade, plant, foot speed, step used.
+        LL_INFOS("QuasarFootIK") << llformat("t=%.3f spd=%.2f mov=%.2f ref=%.3f drop=%.3f/%.3f"
+            " | L raw=%.3f gnd=%.3f fade=%.2f plant=%.2f fspd=%.2f step=%.3f"
+            " | R raw=%.3f gnd=%.3f fade=%.2f plant=%.2f fspd=%.2f step=%.3f",
+            gFrameTimeSeconds, mSpeed, moving, ref_z, drop_target, drop,
+            dbg_raw[0], mQLFootIKLeg[0].ground, mQLFootIKLeg[0].fade, mQLFootIKLeg[0].plant, dbg_speed[0], step[0],
+            dbg_raw[1], mQLFootIKLeg[1].ground, mQLFootIKLeg[1].fade, mQLFootIKLeg[1].plant, dbg_speed[1], step[1]) << LL_ENDL;
+    }
     bool needed = false;
     for (S32 i = 0; i < 2; ++i)
     {
@@ -5586,6 +5603,15 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         }
         hips[i]->setWorldRotation(hip_q[i] * hip_turn);
         knees[i]->setWorldRotation(knee_q[i] * hip_turn * knee_turn);
+        if (debug)
+        {
+            // How far each turn goes (degrees), and how far the knee sits off the plane the
+            // animation bent it in (cm): a twitch shows here as a jump between frames.
+            auto deg = [](const LLQuaternion& q) { return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f)) * RAD_TO_DEG; };
+            const F32 off_plane = (new_knee - knee) * old_axis * 100.f;
+            LL_INFOS("QuasarFootIK") << llformat("    %s swing=%.1f twist=%.1f knee=%.1f c/reach=%.3f knee_off_plane=%.1fcm",
+                i == 0 ? "L" : "R", deg(swing), deg(twist), deg(knee_turn), c / reach, off_plane) << LL_ENDL;
+        }
 
         const F32 tilt_amount = leg.fade * strength;
         LLQuaternion tilt;
