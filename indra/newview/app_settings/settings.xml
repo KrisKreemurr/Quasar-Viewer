@@ -12470,7 +12470,7 @@
   <key>QuasarFrameGen</key>
   <map>
     <key>Comment</key>
-    <string>Quasar frame generation: each real frame is followed by a generated in-between frame, shown half a frame later, so the screen gets twice the frames. Built from the motion vectors, so it needs RenderVKTAA (or an upscaler) on; without motion vectors the extra frame is a copy. SDR output only (off while HDR output is on). Uses vsync FIFO, or IMMEDIATE without vsync. Read at startup (restart after changing).</string>
+    <string>Quasar frame generation: each real frame is followed by a generated in-between frame, shown half a frame later, so the screen gets twice the frames. Built from the motion vectors, so it needs RenderVKTAA (or an upscaler) on; without motion vectors the extra frame is a copy. SDR output only (off while HDR output is on). Uses vsync FIFO, or IMMEDIATE without vsync. Live (rebuilds the swapchain).</string>
     <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>

@@ -3659,6 +3659,29 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     uint32_t genIndex = 0;
     bool fgOn = false;
     VkCommandBuffer fgCmd = VK_NULL_HANDLE;
+    {
+        // Live: a change rebuilds the swapchain (image count, present mode) next frame.
+        static LLCachedControl<bool> fgWanted(gSavedSettings, "QuasarFrameGen", false);
+        if ((bool)fgWanted != VkSwapchain::sFrameGen)
+        {
+            VkSwapchain::sFrameGen = fgWanted;
+            qlSetFrameGenWanted(fgWanted);
+            if (VkSwapchain::sFrameGen && mImpl->mFgCmds.empty())
+            {
+                mImpl->mFgCmds.resize(mImpl->mSwapchain.framesInFlight(), VK_NULL_HANDLE);
+                VkCommandBufferAllocateInfo fai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                fai.commandPool = mImpl->mDevice.commandPool();
+                fai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                fai.commandBufferCount = (uint32_t)mImpl->mFgCmds.size();
+                VK_CHECK(vkAllocateCommandBuffers(mImpl->mDevice.device(), &fai, mImpl->mFgCmds.data()));
+            }
+            mImpl->mFg.resetHistory();
+            mImpl->mNeedsRecreate = true;
+            mImpl->mOutputPreviewValid = false;
+            LL_INFOS("Vulkan") << "Quasar frame generation: " << (VkSwapchain::sFrameGen ? "ON" : "off")
+                               << " (QuasarFrameGen changed; rebuilding the swapchain)" << LL_ENDL;
+        }
+    }
     if (VkSwapchain::sFrameGen && doWorld && !mImpl->mHdrOutputActive && slot < mImpl->mFgCmds.size())
     {
         static LLCachedControl<F32> fgScale(gSavedSettings, "QuasarFrameGenMotionScale", 1.f);
