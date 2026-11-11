@@ -18,5 +18,10 @@ const QLFrameGenTuning& qlFrameGenTuning();
 
 // Generated frames since the last take (the Vulkan frame bumps it, the viewer's stats take
 // it once a frame for the FPS* statistic: real frames + generated ones).
-void qlFrameGenNoteGenerated();
+void qlFrameGenNoteGenerated(unsigned n = 1);
 unsigned qlFrameGenTakeGenerated();
+
+// QuasarStreamline, read once right after the settings load and before anything uses
+// Vulkan (the delay-load hook decides then whether Vulkan goes through NVIDIA's
+// Streamline interposer). See qlstreamlinevk.h.
+void qlSetStreamlineWanted(bool on);

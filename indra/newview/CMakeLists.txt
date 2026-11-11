@@ -1972,6 +1972,8 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/vk_display_encode.cpp
     vkgfx/vk_swapchain.cpp
     vkgfx/qlframegenvk.cpp            # Quasar frame generation (QuasarFrameGen)
+    vkgfx/qlstreamlinevk.cpp          # Quasar: NVIDIA Streamline (Reflex, DLSS Frame Generation)
+    vkgfx/qlstreamline_win.cpp        # Quasar: hands Vulkan to the Streamline interposer (Windows)
     vkgfx/vk_pipeline.cpp             # graphics/compute pipeline helpers (world pass)
     vkgfx/vk_descpool.cpp             # layout-derived descriptor pools + allocation accounting
     vkgfx/vk_pipecache.cpp            # persistent (disk) VkPipelineCache: load / validate / save
@@ -2650,6 +2652,20 @@ if (LINUX)
 endif ()
 ll_fix_isa_note(${VIEWER_BINARY_NAME})
 add_dependencies(${VIEWER_BINARY_NAME} vk_shaders)
+
+# Quasar: NVIDIA Streamline (Reflex, DLSS Frame Generation), Windows. setup.sh unpacks the
+# SDK into the build tree; without it the viewer builds and runs on the plain loader.
+# vulkan-1.dll is delay-loaded so qlstreamline_win.cpp can hand its imports to the
+# interposer when QuasarStreamline is on.
+if (WINDOWS AND EXISTS "${CMAKE_BINARY_DIR}/_deps/streamline/include/sl.h")
+  target_include_directories(${VIEWER_BINARY_NAME} SYSTEM PRIVATE "${CMAKE_BINARY_DIR}/_deps/streamline/include")
+  target_compile_definitions(${VIEWER_BINARY_NAME} PRIVATE QL_HAS_STREAMLINE=1)
+  target_link_options(${VIEWER_BINARY_NAME} PRIVATE "/DELAYLOAD:vulkan-1.dll")
+  target_link_libraries(${VIEWER_BINARY_NAME} delayimp wintrust crypt32)
+  message(STATUS "Quasar: NVIDIA Streamline SDK found (Reflex, DLSS Frame Generation)")
+else ()
+  message(STATUS "Quasar: no NVIDIA Streamline SDK in the build tree: Reflex and DLSS Frame Generation left out")
+endif ()
 target_include_directories(${VIEWER_BINARY_NAME} PRIVATE "${VK_SHADER_GEN_DIR}")
 
 # add package files

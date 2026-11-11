@@ -1762,6 +1762,12 @@ public:
         *view = mMotion.view; *w = mMotionW; *h = mMotionH;
         return true;
     }
+    // Quasar DLSS Frame Generation: this frame's camera (column-major, unjittered).
+    void frameGenCamera(float view[16], float proj[16], float reproj[16], bool* reset) const
+    {
+        for (int i = 0; i < 16; ++i) { view[i] = mCurView[i]; proj[i] = mCurProj[i]; reproj[i] = mTaaReproj[i]; }
+        *reset = mTaaResolveReset;
+    }
     void asyncBeginFrame(VkCommandBuffer cmd);
     // Opted-in frames: a separate graphics command buffer (begun; the caller ends it) for
     // the swapchain image's clear + transition. asyncSubmitFrame submits it first and it

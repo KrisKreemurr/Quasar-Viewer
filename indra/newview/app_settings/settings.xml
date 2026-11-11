@@ -12467,6 +12467,39 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarStreamline</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: run Vulkan through NVIDIA Streamline (sl.interposer.dll beside the viewer, checked for NVIDIA's signature), for Reflex and DLSS Frame Generation. Read at startup (restart after changing). Off, or without the DLLs, the plain Vulkan loader.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarDLSSFrameGen</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: NVIDIA DLSS Frame Generation (needs QuasarStreamline, an RTX 40 or newer, and vsync off under Vulkan): one generated frame between every two real ones, made by Streamline from the HUD-less world, the motion vectors and the depth; the HUD attachments and the 2D UI stay sharp. Live (rebuilds the swapchain).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>QuasarReflex</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: NVIDIA Reflex (needs QuasarStreamline). 0 = off, 1 = low latency, 2 = low latency + boost. On whenever DLSS Frame Generation runs. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarFrameGen</key>
   <map>
     <key>Comment</key>

@@ -1069,6 +1069,9 @@ bool LLAppViewer::init()
         // quit immediately
         return false;
     }
+    // Quasar: before anything touches Vulkan (the Streamline interposer is chosen at the
+    // first Vulkan call).
+    qlSetStreamlineWanted(gSavedSettings.getBOOL("QuasarStreamline"));
 
     LL_INFOS("InitInfo") << "Configuration initialized." << LL_ENDL ;
 

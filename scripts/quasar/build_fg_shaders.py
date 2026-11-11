@@ -10,7 +10,8 @@ import os, struct, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "indra", "newview", "vkgfx", "shaders_quasar")
 OUT = os.path.join(ROOT, "indra", "newview", "vkgfx", "qlframegen_spv.h")
-SHADERS = [("ql_fg_fullscreen.vert", "kQLFgFullscreenVert"), ("ql_fg_warp.frag", "kQLFgWarpFrag")]
+SHADERS = [("ql_fg_fullscreen.vert", "kQLFgFullscreenVert"), ("ql_fg_warp.frag", "kQLFgWarpFrag"),
+           ("ql_fg_inputs.frag", "kQLFgInputsFrag")]
 
 def main():
     glslang = sys.argv[1] if len(sys.argv) > 1 else "glslangValidator"

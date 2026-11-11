@@ -48,6 +48,23 @@ MEM_GB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1048576 ))
 JOBS=$(( MEM_GB / 3 )); [ "$JOBS" -lt 2 ] && JOBS=2; [ "$JOBS" -gt "$(nproc)" ] && JOBS=$(nproc)
 export NINJA_JOBS=${NINJA_JOBS:-$JOBS}
 echo "Building with $NINJA_JOBS jobs ($MEM_GB GB for Linux)"
+# NVIDIA Streamline SDK (Reflex, DLSS Frame Generation): its headers for the build, its
+# signed DLLs beside the viewer. Fetched once from NVIDIA's GitHub release; a fresh unpack
+# makes CMake configure again so it is picked up.
+SL_VER=2.14.16
+SL_DIR=build-windows-x86_64/_deps/streamline
+if [ ! -f "$SL_DIR/include/sl.h" ]; then
+  mkdir -p build-windows-x86_64/_deps
+  echo ">>> Fetching NVIDIA Streamline $SL_VER (about 270 MB, once)"
+  if curl -fL -o /tmp/streamline.zip "https://github.com/NVIDIA-RTX/Streamline/releases/download/v$SL_VER/streamline-sdk-v$SL_VER.zip" \
+     && echo "32041e51db0cab709a271b72a352281b690c2abbd669a827809401a5dd23956b  /tmp/streamline.zip" | sha256sum -c - ; then
+    rm -rf "$SL_DIR" && mkdir -p "$SL_DIR" && 7z x -o"$SL_DIR" /tmp/streamline.zip >/dev/null
+    rm -f build-windows-x86_64/CMakeCache.txt
+  else
+    echo ">>> Streamline not fetched: building without Reflex and DLSS Frame Generation"
+  fi
+  rm -f /tmp/streamline.zip
+fi
 # The whole log is kept (also on C:), and a failure prints only the real errors
 if ! make windows 2>&1 | tee ~/quasar-build.log; then
   cp ~/quasar-build.log /mnt/c/dev/quasar-build.log 2>/dev/null || true
@@ -63,6 +80,13 @@ if tasklist.exe 2>/dev/null | grep -qi -E "SlipstreamViewer.exe|SLPlugin.exe|SLV
 fi
 rm -rf /mnt/c/dev/QuasarSlipstream
 7z x -o/mnt/c/dev/QuasarSlipstream build-windows-x86_64/package/*_win64.zip >/dev/null
+# Streamline's DLLs beside the viewer (NVIDIA's licences for them are in the SDK)
+if [ -f "$SL_DIR/include/sl.h" ]; then
+  VIEWER_DIR=$(dirname "$(ls /mnt/c/dev/QuasarSlipstream/*/SlipstreamViewer.exe | head -1)")
+  for f in sl.interposer.dll sl.common.dll sl.pcl.dll sl.reflex.dll sl.dlss_g.dll nvngx_dlssg.dll; do
+    if [ -f "$SL_DIR/bin/x64/$f" ]; then cp "$SL_DIR/bin/x64/$f" "$VIEWER_DIR/"; fi
+  done
+fi
 # A desktop shortcut straight to the exe, wherever the zip put it
 EXE=$(find /mnt/c/dev/QuasarSlipstream -maxdepth 3 -iname "SlipstreamViewer.exe" | head -1)
 if [ -n "$EXE" ]; then

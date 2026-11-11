@@ -13,6 +13,7 @@
 #include "vk_requirements.h"                 // #526 device requirements + user message
 #include "vk_swapchain.h"
 #include "qlframegenvk.h"          // Quasar frame generation
+#include "qlstreamlinevk.h"        // Quasar: NVIDIA Streamline (Reflex, DLSS Frame Generation)
 #include "vk_display_frame.h"
 #include "vk_display_encode.h"
 #include "vk_display_mode_transaction.h"
@@ -878,6 +879,7 @@ namespace { const char* vkPresentModeName(VkPresentModeKHR m); }   // (defined w
 // drag-resize does not spam the log.
 static void noteSwapchainMode(const VkSwapchain& sc, bool recreated)
 {
+    qlsl::swapchainChanged(sc.imageCount(), sc.extent().width, sc.extent().height, sc.format());   // Quasar
     static VkPresentModeKHR s_mode = VK_PRESENT_MODE_MAX_ENUM_KHR;
     static uint32_t s_images = 0, s_in_flight = 0;
     const VkPresentModeKHR mode = sc.presentMode();
@@ -1259,6 +1261,7 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
     LL_INFOS("Vulkan") << "Quasar frame generation: " << (VkSwapchain::sFrameGen ? "ON" : "off")
                        << " (QuasarFrameGen, read at startup); swapchain images " << mImpl->mSwapchain.imageCount()
                        << ", present mode " << vkPresentModeName(mImpl->mSwapchain.presentMode()) << LL_ENDL;
+    LL_INFOS("Vulkan") << "Quasar: NVIDIA Streamline " << qlsl::note() << LL_ENDL;
 
     mInitialized = true;
     LL_INFOS("Vulkan") << "RT: requested=" << mRayTracingRequested
@@ -3131,6 +3134,25 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         return false;
     }
 
+    // Quasar: Streamline's frame (token, Reflex sleep); a frame generation switch rebuilds
+    // the swapchain, as Streamline asks.
+    if (qlsl::running())
+    {
+        static LLCachedControl<bool> slFG(gSavedSettings, "QuasarDLSSFrameGen", false);
+        static LLCachedControl<U32> slReflex(gSavedSettings, "QuasarReflex", 1);
+        qlsl::FrameSettings fs;
+        fs.frameGen = slFG;
+        fs.reflexMode = (int)(U32)slReflex;
+        fs.vsync = VkSwapchain::sVSync;
+        qlsl::frameBegin(fs);
+        if (qlsl::takeSwapchainRebuild())
+        {
+            mImpl->mNeedsRecreate = true;
+            mImpl->mOutputPreviewValid = false;
+        }
+        if (const uint32_t gen = qlsl::takeGeneratedFrames()) qlFrameGenNoteGenerated(gen);   // FPS*
+    }
+
     fseBeforeRecreate();   // #919 (Windows): exclusive chain on / off, release before a rebuild
     bool deferSwapchainRecreate = false;
     bool outputCandidateCommitted = false;
@@ -3683,7 +3705,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         }
     }
     if (VkSwapchain::sFrameGen && mImpl->mSwapchain.builtForFrameGen() && doWorld && !mImpl->mHdrOutputActive
-        && slot < mImpl->mFgCmds.size())
+        && slot < mImpl->mFgCmds.size() && !qlsl::running())
     {
         static LLCachedControl<F32> fgScale(gSavedSettings, "QuasarFrameGenMotionScale", 1.f);
         static LLCachedControl<bool> fgFlipY(gSavedSettings, "QuasarFrameGenFlipMotionY", false);
@@ -3710,6 +3732,8 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     }
     if (!fgOn) mImpl->mSwapchain.pacerFlush();   // (frame generation just went off: keep present order)
 
+    qlsl::marker(qlsl::M_SIM_END);               // Quasar (Reflex / PC Latency)
+    qlsl::marker(qlsl::M_RENDER_SUBMIT_START);
     // Record: UNDEFINED -> TRANSFER_DST, clear, (UI pass), -> PRESENT_SRC.
     beginTexturePrepRecording();
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -3847,13 +3871,35 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             // (capture point 2, right after the world) must not contain that text:
             // that frame leaves it to the UI replay, after the capture.
             LLCleanRendererVK* W = mImpl->mWorld;
+            VkDeviceContext* slCtx = &mImpl->mDevice;
+            const VkFormat slSwapFormat = mImpl->mSwapchain.format();
+            const bool slInputs = qlsl::running() && !mImpl->mHdrOutputActive;
             mImpl->mWorld->mWorldOverlayHook =
-                [slot, doUI, W](VkCommandBuffer c, VkImageView color, VkImageView depth,
+                [slot, doUI, W, img, slCtx, slSwapFormat, slInputs](VkCommandBuffer c, VkImageView color, VkImageView depth,
                                 VkImage depthImage, uint32_t w, uint32_t h)
                 {
                     if (doUI)
                         gVK.recordWorldOverlay(c, slot, color, depth, depthImage, w, h,
                                                W->capturePending() != 2u && !W->liveSnapPoint2Pending());
+                    // Quasar DLSS Frame Generation: the world with its 3D overlays and name
+                    // tags, before the HUD attachments and the 2D UI (both stay sharp).
+                    if (slInputs)
+                    {
+                        static LLCachedControl<bool> slFlipY(gSavedSettings, "QuasarFrameGenFlipMotionY", false);
+                        qlsl::Inputs in;
+                        in.swapImage = img;
+                        in.swapFormat = slSwapFormat;
+                        in.w = w; in.h = h;
+                        in.depthImage = depthImage;
+                        in.depthView = depth;
+                        in.slot = slot;
+                        in.flipMotionY = slFlipY;
+                        uint32_t mw = 0, mh = 0;
+                        if (!W->frameGenMotion(&in.motionView, &mw, &mh)) in.motionView = VK_NULL_HANDLE;
+                        qlsl::Camera cam;
+                        W->frameGenCamera(cam.view, cam.proj, cam.reproj, &cam.reset);
+                        qlsl::recordInputs(*slCtx, c, in, cam);
+                    }
                 };
             mImpl->mWorld->recordWorld(cmd, view, ext.width, ext.height,
                                        draw, cull, sky,
@@ -4116,6 +4162,8 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
                                << mImpl->mSwapchain.pacedPresents() << " paced presents" << LL_ENDL;
     }
     LLVKHitch::timelineSubmitted();   // (frame timeline: frame start -> submit)
+    qlsl::marker(qlsl::M_RENDER_SUBMIT_END);    // Quasar
+    qlsl::marker(qlsl::M_PRESENT_START);
     bool presentNeedsRecreate = false;
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -4128,6 +4176,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         else
         { VK_HITCH_SCOPE("vk_present"); mImpl->mSwapchain.present(mImpl->mDevice, imageIndex, &presentNeedsRecreate); }
         if (mImpl->mSwapchain.takePacerRecreate()) presentNeedsRecreate = true;
+        qlsl::marker(qlsl::M_PRESENT_END);   // Quasar
         LLVKHitch::timelinePresent(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     if (presentNeedsRecreate)
@@ -4246,6 +4295,8 @@ void LLVulkanContext::shutdown()
 #endif
     mImpl->mSwapchain.destroy(mImpl->mDevice);   // (stops the frame generation pacing thread first)
     mImpl->mFg.destroy(mImpl->mDevice);          // Quasar frame generation
+    qlsl::destroy(mImpl->mDevice);               // Quasar: Streamline's input images
+    qlsl::shutdown();
     if (mImpl->mSurface && mImpl->mDevice.instance())
     {
         // SDL created the surface; SDL owns the destroy on this Vulkan instance.
