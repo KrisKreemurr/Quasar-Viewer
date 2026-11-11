@@ -1195,7 +1195,28 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
     }
 
     // 3) Surface from the SDL_WINDOW_VULKAN window.
-    if (!SDL_Vulkan_CreateSurface(window, mImpl->mDevice.instance(), nullptr,
+    bool surfaceMade = false;
+#if LL_WINDOWS
+    if (qlsl::running())
+    {
+        // Quasar: DLSS Frame Generation finds the window from the surface it saw being made,
+        // and SDL makes its surface through its own copy of the loader, which Streamline's
+        // interposer never sees ("Could not find a window corresponding to this
+        // application", then no swapchain). So the surface is made here, through the
+        // interposer (our vkGetInstanceProcAddr is its).
+        struct Win32SurfaceInfo { VkStructureType sType; const void* pNext; VkFlags flags; HINSTANCE hinstance; HWND hwnd; };
+        typedef VkResult (VKAPI_PTR *PFN_Win32Surface)(VkInstance, const Win32SurfaceInfo*, const VkAllocationCallbacks*, VkSurfaceKHR*);
+        HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        auto create = reinterpret_cast<PFN_Win32Surface>(vkGetInstanceProcAddr(mImpl->mDevice.instance(), "vkCreateWin32SurfaceKHR"));
+        if (hwnd && create)
+        {
+            Win32SurfaceInfo ci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, nullptr, 0, GetModuleHandleW(nullptr), hwnd};
+            surfaceMade = create(mImpl->mDevice.instance(), &ci, nullptr, &mImpl->mSurface) == VK_SUCCESS;
+        }
+        LL_INFOS("Vulkan") << "Quasar: window surface made " << (surfaceMade ? "through Streamline" : "by SDL (Streamline's was refused)") << LL_ENDL;
+    }
+#endif
+    if (!surfaceMade && !SDL_Vulkan_CreateSurface(window, mImpl->mDevice.instance(), nullptr,
                                   &mImpl->mSurface))
     {
         return failWith("SDL_Vulkan_CreateSurface", std::string("window surface: ") + SDL_GetError());
