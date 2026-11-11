@@ -5437,7 +5437,15 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     {
         F32 ground_z = ref_z;
         qlGroundUnder(ankle_p[i], 0.6f, 1.5f, ground_z, ground_norm[i]);
-        const F32 raw = ground_z - ref_z;
+        // Dead zone (QuasarFootIKDeadZone): SL's "flat" ground is rarely flat -- terrain
+        // bumps and the foot plane put a few centimetres between the ground under a foot
+        // and under the pelvis, and a nearly straight walking leg turns 2.5 cm into ~20
+        // degrees of knee. A difference under the dead zone is level ground (nothing to
+        // correct), fading in to the full difference by 1.5 times it.
+        static LLCachedControl<F32> s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.04f);
+        const F32 measured = ground_z - ref_z;
+        const F32 dz = llmax(0.f, (F32)s_dead_zone);
+        const F32 raw = dz > 0.f ? measured * ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) : measured;
         // A foot the animation lifts above the other stays lifted; a drop past what a
         // leg can take (a ledge, a cliff edge) is not reached for.
         const F32 lift_fade = 1.f - ql_smoothstep(0.08f, 0.25f, ankle_p[i].mV[VZ] - low_ankle);
@@ -5517,7 +5525,7 @@ void LLVOAvatar::qlFootIKApply(bool visible)
     bool needed = false;
     for (S32 i = 0; i < 2; ++i)
     {
-        const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < 0.9999f;
+        const bool tilts = mQLFootIKLeg[i].fade * strength > 0.001f && ground_norm[i].mV[VZ] < cosf(5.f * DEG_TO_RAD);
         needed = needed || fabsf(step[i]) >= 0.001f || tilts || drop < -0.001f;
     }
     if (!needed)
@@ -5711,10 +5719,12 @@ void LLVOAvatar::qlFootIKApply(bool visible)
         const F32 tilt_amount = leg.fade * strength;
         LLQuaternion tilt;
         const F32 slope = acosf(llclamp(ground_norm[i].mV[VZ], -1.f, 1.f));
-        if (tilt_amount > 0.f && slope > 0.001f)
+        // Slopes under 5 degrees count as level for the foot's tilt (fading in to 10).
+        const F32 slope_in = ql_smoothstep(5.f * DEG_TO_RAD, 10.f * DEG_TO_RAD, slope);
+        if (tilt_amount > 0.f && slope > 0.001f && slope_in > 0.f)
         {
             const F32 MAX_TILT = 25.f * DEG_TO_RAD;
-            const F32 t = tilt_amount * llmin(1.f, MAX_TILT / slope);
+            const F32 t = tilt_amount * slope_in * llmin(1.f, MAX_TILT / slope);
             tilt = slerp(t, LLQuaternion::DEFAULT, ql_arc(LLVector3::z_axis, ground_norm[i]));
         }
         ankles[i]->setWorldRotation(ankle_q[i] * tilt);

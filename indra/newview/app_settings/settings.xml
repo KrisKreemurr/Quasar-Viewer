@@ -12577,6 +12577,17 @@
     <key>Value</key>
     <real>1.0</real>
   </map>
+  <key>QuasarFootIKDeadZone</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar foot IK: ground height differences under this (metres) count as level ground and are not corrected (fading in to the full difference by 1.5 times it), so bumpy "flat" ground leaves the walk alone. 0 = correct everything.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.04</real>
+  </map>
   <key>QuasarFootIKDistance</key>
   <map>
     <key>Comment</key>
