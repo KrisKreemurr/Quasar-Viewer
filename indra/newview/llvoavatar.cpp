@@ -6405,11 +6405,15 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         mQLBodyFit[kind[t]] = fit;
     }
     mQLBodyFitKey = job.key;
-    if (s_debug && isSelf())
+    // One line per measuring (not per frame): your own avatar with QuasarBodyCollisionDebug,
+    // and other avatars too with QuasarBodyCollisionDebugOthers.
+    static LLCachedControl<bool> s_debug_others(gSavedSettings, "QuasarBodyCollisionDebugOthers", false);
+    if ((s_debug && isSelf()) || (s_debug_others && !isSelf()))
     {
         std::string line;
         for (S32 t = 0; t < count; ++t) line += llformat(" %s=%.2f(%u)", names[t], mQLBodyFit[kind[t]], job.samples[t]);
-        LL_INFOS("QuasarBodyCollision") << "auto-fit from " << job.meshes.size() << " meshes (" << job.direct << " in memory, "
+        LL_INFOS("QuasarBodyCollision") << "auto-fit (" << (isSelf() ? std::string("you") : getFullname()) << ") from "
+                                        << job.meshes.size() << " meshes (" << job.direct << " in memory, "
                                         << job.decoded << " decoded, " << job.missing << " unavailable), every "
                                         << job.stride << " vertices:" << line << LL_ENDL;
     }

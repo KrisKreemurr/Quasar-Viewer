@@ -12698,6 +12698,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionDebugOthers</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: also log the auto-fit of other avatars (one line, with their name, each time one is measured; category QuasarBodyCollision). For diagnosing; leave off.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarBodyCollisionDebug</key>
   <map>
     <key>Comment</key>
