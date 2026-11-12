@@ -532,10 +532,18 @@ bool LLPhysicsMotion::onUpdate(F32 time)
 
         // Higher LOD is better.  This controls the granularity
         // and frequency of updates for the motions.
-        const F32 lod_factor = LLVOAvatar::sPhysicsLODFactor;
+        F32 lod_factor = LLVOAvatar::sPhysicsLODFactor;
         if (lod_factor == 0)
         {
                 return true;
+        }
+        // Quasar: the nearby avatars getting Quasar's corrections (foot IK, body collision,
+        // soft physics; at most QuasarFootIKMaxAvatars) always get full physics detail. Below
+        // 1.0 the visible jiggle only redraws once it has moved (1 - lod) * 40 % of its range
+        // -- at 0.9, steps of 4 % -- which read as snapping rather than a smooth bounce (user).
+        if (LLVOAvatar* avatar = dynamic_cast<LLVOAvatar*>(mCharacter); avatar && avatar->qlFootIKSelected())
+        {
+                lod_factor = 1.f;
         }
 
         LLJoint *joint = mJointState->getJoint();
