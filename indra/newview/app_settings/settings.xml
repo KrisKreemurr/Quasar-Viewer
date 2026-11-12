@@ -12764,6 +12764,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionOthers</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: arms and legs also stay out of the bodies of the nearest corrected avatars (up to 3, within 2 m) -- hugs, couple poses, cuddles. Legs turn at the hip; against another avatar's thigh each side moves half. Both Quasar viewers work out the same contacts.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionCleavage</key>
   <map>
     <key>Comment</key>

@@ -925,6 +925,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="552" />
+          <check_box
+            control_name="QuasarBodyCollisionOthers"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Arms and legs against other avatars"
+            layout="topleft"
+            name="QuasarBodyCollisionOthers"
+            tool_tip="Hugs, couple poses, cuddles: your arms and legs rest on nearby avatars' bodies instead of going through them (and theirs on yours, for anyone using Quasar)."
+            width="360"
+            left="30"
+            top="574" />
           <button
             follows="left|top"
             height="23"
@@ -933,7 +944,7 @@ Only used with a DLSS upscaling mode.
             left="30"
             name="QuasarMotionDefaults"
             tool_tip="Every Avatar motion (Quasar) setting -- foot IK and body clipping -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="578"
+            top="600"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />

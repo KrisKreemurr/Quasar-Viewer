@@ -777,6 +777,25 @@ private:
     QLBodyArm   mQLBodyArm[2];
     bool        mQLBodyApplied = false;
     bool        mQLBodyTracking = false;
+    // Legs against other avatars (QuasarBodyCollisionOthers): the hip's correction, like an arm's.
+    struct QLBodyLeg
+    {
+        LLQuaternion hip_pre, hip_set;
+        LLQuaternion correction;
+    };
+    QLBodyLeg   mQLBodyLeg[2];
+    bool        mQLBodyLegsApplied = false;
+    bool        mQLBodyLegsTracking = false;
+    // This avatar's body shapes this frame, for other avatars' arms and legs (world space).
+public:
+    struct QLShapeOut
+    {
+        LLVector3 c, axis[3];
+        bool      limb = false;   // a thigh: its own viewer moves it too
+    };
+    std::vector<QLShapeOut> mQLShapesOut;
+    F64         mQLShapesTime = -1.0;
+private:
     // QUASAR SOFT CONTACT (QuasarSoftContact, llvoavatar.cpp "QUASAR SOFT CONTACT"): an arm
     // pressing into a breast, the butt or the belly dents it (part moved away, part
     // squashed flat) instead of only being pushed out, and it springs back with the

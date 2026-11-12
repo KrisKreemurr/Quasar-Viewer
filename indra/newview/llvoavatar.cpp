@@ -5379,6 +5379,18 @@ void LLVOAvatar::qlFootIKRestore()
             }
         }
     }
+    // Body collision's hips against other avatars (before foot IK's legs below: their "pre"
+    // is what foot IK wrote).
+    if (mQLBodyLegsApplied)
+    {
+        mQLBodyLegsApplied = false;
+        QLAnimApplyScope scope;
+        LLJoint* hips[2] = { mHipLeftp, mHipRightp };
+        for (S32 i = 0; i < 2; ++i)
+        {
+            if (hips[i] && hips[i]->getRotation() == mQLBodyLeg[i].hip_set) hips[i]->setRotation(mQLBodyLeg[i].hip_pre);
+        }
+    }
     // Hands as feet (after body collision's shoulders: their "pre" is the hands' result).
     if (mQLHandFootApplied)
     {
@@ -6949,6 +6961,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     if (!wanted)
     {
         mQLBodyTracking = false;
+        mQLBodyLegsTracking = false;
+        mQLShapesOut.clear();
         mQLSoftEngine = false;   // SL's own jiggle again
         for (QLSoftPart& part : mQLSoft)
         {
@@ -6968,13 +6982,18 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                                          "L_UPPER_LEG", "R_UPPER_LEG" };
     static const char* const ARM[2][3] = { { "L_UPPER_ARM", "L_LOWER_ARM", "L_HAND" },
                                            { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
-    constexpr S32 MAX_TORSO = 11;   // the 10 volumes + the cleavage filler
+    constexpr S32 MAX_OWN = 11;                    // the 10 volumes + the cleavage filler
+    constexpr S32 MAX_OTHERS = 3;                  // nearby avatars whose bodies limbs meet
+    constexpr S32 MAX_TORSO = MAX_OWN * (1 + MAX_OTHERS);
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
     S32 torso_kind[MAX_TORSO] = {};   // index into TORSO (mQLBodyFit's order)
     LLAvatarJointCollisionVolume* torso_vol[MAX_TORSO] = {};
     S32 torso_count = 0;
     LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
+    LLAvatarJointCollisionVolume* leg_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
+    static const char* const LEG[2][3] = { { "L_UPPER_LEG", "L_LOWER_LEG", "L_FOOT" },
+                                           { "R_UPPER_LEG", "R_LOWER_LEG", "R_FOOT" } };
     for (S32 v = 0; v < mNumCollisionVolumes; ++v)
     {
         LLAvatarJointCollisionVolume* volume = &mCollisionVolumes[v];
@@ -7003,7 +7022,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         if (matched) continue;
         for (S32 i = 0; i < 2; ++i)
             for (S32 k = 0; k < 3; ++k)
+            {
                 if (name == ARM[i][k]) arm_volume[i][k] = volume;
+                if (name == LEG[i][k]) leg_volume[i][k] = volume;
+            }
     }
 
     // AUTO-FIT: measure how far the worn mesh reaches from each body volume (when what is
@@ -7076,6 +7098,56 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     torso_name[torso_count] = "CLEAVAGE";
                     ++torso_count;
                 }
+            }
+        }
+    }
+
+    // OTHER AVATARS (QuasarBodyCollisionOthers, on). Each corrected avatar shares its body
+    // shapes for the frame (mQLShapesOut, as fitted, before any soft offset); this one's
+    // arms (the solve below) and legs (QUASAR LEGS AGAINST OTHERS) are then also kept out
+    // of the bodies of the nearest corrected avatars around it -- hugs, couple poses,
+    // cuddles: animations made for other body sizes clip into each other the same way an AO
+    // clips into its own body. Up to MAX_OTHERS avatars whose shapes are fresh (this frame or
+    // the last: avatars update one after another) and whose root is within 2 m. Both
+    // viewers, if both run Quasar, work out the same contacts from the same animations.
+    const S32 own_count = torso_count;
+    mQLShapesOut.clear();
+    for (S32 t = 0; t < own_count; ++t)
+    {
+        QLShapeOut out;
+        out.c = torso[t].c;
+        for (S32 k = 0; k < 3; ++k) out.axis[k] = torso[t].axis[k];
+        out.limb = torso_kind[t] == 8 || torso_kind[t] == 9;   // a thigh: that avatar moves it too
+        mQLShapesOut.push_back(out);
+    }
+    mQLShapesTime = gFrameTimeSeconds;
+    static LLCachedControl<bool> s_others(gSavedSettings, "QuasarBodyCollisionOthers", true);
+    if (s_others)
+    {
+        const LLVector3 here = mRoot->getWorldPosition();
+        std::vector<std::pair<F32, LLVOAvatar*>> near_others;
+        for (LLCharacter* character : LLCharacter::sInstances)
+        {
+            LLVOAvatar* other = (LLVOAvatar*)character;
+            if (other == this || other->isDead() || !other->mRoot || other->mQLShapesOut.empty()) continue;
+            if (gFrameTimeSeconds - other->mQLShapesTime > 0.3) continue;   // not corrected any more
+            const F32 d2 = dist_vec_squared(other->mRoot->getWorldPosition(), here);
+            if (d2 > 4.f) continue;
+            near_others.emplace_back(d2, other);
+        }
+        std::sort(near_others.begin(), near_others.end(),
+                  [](const std::pair<F32, LLVOAvatar*>& x, const std::pair<F32, LLVOAvatar*>& y) { return x.first < y.first; });
+        for (size_t o = 0; o < near_others.size() && o < (size_t)MAX_OTHERS; ++o)
+        {
+            for (const QLShapeOut& shape : near_others[o].second->mQLShapesOut)
+            {
+                if (torso_count >= MAX_TORSO) break;
+                torso[torso_count].c = shape.c;
+                for (S32 k = 0; k < 3; ++k) torso[torso_count].axis[k] = shape.axis[k];
+                torso_kind[torso_count] = shape.limb ? -3 : -2;
+                torso_vol[torso_count] = nullptr;
+                torso_name[torso_count] = shape.limb ? "OTHER_THIGH" : "OTHER";
+                ++torso_count;
             }
         }
     }
@@ -7538,6 +7610,106 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 turn[0] = turn[0] * ql_turn_toward(pivot[0], at[0], away * half);
                 turn[1] = turn[1] * ql_turn_toward(pivot[1], at[1], away * -half);
             }
+        }
+    }
+
+    // QUASAR LEGS AGAINST OTHERS. Each leg (thigh, shin, foot capsules from its volumes; the
+    // top fifth of the thigh skipped -- it sits in the hip) is turned at the hip out of the
+    // deepest of the other avatars' shapes, like an arm at the shoulder: a few passes,
+    // smoothed, capped, written over the animation (and foot IK) and put back first thing
+    // next frame, before foot IK's own restore. Against another avatar's thigh, which that
+    // avatar's viewer moves too, each side moves half -- intertwined legs aren't pushed twice
+    // as far apart. Only other avatars: a leg against its own body is left to the animation.
+    {
+        LLJoint* hips[2] = { mHipLeftp, mHipRightp };
+        LLQuaternion leg_turn[2] = { LLQuaternion::DEFAULT, LLQuaternion::DEFAULT };
+        F32 leg_first[2] = { 0.f, 0.f };
+        const bool others_here = torso_count > own_count;
+        if (others_here && hips[0] && hips[1] && hips[0]->getParent() && hips[1]->getParent())
+        {
+            QLCapsule leg_caps[2][3];
+            bool leg_have[2][3] = { { false, false, false }, { false, false, false } };
+            LLVector3 hip_at[2];
+            for (S32 i = 0; i < 2; ++i)
+            {
+                hip_at[i] = hips[i]->getWorldPosition();
+                for (S32 k = 0; k < 3; ++k) leg_have[i][k] = ql_capsule(leg_volume[i][k], k == 0 ? 0.2f : 0.f, leg_caps[i][k]);
+            }
+            for (S32 pass = 0; pass < 3; ++pass)
+            {
+                for (S32 i = 0; i < 2; ++i)
+                {
+                    F32 deepest = 0.f;
+                    LLVector3 at = hip_at[i], push = LLVector3::zero;
+                    bool limb = false;
+                    for (S32 k = 0; k < 3; ++k)
+                    {
+                        if (!leg_have[i][k]) continue;
+                        QLCapsule c = leg_caps[i][k];
+                        c.a = ql_turn_point(c.a, hip_at[i], leg_turn[i]);
+                        c.b = ql_turn_point(c.b, hip_at[i], leg_turn[i]);
+                        for (S32 t = own_count; t < torso_count; ++t)
+                        {
+                            LLVector3 p, d;
+                            if (!ql_penetration(c, torso[t], p, d)) continue;
+                            const F32 depth = d.length();
+                            if (depth > deepest) { deepest = depth; at = p; push = d; limb = torso_kind[t] == -3; }
+                        }
+                    }
+                    if (pass == 0) leg_first[i] = deepest;
+                    if (deepest > overlap)
+                    {
+                        const F32 share = limb ? 0.5f : 1.f;
+                        const LLVector3 needed = push * ((deepest - overlap) / deepest) * share;
+                        leg_turn[i] = leg_turn[i] * ql_turn_toward(hip_at[i], at, needed);
+                    }
+                }
+            }
+        }
+        const F32 leg_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+        const F32 leg_follow = mQLBodyLegsTracking ? 1.f - expf(-leg_dt * 15.f) : 1.f;
+        const F32 leg_max_step = 360.f * DEG_TO_RAD * leg_dt;
+        bool legs_any = false;
+        for (S32 i = 0; i < 2; ++i)
+        {
+            if (!hips[i] || !hips[i]->getParent()) continue;
+            const LLQuaternion parent = hips[i]->getParent()->getWorldRotation();
+            LLQuaternion target = parent * leg_turn[i] * ~parent;
+            target.normalize();
+            QLBodyLeg& leg = mQLBodyLeg[i];
+            if (!mQLBodyLegsTracking)
+            {
+                leg.correction = target;
+            }
+            else
+            {
+                LLQuaternion next = slerp(leg_follow, leg.correction, target);
+                const F32 step = ql_quat_angle(next * ~leg.correction);
+                if (step > leg_max_step && step > 0.f) next = slerp(leg_max_step / step, leg.correction, next);
+                leg.correction = next;
+            }
+            leg.correction.normalize();
+            legs_any = legs_any || ql_quat_angle(leg.correction) > 0.05f * DEG_TO_RAD;
+        }
+        mQLBodyLegsTracking = true;
+        if (s_debug && isSelf() && others_here)
+        {
+            LL_INFOS("QuasarBodyCollision") << llformat("others: %d shapes | L leg=%.1fcm R leg=%.1fcm | L turn=%.1f R turn=%.1f deg",
+                torso_count - own_count, leg_first[0] * 100.f, leg_first[1] * 100.f,
+                ql_quat_angle(mQLBodyLeg[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyLeg[1].correction) * RAD_TO_DEG) << LL_ENDL;
+        }
+        if (legs_any)
+        {
+            QLAnimApplyScope leg_scope;
+            for (S32 i = 0; i < 2; ++i)
+            {
+                if (!hips[i]) continue;
+                QLBodyLeg& leg = mQLBodyLeg[i];
+                leg.hip_pre = hips[i]->getRotation();
+                hips[i]->setRotation(leg.hip_pre * leg.correction);
+                leg.hip_set = hips[i]->getRotation();
+            }
+            mQLBodyLegsApplied = true;
         }
     }
 
