@@ -12775,6 +12775,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionElbows</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: when a forearm or hand would go into a body, the elbow bends or straightens and the upper arm rolls to take most of it, so the whole arm is not thrown out at the shoulder. Off: the shoulder does it all.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionCleavage</key>
   <map>
     <key>Comment</key>

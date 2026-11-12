@@ -5371,11 +5371,20 @@ void LLVOAvatar::qlFootIKRestore()
         mQLBodyApplied = false;
         QLAnimApplyScope scope;
         LLJoint* shoulders[2] = { getJoint("mShoulderLeft"), getJoint("mShoulderRight") };
+        LLJoint* elbows[2] = { getJoint("mElbowLeft"), getJoint("mElbowRight") };
         for (S32 i = 0; i < 2; ++i)
         {
             if (shoulders[i] && shoulders[i]->getRotation() == mQLBodyArm[i].shoulder_set)
             {
                 shoulders[i]->setRotation(mQLBodyArm[i].shoulder_pre);
+            }
+            if (mQLBodyArm[i].elbow_applied)
+            {
+                mQLBodyArm[i].elbow_applied = false;
+                if (elbows[i] && elbows[i]->getRotation() == mQLBodyArm[i].elbow_set)
+                {
+                    elbows[i]->setRotation(mQLBodyArm[i].elbow_pre);
+                }
             }
         }
     }
@@ -7156,10 +7165,37 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     QLCapsule caps[2][3];
     bool have[2][3] = { { false, false, false }, { false, false, false } };
     LLVector3 pivot[2];
+    // The elbow's share (QuasarBodyCollisionElbows): for a forearm or hand contact, the elbow
+    // bends or straightens (a hinge: about the axis across upper arm and forearm) and the
+    // upper arm rolls (about its own length, at the shoulder -- the forearm swings round
+    // without the upper arm moving) before the shoulder swings the whole arm. Real arms do
+    // most of that with the elbow and the roll; a whole arm thrown out looks stiff. In the
+    // arm's pose as animated: hinge first, roll, then the shoulder's swing (turn).
+    static LLCachedControl<bool> s_elbows(gSavedSettings, "QuasarBodyCollisionElbows", true);
+    LLJoint* elbows[2] = { getJoint("mElbowLeft"), getJoint("mElbowRight") };
+    LLJoint* wrists[2] = { getJoint("mWristLeft"), getJoint("mWristRight") };
+    bool elbow_ok[2] = { false, false };
+    LLVector3 elbow_at[2], upper_dir[2], hinge_axis[2];
+    F32 bend0[2] = { 0.f, 0.f };   // the animation's elbow bend (0 = straight)
     for (S32 i = 0; i < 2; ++i)
     {
         pivot[i] = shoulders[i]->getWorldPosition();
         for (S32 k = 0; k < 3; ++k) have[i][k] = ql_capsule(arm_volume[i][k], k == 0 ? 0.35f : 0.f, caps[i][k]);
+        if (!s_elbows || !elbows[i] || !wrists[i] || elbows[i]->getParent() != shoulders[i]) continue;
+        elbow_at[i] = elbows[i]->getWorldPosition();
+        LLVector3 u = elbow_at[i] - pivot[i], f = wrists[i]->getWorldPosition() - elbow_at[i];
+        if (u.length() < 0.02f || f.length() < 0.02f) continue;
+        u.normVec();
+        f.normVec();
+        LLVector3 h = u % f;
+        // A nearly straight arm has no clear hinge: the shoulder does it all, as before.
+        if (h.length() < sinf(8.f * DEG_TO_RAD)) continue;
+        bend0[i] = asinf(llclamp(h.length(), 0.f, 1.f));
+        if (u * f < 0.f) bend0[i] = F_PI - bend0[i];
+        h.normVec();
+        upper_dir[i] = u;
+        hinge_axis[i] = h;
+        elbow_ok[i] = true;
     }
 
     // QUASAR SOFT CONTACT. A breast, the butt or the belly gives way under an arm: of how
@@ -7537,15 +7573,52 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     // deepest arm-against-arm contact apart (half each).
     const F32 overlap = llclamp((F32)s_overlap, 0.f, 0.25f);
     LLQuaternion turn[2] = { LLQuaternion::DEFAULT, LLQuaternion::DEFAULT };
+    F32 hinge[2] = { 0.f, 0.f }, roll[2] = { 0.f, 0.f };   // the elbow's share, radians
     F32 first_depth[2] = { 0.f, 0.f };
     const char* first_hit[2] = { "-", "-" };
     F32 first_arms = 0.f;
+    auto elbow_point = [&](S32 i, S32 k, LLVector3 q)
+    {
+        if (!elbow_ok[i]) return q;
+        if (k > 0) q = elbow_at[i] + (q - elbow_at[i]) * LLQuaternion(hinge[i], hinge_axis[i]);
+        return pivot[i] + (q - pivot[i]) * LLQuaternion(roll[i], upper_dir[i]);
+    };
     auto posed = [&](S32 i, S32 k)
     {
         QLCapsule c = caps[i][k];
-        c.a = ql_turn_point(c.a, pivot[i], turn[i]);
-        c.b = ql_turn_point(c.b, pivot[i], turn[i]);
+        c.a = ql_turn_point(elbow_point(i, k, c.a), pivot[i], turn[i]);
+        c.b = ql_turn_point(elbow_point(i, k, c.b), pivot[i], turn[i]);
         return c;
+    };
+    // Moves the elbow's share of a forearm/hand contact (at, push: as posed) with the hinge
+    // and the roll -- the least-squares mix of the two -- within the elbow's range (bend
+    // 2-150 degrees, at most 60 degrees from the animation; roll at most 45); returns what
+    // the shoulder still has to do.
+    auto elbow_take = [&](S32 i, const LLVector3& at, const LLVector3& push, F32 share)
+    {
+        if (!elbow_ok[i] || share <= 0.f) return push;
+        const LLQuaternion back = ~turn[i];
+        const LLVector3 at_u = pivot[i] + (at - pivot[i]) * back;   // before the shoulder's swing
+        const LLVector3 want = push * back * share;
+        const LLVector3 h_now = hinge_axis[i] * LLQuaternion(roll[i], upper_dir[i]);
+        const LLVector3 vh = h_now % (at_u - elbow_at[i]);   // movement per radian of bend
+        const LLVector3 vr = upper_dir[i] % (at_u - pivot[i]);   // ... of roll
+        // Normal equations, a little damping (the roll a little more: the hinge reads as more
+        // natural), solved for the two angles.
+        const F32 a = vh * vh + 1.0e-4f, b = vh * vr, c = vr * vr + 4.0e-4f;
+        const F32 det = a * c - b * b;
+        if (det < 1.0e-10f) return push;
+        F32 dh = (c * (vh * want) - b * (vr * want)) / det;
+        F32 dr = (a * (vr * want) - b * (vh * want)) / det;
+        const F32 new_hinge = llclamp(hinge[i] + dh, llmax(2.f * DEG_TO_RAD - bend0[i], -60.f * DEG_TO_RAD),
+                                      llmin(150.f * DEG_TO_RAD - bend0[i], 60.f * DEG_TO_RAD));
+        const F32 new_roll = llclamp(roll[i] + dr, -45.f * DEG_TO_RAD, 45.f * DEG_TO_RAD);
+        dh = new_hinge - hinge[i];
+        dr = new_roll - roll[i];
+        hinge[i] = new_hinge;
+        roll[i] = new_roll;
+        const LLVector3 done = (vh * dh + vr * dr) * turn[i];
+        return push - done;
     };
     for (S32 pass = 0; pass < 3; ++pass)
     {
@@ -7553,6 +7626,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         {
             F32 deepest = 0.f;
             LLVector3 at = pivot[i], push = LLVector3::zero;
+            S32 deepest_k = 0;
             for (S32 k = 0; k < 3; ++k)
             {
                 if (!have[i][k]) continue;
@@ -7564,7 +7638,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     const F32 depth = d.length();
                     if (depth > deepest)
                     {
-                        deepest = depth; at = p; push = d;
+                        deepest = depth; at = p; push = d; deepest_k = k;
                         if (pass == 0) first_hit[i] = torso_name[t];
                     }
                 }
@@ -7574,7 +7648,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             const F32 as_foot = mQLHandFoot[i].fade;
             if (deepest > overlap && as_foot < 0.999f)
             {
-                const LLVector3 needed = push * ((deepest - overlap) / deepest) * (1.f - as_foot);
+                LLVector3 needed = push * ((deepest - overlap) / deepest) * (1.f - as_foot);
+                // A forearm or hand: the elbow and the roll take most of it (70 %), the
+                // shoulder the rest and whatever the elbow's range can't reach.
+                if (deepest_k > 0) needed = elbow_take(i, at, needed, 0.7f);
                 turn[i] = turn[i] * ql_turn_toward(pivot[i], at, needed);
             }
         }
@@ -7722,7 +7799,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     for (S32 i = 0; i < 2; ++i)
     {
         const LLQuaternion parent = shoulders[i]->getParent()->getWorldRotation();
-        LLQuaternion target = parent * turn[i] * ~parent;
+        // The upper arm's roll first (about its own length), then the swing.
+        const LLQuaternion world_turn = elbow_ok[i] && fabsf(roll[i]) > 1.0e-4f
+            ? LLQuaternion(roll[i], upper_dir[i]) * turn[i] : turn[i];
+        LLQuaternion target = parent * world_turn * ~parent;
         target.normalize();
         QLBodyArm& arm = mQLBodyArm[i];
         if (!mQLBodyTracking)
@@ -7739,15 +7819,43 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         arm.correction.normalize();
         any = any || ql_quat_angle(arm.correction) > 0.05f * DEG_TO_RAD;
     }
+    // The elbow's bend, the same way in the shoulder's own frame (it turns with the arm):
+    // elbow local x (S·H·~S), S = the shoulder's world turn as animated.
+    bool any_elbow = false;
+    for (S32 i = 0; i < 2; ++i)
+    {
+        QLBodyArm& arm = mQLBodyArm[i];
+        LLQuaternion target = LLQuaternion::DEFAULT;
+        if (elbow_ok[i] && fabsf(hinge[i]) > 1.0e-4f)
+        {
+            const LLQuaternion sw = shoulders[i]->getWorldRotation();
+            target = sw * LLQuaternion(hinge[i], hinge_axis[i]) * ~sw;
+            target.normalize();
+        }
+        if (!mQLBodyTracking)
+        {
+            arm.elbow_correction = target;
+        }
+        else
+        {
+            LLQuaternion next = slerp(follow, arm.elbow_correction, target);
+            const F32 step = ql_quat_angle(next * ~arm.elbow_correction);
+            if (step > max_step && step > 0.f) next = slerp(max_step / step, arm.elbow_correction, next);
+            arm.elbow_correction = next;
+        }
+        arm.elbow_correction.normalize();
+        any_elbow = any_elbow || ql_quat_angle(arm.elbow_correction) > 0.05f * DEG_TO_RAD;
+    }
     mQLBodyTracking = true;
 
     if (s_debug && isSelf())
     {
-        LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm (%s) R torso=%.1fcm (%s) arms=%.1fcm | L turn=%.1f R turn=%.1f deg",
+        LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm (%s) R torso=%.1fcm (%s) arms=%.1fcm | L turn=%.1f R turn=%.1f deg | L elbow=%.1f roll=%.1f R elbow=%.1f roll=%.1f deg",
             first_depth[0] * 100.f, first_hit[0], first_depth[1] * 100.f, first_hit[1], first_arms * 100.f,
-            ql_quat_angle(mQLBodyArm[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyArm[1].correction) * RAD_TO_DEG) << LL_ENDL;
+            ql_quat_angle(mQLBodyArm[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyArm[1].correction) * RAD_TO_DEG,
+            hinge[0] * RAD_TO_DEG, roll[0] * RAD_TO_DEG, hinge[1] * RAD_TO_DEG, roll[1] * RAD_TO_DEG) << LL_ENDL;
     }
-    if (!any) return;   // nothing to push out: the animation as it is
+    if (!any && !any_elbow) return;   // nothing to push out: the animation as it is
 
     QLAnimApplyScope scope;
     for (S32 i = 0; i < 2; ++i)
@@ -7756,6 +7864,13 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         arm.shoulder_pre = shoulders[i]->getRotation();
         shoulders[i]->setRotation(arm.shoulder_pre * arm.correction);
         arm.shoulder_set = shoulders[i]->getRotation();
+        if (elbows[i] && ql_quat_angle(arm.elbow_correction) > 0.05f * DEG_TO_RAD)
+        {
+            arm.elbow_pre = elbows[i]->getRotation();
+            elbows[i]->setRotation(arm.elbow_pre * arm.elbow_correction);
+            arm.elbow_set = elbows[i]->getRotation();
+            arm.elbow_applied = true;
+        }
     }
     mQLBodyApplied = true;
 }

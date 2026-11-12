@@ -773,6 +773,11 @@ private:
     {
         LLQuaternion shoulder_pre, shoulder_set;   // the animation's local / what was written
         LLQuaternion correction;                    // smoothed, in the shoulder's parent frame
+        // The elbow's share (QuasarBodyCollisionElbows): its bend, kept in the shoulder's
+        // frame like the shoulder's in its parent's.
+        LLQuaternion elbow_pre, elbow_set;
+        LLQuaternion elbow_correction;
+        bool         elbow_applied = false;
     };
     QLBodyArm   mQLBodyArm[2];
     bool        mQLBodyApplied = false;

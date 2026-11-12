@@ -936,6 +936,17 @@ Only used with a DLSS upscaling mode.
             width="360"
             left="30"
             top="574" />
+          <check_box
+            control_name="QuasarBodyCollisionElbows"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Bend elbows to stay out"
+            layout="topleft"
+            name="QuasarBodyCollisionElbows"
+            tool_tip="When a forearm or hand would go into a body, the elbow and upper arm move it out first, so the whole arm isn't swung away at the shoulder."
+            width="300"
+            left="400"
+            top="574" />
           <button
             follows="left|top"
             height="23"
