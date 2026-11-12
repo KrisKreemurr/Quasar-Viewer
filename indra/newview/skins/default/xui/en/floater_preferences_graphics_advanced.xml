@@ -978,6 +978,44 @@ Only used with a DLSS upscaling mode.
             width="400"
             left="30"
             top="598" />
+          <slider
+            control_name="QuasarSoftGravity"
+            enabled_control="QuasarSoftContact"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="Gravity:"
+            label_width="90"
+            layout="topleft"
+            min_val="0"
+            max_val="2"
+            name="QuasarSoftGravity"
+            show_text="true"
+            tool_tip="How much breasts, butt and belly shift with gravity when the body tilts (lying down, on all fours, bending over). Standing is unchanged. 0 = off, 2 = twice as heavy."
+            width="250"
+            left="30"
+            top="624" />
+          <slider
+            control_name="QuasarSoftJiggle"
+            enabled_control="QuasarSoftContact"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="Jiggle:"
+            label_width="90"
+            layout="topleft"
+            min_val="0"
+            max_val="2"
+            name="QuasarSoftJiggle"
+            show_text="true"
+            tool_tip="Jiggle from moving for avatars wearing no Physics layer (with one, SL's own jiggle runs). Bigger parts move heavier and slower. 0 = off, 2 = twice as much."
+            width="250"
+            left="334"
+            top="624" />
           <button
             follows="left|top"
             height="23"
@@ -986,7 +1024,7 @@ Only used with a DLSS upscaling mode.
             left="30"
             name="QuasarMotionDefaults"
             tool_tip="Every Avatar motion (Quasar) setting -- foot IK, body clipping, soft breasts, butt and belly, physics tags -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="622"
+            top="648"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />

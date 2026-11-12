@@ -12720,6 +12720,28 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarSoftGravity</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft movement: breasts, butt and belly shift with gravity as the body tilts (lying down, on all fours, bending over) -- relative to standing, so standing looks as made. 0 = off, 1 = normal, 2 = twice as heavy. How far also depends on the part's size and firmness (its Physics layer's spring; none worn = firm).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1</real>
+  </map>
+  <key>QuasarSoftJiggle</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft movement: parts with no Physics layer jiggle as the body moves (walking, jumping, turning), heavier and slower the bigger they are; parts with a Physics layer keep SL's own jiggle. 0 = off, 1 = normal, 2 = twice as much.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1</real>
+  </map>
   <key>QuasarSoftContactGive</key>
   <map>
     <key>Comment</key>

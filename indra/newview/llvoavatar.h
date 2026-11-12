@@ -787,6 +787,9 @@ private:
     {
         LLAvatarJointCollisionVolume* volume = nullptr;
         LLVector3 x, v;                   // the dent and its speed, in the volume's parent frame (m)
+        LLVector3 m, mv;                  // gravity + movement offset and its speed (same frame)
+        LLVector3 anchor_prev, anchor_vel, anchor_accel;   // the parent bone's world motion
+        bool      anchor_ok = false;
         LLVector3 shape_c, shape_a[3];    // this frame's fitted shape (world), squashed about
         bool      drawn = false;          // its world matrix holds a dent this frame
     };
