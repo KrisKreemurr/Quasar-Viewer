@@ -549,21 +549,34 @@ bool LLPhysicsMotion::onUpdate(F32 time)
 
         LLJoint *joint = mJointState->getJoint();
 
-        const F32 behavior_mass = getParamValue(MASS);
+        F32 behavior_mass = getParamValue(MASS);
         const F32 behavior_gravity = getParamValue(GRAVITY);
         const F32 behavior_spring = getParamValue(SPRING);
         const F32 behavior_gain = getParamValue(GAIN);
         const F32 behavior_damping = getParamValue(DAMPING);
         const F32 behavior_drag = getParamValue(DRAG);
         F32 behavior_maxeffect = getParamValue(MAX_EFFECT);
-        // Quasar jiggle (QuasarSoftJiggleEngine): for an avatar whose breasts, butt and belly
-        // Quasar moves itself -- from these same Physics-layer values, with weight, gravity
-        // and contact -- SL's own bounce is held at rest (as with Max Effect 0: the part sits
-        // at the shape's own position and nothing is redrawn while it stays there), so the two
-        // never bounce the same part twice. The avatar's real settings are untouched.
+        // QUASAR REALISTIC PHYSICS (QuasarSoftJiggleEngine): for the nearby avatars Quasar
+        // corrects, SL's own physics runs with the avatar's own settings -- every slider
+        // keeps its meaning -- and three things SL's step doesn't know about:
+        //  - the part's real size (body collision's auto-fit, 1 = SL's own volume): mass x
+        //    sqrt(size), so a big part moves slower and further under the same forces (a = F/m
+        //    with the spring unscaled), and Max Effect x sqrt(size / 2) (1 - 2.5x, at most 4) so
+        //    its swing in centimetres grows with it -- SL's morphs move every size the same few cm;
+        //  - gravity where the creator left it at 0 (most do): SL's own term, gravity x mass x
+        //    (this direction's share of world up), with the share it has standing upright taken
+        //    away -- so standing looks as made, and lying down, on all fours or bending over the
+        //    part shifts; strength 15 x QuasarSoftGravity (2 = 30, SL's maximum);
+        //  - contact (arms, legs, the cleavage) is Quasar's, drawn on top (llvoavatar.cpp).
+        // Nothing about the avatar's real settings changes; others see SL's physics as always.
+        F32 quasar_gravity = 0.f;
         if (ql_avatar && ql_avatar->qlSoftEngineOn())
         {
-                behavior_maxeffect = 0.f;
+                const F32 size = ql_avatar->qlSoftPartSize(mParamDriverName);
+                behavior_mass *= sqrtf(llmax(size, 1.f));
+                behavior_maxeffect = llmin(behavior_maxeffect * llclamp(sqrtf(size / 2.f), 1.f, 2.5f), 4.f);
+                static LLCachedControl<F32> s_gravity(gSavedSettings, "QuasarSoftGravity", 1.f);
+                if (behavior_gravity <= 0.f) quasar_gravity = 15.f * llclamp((F32)s_gravity, 0.f, 2.f);
         }
 
         const bool physics_test = false; // Enable this to simulate bouncing on all parts.
@@ -641,7 +654,14 @@ bool LLPhysicsMotion::onUpdate(F32 time)
         // Gravity always points downward in world space.
         // F = mg
         const LLVector3 gravity_world(0,0,1);
-        const F32 force_gravity = (toLocal(gravity_world) * behavior_gravity * behavior_mass);
+        F32 force_gravity = (toLocal(gravity_world) * behavior_gravity * behavior_mass);
+        if (quasar_gravity > 0.f)
+        {
+                // Quasar's default: the same term relative to standing upright (this
+                // direction's up share at rest is its own z: the joint's rest frame is upright).
+                force_gravity = (toLocal(gravity_world) - mMotionDirectionVec.mV[VZ] / llmax(mMotionDirectionVec.length(), 1.0e-6f))
+                                * quasar_gravity * behavior_mass;
+        }
 
         // Damping is a restoring force that opposes the current velocity.
         // F = -kv

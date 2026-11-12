@@ -798,9 +798,10 @@ private:
     bool        mQLSoftDrawn = false;
     F64         mQLSoftDebugNext = 0.0;   // QuasarSoftContactDebug rate limit
     F64         mQLSoftLastTime = 0.0;    // when this avatar's soft physics last ran
-    bool        mQLSoftEngine = false;    // Quasar moves this avatar's soft parts itself (SL's bounce held at rest)
+    bool        mQLSoftEngine = false;    // SL's physics runs improved for this avatar (size, swing, default gravity)
 public:
     bool        qlSoftEngineOn() const { return mQLSoftEngine; }
+    F32         qlSoftPartSize(const std::string& driver) const;
 private:
     void        qlSoftContactDraw();
     // QUASAR PHYSICS TAG (QuasarAvatarTags, doc/quasar_physics_tag.md): a worn object's

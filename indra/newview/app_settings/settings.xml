@@ -12756,7 +12756,7 @@
   <key>QuasarSoftJiggleEngine</key>
   <map>
     <key>Comment</key>
-    <string>Quasar jiggle: for the nearby avatars Quasar corrects, Quasar moves breasts, butt and belly itself -- bounce, sway, gravity and contact in one system, with weight from their measured size -- from the same Physics-layer settings (Max Effect per direction, Gain, Spring, Damping, Mass); SL's own bounce is held at rest for them. Off: SL's jiggle runs and Quasar adds only gravity and contact on bodies wearing physics. Needs QuasarSoftJiggle above 0.</string>
+    <string>Realistic SL physics: for the nearby avatars Quasar corrects, SL's own physics runs with their own Physics-layer settings plus what it doesn't know: the part's real measured size (heavier and slower, and swinging further in proportion), and gravity where the creator left it at 0 (relative to standing, so standing is unchanged). Off: SL's physics exactly as is, with Quasar's gravity on top.</string>
     <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>
@@ -12774,6 +12774,17 @@
     <string>Boolean</string>
     <key>Value</key>
     <integer>1</integer>
+  </map>
+  <key>QuasarSoftSquish</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar: breasts, butt and belly squish when an arm presses in (dent, flatten, spring back; Softness, Wobble). Off (default): arms are pushed out instead, and resting on the legs moves the part without flattening it.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
   </map>
   <key>QuasarSoftContactGive</key>
   <map>

@@ -7116,6 +7116,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         static LLCachedControl<F32>  s_gravity(gSavedSettings, "QuasarSoftGravity", 1.f);
         static LLCachedControl<F32>  s_jiggle(gSavedSettings, "QuasarSoftJiggle", 1.f);
         static LLCachedControl<bool> s_engine(gSavedSettings, "QuasarSoftJiggleEngine", true);
+        static LLCachedControl<bool> s_squish(gSavedSettings, "QuasarSoftSquish", false);
         // This frame: does Quasar move this avatar's soft parts itself (SL's own bounce held
         // at rest by LLPhysicsMotion)? Set below once the block runs for the avatar.
         bool engine_this_frame = false;
@@ -7214,7 +7215,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // big breasts, and half their depth as lift shoved them up toward the chin -- user)
             static const F32 PART_DENT[3] = { 0.3f, 0.3f, 0.2f };
             static const F32 PART_FIRM[3] = { 0.f, 0.6f, 0.85f };   // least firmness for gravity / jiggle
-            const F32 give = use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all * PART_GIVE[part_of];
+            // Squish is opt-in (QuasarSoftSquish, off): without it no part gives way to an arm
+            // (the arm is pushed out, as body collision always did) and dents from the legs move
+            // the part without flattening it (qlSoftContactDraw).
+            const F32 give = !s_squish ? 0.f
+                           : use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all * PART_GIVE[part_of];
 
             // The avatar's own physics for this part.
             static const char* const PREFIX[3] = { "Breast_Physics_", "Butt_Physics_", "Belly_Physics_" };
@@ -7226,8 +7231,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             const F32 effect_side = part_of != 2 ? getVisualParamWeight((pre + "LeftRight_Max_Effect").c_str()) : 0.f;
             const F32 max_effect = effect_up + effect_in + effect_side;
             const bool physics_worn = max_effect > 0.f;
-            // Quasar's own jiggle replaces SL's for this part's avatar (QuasarSoftJiggleEngine).
-            const bool engine = s_engine && jiggle > 0.f;
+            // Realistic SL physics (QuasarSoftJiggleEngine): SL's own step runs this avatar's
+            // worn physics with size, scaled swing and default gravity (llphysicsmotion.cpp),
+            // so Quasar adds no jiggle or gravity of its own to parts wearing physics.
+            const bool engine = s_engine;
             engine_this_frame = engine_this_frame || engine;
             F32 spring = 10.f, damping = 0.2f, mass = 0.1f;
             if (physics_worn)
@@ -7366,7 +7373,9 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             const F32 move_max = llmin(0.25f, 0.5f * part_size);
             LLVector3 move_target;
             F32 tilt_amount = 0.f;   // for the debug line: 0 upright, 1.41 lying flat, 2 upside down
-            if (gravity > 0.f)
+            // Gravity here for parts with no Physics layer, or wearing one while SL's step runs
+            // unimproved; improved, SL's step does it with the avatar's own sliders.
+            if (gravity > 0.f && !(physics_worn && engine))
             {
                 const LLVector3 down_now = LLVector3(0.f, 0.f, -1.f) * ~parent_rot;
                 const LLVector3 tilt = down_now - LLVector3(0.f, 0.f, -1.f);   // 0 standing upright
@@ -7380,19 +7389,13 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // (default 10) scales how strongly it reacts, and each direction's Max Effect (0-3)
             // how far that way -- a creator's bouncy setup stays bouncy, now with weight. Without
             // it (SL's own jiggle running), worn parts get only gravity and contact from Quasar.
+            // Parts with no Physics layer jiggle here; parts wearing one jiggle in SL's own
+            // step (improved by Quasar when QuasarSoftJiggleEngine is on, else SL's as is).
             F32 lag = 0.f;
-            LLVector3 lag_axes(1.f, 1.f, 1.f);
+            const LLVector3 lag_axes(1.f, 1.f, 1.f);
             if (!physics_worn)
             {
                 lag = jiggle * (1.f - firmness) * sqrtf(llmax(size, 2.f) / 2.f);
-            }
-            else if (engine)
-            {
-                const F32 gain = llclamp(getVisualParamWeight((pre + "UpDown_Gain").c_str()) / 10.f, 0.3f, 3.f);
-                lag = jiggle * gain * (1.f - firmness) * sqrtf(llmax(size, 2.f) / 2.f);
-                lag_axes.set(llclamp(effect_in, 0.f, 2.f), llclamp(effect_side, 0.f, 2.f), llclamp(effect_up, 0.f, 2.f));
-                if (part_of == 1) lag_axes.mV[VX] = 0.3f * lag_axes.mV[VZ];   // a butt: no cleavage setting
-                if (part_of == 2) lag_axes.set(0.3f * effect_up, 0.3f * effect_up, effect_up);   // a belly: bounce only
             }
             const LLVector3 anchor = parent->getWorldPosition();
             if (lag > 0.f && soft_dt > 0.f)
@@ -7424,7 +7427,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             if (move_target.length() > move_max) move_target *= move_max / move_target.length();
             // Settling: a part with the Quasar jiggle uses its own damping (so a bouncy setup
             // keeps bouncing); with SL's jiggle running, Quasar's gravity only eases in (0.6).
-            const F32 move_zeta = !physics_worn ? with_wobble(0.35f) : engine ? with_wobble(own_zeta) : 0.6f;
+            const F32 move_zeta = !physics_worn ? with_wobble(0.35f) : 0.6f;
             ql_soft_spring(part.m, part.mv, move_target, omega, move_zeta, soft_dt, llmax(move_max, 0.01f));
 
             // The arm meets the part where it is now: dented, sagged, swinging.
@@ -7444,7 +7447,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     << "cm give=" << llformat("%.2f", give) << " physics=" << (physics_worn ? "worn" : "none")
                     << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f legs=%.1fcm", omega, zeta,
                                 firmness, size, part_size * 100.f, tilt_amount, legs_depth * 100.f)
-                    << (use_tag ? " (their tag)" : "") << (engine && physics_worn ? " (Quasar jiggle)" : "") << LL_ENDL;
+                    << (use_tag ? " (their tag)" : "") << (engine && physics_worn ? " (realistic SL physics)" : "") << (s_squish ? "" : " (no squish)") << LL_ENDL;
             }
         }
         mQLSoftEngine = engine_this_frame;
@@ -7575,6 +7578,16 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         arm.shoulder_set = shoulders[i]->getRotation();
     }
     mQLBodyApplied = true;
+}
+
+// The measured size of the part an SL physics motion drives (its driver param's name:
+// Breast_/Butt_/Belly_Physics_...), times SL's own volume; 1 when not measured.
+F32 LLVOAvatar::qlSoftPartSize(const std::string& driver) const
+{
+    if (driver.rfind("Breast", 0) == 0) return 0.5f * (mQLBodyFit[5] + mQLBodyFit[6]);
+    if (driver.rfind("Butt", 0) == 0) return mQLBodyFit[1];
+    if (driver.rfind("Belly", 0) == 0) return mQLBodyFit[2];
+    return 1.f;
 }
 
 //-----------------------------------------------------------------------------
@@ -7717,6 +7730,7 @@ void LLVOAvatar::qlSoftContactDraw()
         LLJoint* parent = part.volume->getParent();
         if (!parent) continue;
         const LLQuaternion parent_rot = parent->getWorldRotation();
+        static LLCachedControl<bool> s_squish(gSavedSettings, "QuasarSoftSquish", false);
         LLVector3 shift = part.m * parent_rot;
         LLVector3 n;
         F32 k = 0.f;
@@ -7727,8 +7741,8 @@ void LLVOAvatar::qlSoftContactDraw()
             const LLVector3 n_local = part.x / len;
             // The parent frame is upright (z up): a dent pointing up = pressed from below,
             // which lifts the part -- at most half the dent (was 80 %: a breast resting on
-            // crossed forearms rose much too far).
-            const F32 lift = 0.3f + 0.2f * llmax(0.f, n_local.mV[VZ]);
+            // crossed forearms rose much too far). Without squish the whole dent moves it.
+            const F32 lift = !s_squish ? 1.f : 0.3f + 0.2f * llmax(0.f, n_local.mV[VZ]);
             n = n_local * parent_rot;
             const F32 depth = ql_radius_along(part.shape_a, n);   // centre to surface, the dent's way
             if (depth > 0.001f)

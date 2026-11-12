@@ -907,16 +907,16 @@ Only used with a DLSS upscaling mode.
             control_name="QuasarSoftContact"
             enabled_control="QuasarBodyCollision"
             height="16"
-            label="Soft breasts, butt and belly"
+            label="Quasar breasts, butt and belly"
             layout="topleft"
             name="QuasarSoftContact"
-            tool_tip="An arm pressing into a breast, the butt or the belly dents it and it springs back, using that avatar's own Physics layer (bigger parts move slower and heavier). Seen in Quasar Viewer only."
+            tool_tip="Quasar's physics for breasts, butt and belly: realistic gravity and weight, resting on the legs, filling the cleavage -- and squish if turned on. Off: SL's physics only."
             width="300"
             left="30"
             top="552" />
           <slider
             control_name="QuasarSoftContactGive"
-            enabled_control="QuasarSoftContact"
+            enabled_control="QuasarSoftSquish"
             decimal_digits="2"
             follows="left|top"
             height="16"
@@ -935,7 +935,7 @@ Only used with a DLSS upscaling mode.
             top="552" />
           <slider
             control_name="QuasarSoftContactWobble"
-            enabled_control="QuasarSoftContact"
+            enabled_control="QuasarSoftSquish"
             decimal_digits="2"
             follows="left|top"
             height="16"
@@ -954,7 +954,7 @@ Only used with a DLSS upscaling mode.
             top="574" />
           <combo_box
             control_name="QuasarSoftContactNoPhysics"
-            enabled_control="QuasarSoftContact"
+            enabled_control="QuasarSoftSquish"
             follows="left|top"
             height="20"
             layout="topleft"
@@ -1031,10 +1031,10 @@ Only used with a DLSS upscaling mode.
             control_name="QuasarSoftJiggleEngine"
             enabled_control="QuasarSoftContact"
             height="16"
-            label="Quasar jiggle (replaces SL's, same settings)"
+            label="Realistic SL physics (size, weight, gravity)"
             layout="topleft"
             name="QuasarSoftJiggleEngine"
-            tool_tip="For the nearby avatars Quasar corrects: Quasar moves breasts, butt and belly itself -- bounce, sway, gravity and touch together, heavier for bigger parts -- from the same Physics-layer settings they already wear. Off: SL's own jiggle, with Quasar's gravity and touch on top."
+            tool_tip="For the nearby avatars Quasar corrects: their own Physics-layer settings, run with the part's real size (heavier, slower, swinging further) and gravity where the creator left it at 0. Off: SL's physics exactly as is."
             width="360"
             left="30"
             top="648" />
@@ -1049,6 +1049,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="648" />
+          <check_box
+            control_name="QuasarSoftSquish"
+            enabled_control="QuasarSoftContact"
+            height="16"
+            label="Squish when touched (Softness, Wobble)"
+            layout="topleft"
+            name="QuasarSoftSquish"
+            tool_tip="Breasts, butt and belly dent and flatten when an arm presses in, then spring back. Off: arms are pushed out instead."
+            width="360"
+            left="30"
+            top="672" />
           <button
             follows="left|top"
             height="23"
@@ -1057,7 +1068,7 @@ Only used with a DLSS upscaling mode.
             left="30"
             name="QuasarMotionDefaults"
             tool_tip="Every Avatar motion (Quasar) setting -- foot IK, body clipping, soft breasts, butt and belly, physics tags -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="672"
+            top="696"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />
