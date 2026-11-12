@@ -2509,8 +2509,17 @@ if (WINDOWS)
         ${viewer_RESOURCE_FILES}
         )
 
+    # The icons and cursors are read by the resource compiler, which (llvm-rc) reports
+    # no dependencies: without this, a changed icon -- the Quasar logo replacing
+    # Slipstream's -- never recompiled viewerRes.rc, and the exe kept the old icon.
+    set(viewer_RC_INPUTS
+        ${CMAKE_CURRENT_SOURCE_DIR}/res/ll_icon.ico
+        ${CMAKE_CURRENT_SOURCE_DIR}/res/icon1.ico
+        ${CMAKE_CURRENT_SOURCE_DIR}/res/ll_icon.BMP
+        )
     set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/viewerRes.rc
       PROPERTIES COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/res"
+                 OBJECT_DEPENDS "${viewer_RC_INPUTS}"
       )
 
     SOURCE_GROUP("Resource Files" FILES ${viewer_RESOURCE_FILES})

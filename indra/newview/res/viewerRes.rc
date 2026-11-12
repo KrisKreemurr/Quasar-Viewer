@@ -1,5 +1,8 @@
 // Microsoft Visual C++ generated resource script.
 //
+// Quasar Viewer: IDI_LL_ICON (ll_icon.ico) is the Quasar logo, copied from icons/quasar/quasar.ico
+// by CMakeLists.txt at configure time.
+//
 #include "resource.h"
 
 #define APSTUDIO_READONLY_SYMBOLS
