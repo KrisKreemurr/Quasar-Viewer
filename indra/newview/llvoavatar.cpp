@@ -7081,7 +7081,15 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 part.mv.clearVec();
                 part.anchor_ok = false;
             }
-            const F32 give = use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all;
+            // Each part's own firmness (user, testing a heavy avatar with crossed arms: "bellies
+            // don't tend to be that squishy, they are mostly pretty firm"): of the softness
+            // setting, a breast takes all, a butt 70 %, a belly 30 % -- and a dent reaches at
+            // most half, a third, a fifth of the part's depth. A tag's own value for one part
+            // is used as given.
+            static const F32 PART_GIVE[3] = { 1.f, 0.7f, 0.3f };
+            static const F32 PART_DENT[3] = { 0.5f, 0.35f, 0.2f };
+            static const F32 PART_FIRM[3] = { 0.f, 0.6f, 0.85f };   // least firmness for gravity / jiggle
+            const F32 give = use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all * PART_GIVE[part_of];
 
             // The avatar's own physics for this part.
             static const char* const PREFIX[3] = { "Breast_Physics_", "Butt_Physics_", "Belly_Physics_" };
@@ -7107,7 +7115,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // a dent with it kept wobbling over 3 s after the arm left.
             const F32 own_zeta = llclamp(damping / (2.f * sqrtf(spring * mass)), 0.15f, 1.f);
             const F32 zeta = dent_wobbles ? with_wobble(own_zeta) : 1.f;
-            const F32 firmness = physics_worn ? llclamp(spring / (spring + 10.f), 0.f, 0.95f) : 0.7f;
+            const F32 firmness = llmax(PART_FIRM[part_of], physics_worn ? llclamp(spring / (spring + 10.f), 0.f, 0.95f) : 0.7f);
             const F32 part_size = (torso[t].axis[0].length() + torso[t].axis[1].length() + torso[t].axis[2].length()) / 3.f;
 
             // How deep the animation puts each arm into this part, as animated.
@@ -7132,13 +7140,13 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     target -= deepest_push * (give * (1.f - as_foot));
                 }
             }
-            // At most half the part's own depth that way, and 15 cm.
+            // At most the part's share of its own depth that way (PART_DENT), and 15 cm.
             F32 max_len = 0.15f;
             if (target.lengthSquared() > 1.0e-10f)
             {
                 LLVector3 n = target;
                 n.normVec();
-                max_len = llmin(0.15f, 0.5f * ql_radius_along(torso[t].axis, n));
+                max_len = llmin(0.15f, PART_DENT[part_of] * ql_radius_along(torso[t].axis, n));
                 if (target.length() > max_len) target *= max_len / target.length();
             }
             const LLQuaternion parent_rot = parent->getWorldRotation();
