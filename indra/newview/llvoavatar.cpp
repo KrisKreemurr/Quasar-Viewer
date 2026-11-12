@@ -7066,7 +7066,13 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         static LLCachedControl<S32>  s_no_physics(gSavedSettings, "QuasarSoftContactNoPhysics", 1);
         static LLCachedControl<F32>  s_gravity(gSavedSettings, "QuasarSoftGravity", 1.f);
         static LLCachedControl<F32>  s_jiggle(gSavedSettings, "QuasarSoftJiggle", 1.f);
-        const F32 soft_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+        // The real time since this avatar's physics last ran -- not the screen's frame time:
+        // an avatar animated at a reduced rate (15-30 updates a second, Slipstream's rate
+        // ladder) advanced by one 180 Hz frame per update and ran up to 6x too slow.
+        const F64 soft_now = LLFrameTimer::getElapsedSeconds();
+        const F32 soft_dt = mQLSoftLastTime > 0.0 ? llclamp((F32)(soft_now - mQLSoftLastTime), 0.f, 0.1f)
+                                                   : llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+        mQLSoftLastTime = soft_now;
         // The avatar's own wishes, if they wear a Quasar physics tag (and tags are on): their
         // values replace this viewer's sliders for them; "off" turns all of this off on them.
         static LLCachedControl<bool> s_tags(gSavedSettings, "QuasarAvatarTags", false);
@@ -7691,6 +7697,11 @@ bool LLVOAvatar::vkSkipAnimEval()
     mVKDistThrottled = false;
     const U8 prev_reason = mVKAnimReason;
     mVKAnimReason = VKAR_EXEMPT;
+    // Quasar: the (at most QuasarFootIKMaxAvatars, 8) avatars getting foot IK, body
+    // collision and soft physics animate every frame. At 15-30 updates a second their
+    // corrections and jiggle looked choppy on a 180 Hz screen (user); they are the nearest
+    // few, and already on the CPU path for these features.
+    if (qlFootIKSelected()) return false;
     // Reduced tier (#31): reduced-rate animation on the GPU path too (never on a
     // GPU-vs-CPU compare frame, mode 1, whose CPU pose must be LL's own).
     //
