@@ -58,6 +58,32 @@ LLFloaterPreferenceGraphicsAdvanced::LLFloaterPreferenceGraphicsAdvanced(const L
     mCommitCallbackRegistrar.add("Pref.UpdateIndirectMaxNonImpostors", boost::bind(&LLFloaterPreferenceGraphicsAdvanced::updateMaxNonImpostors,this));
     mCommitCallbackRegistrar.add("Pref.UpdateIndirectMaxComplexity",   boost::bind(&LLFloaterPreferenceGraphicsAdvanced::updateMaxComplexity,this));
 
+    // Quasar: "Reset avatar motion to Quasar defaults" -- every foot IK, body collision, soft
+    // contact and physics tag setting back to its built-in value (settings.xml, tuned by the
+    // Quasar team), firing each change so the controls and features follow. Cancel undoes
+    // it like any other change here. Graphics settings that also start with "Quasar" (frame
+    // generation, DLSS, Reflex, Streamline) are left alone.
+    mCommitCallbackRegistrar.add("Pref.QuasarMotionDefaults", [](LLUICtrl*, const LLSD&)
+    {
+        struct Reset : public LLControlGroup::ApplyFunctor
+        {
+            void apply(const std::string& name, LLControlVariable* control) override
+            {
+                static const char* const PREFIXES[] = { "QuasarFootIK", "QuasarBodyCollision", "QuasarSoftContact", "QuasarAvatarTags" };
+                if (!control) return;
+                for (const char* prefix : PREFIXES)
+                {
+                    if (name.rfind(prefix, 0) == 0)
+                    {
+                        control->resetToDefault(true);
+                        return;
+                    }
+                }
+            }
+        } reset;
+        gSavedSettings.applyToAll(&reset);
+    });
+
     mCommitCallbackRegistrar.add("Pref.Cancel", boost::bind(&LLFloaterPreferenceGraphicsAdvanced::onBtnCancel, this, _2));
     mCommitCallbackRegistrar.add("Pref.OK",     boost::bind(&LLFloaterPreferenceGraphicsAdvanced::onBtnOK, this, _2));
 

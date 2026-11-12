@@ -978,6 +978,19 @@ Only used with a DLSS upscaling mode.
             width="400"
             left="30"
             top="598" />
+          <button
+            follows="left|top"
+            height="23"
+            label="Reset avatar motion to Quasar defaults"
+            layout="topleft"
+            left="30"
+            name="QuasarMotionDefaults"
+            tool_tip="Every Avatar motion (Quasar) setting -- foot IK, body clipping, soft breasts, butt and belly, physics tags -- back to Quasar's tuned defaults. Cancel undoes it."
+            top="622"
+            width="280">
+            <button.commit_callback
+              function="Pref.QuasarMotionDefaults" />
+          </button>
           <slider
             control_name="QuasarBodyCollisionChest"
             enabled_control="QuasarBodyCollision"
