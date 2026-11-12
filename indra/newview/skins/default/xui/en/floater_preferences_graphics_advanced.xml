@@ -904,140 +904,16 @@ Only used with a DLSS upscaling mode.
             left="334"
             top="530" />
           <check_box
-            control_name="QuasarSoftContact"
-            enabled_control="QuasarBodyCollision"
-            height="16"
-            label="Quasar breasts, butt and belly"
-            layout="topleft"
-            name="QuasarSoftContact"
-            tool_tip="Quasar's physics for breasts, butt and belly: realistic gravity and weight, resting on the legs, filling the cleavage -- and squish if turned on. Off: SL's physics only."
-            width="300"
-            left="30"
-            top="552" />
-          <slider
-            control_name="QuasarSoftContactGive"
-            enabled_control="QuasarSoftSquish"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            initial_value="0.5"
-            label="Softness:"
-            label_width="90"
-            layout="topleft"
-            min_val="0"
-            max_val="1"
-            name="QuasarSoftContactGive"
-            show_text="true"
-            tool_tip="How much a soft part gives way under an arm: 0 = the arm is pushed out, 1 = the part takes the whole press."
-            width="250"
-            left="334"
-            top="552" />
-          <slider
-            control_name="QuasarSoftContactWobble"
-            enabled_control="QuasarSoftSquish"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            initial_value="1"
-            label="Wobble:"
-            label_width="90"
-            layout="topleft"
-            min_val="0"
-            max_val="2"
-            name="QuasarSoftContactWobble"
-            show_text="true"
-            tool_tip="How much a pressed part wobbles as it springs back: 0 = none, 1 = the avatar's own physics, 2 = twice as lively."
-            width="250"
-            left="30"
-            top="574" />
-          <combo_box
-            control_name="QuasarSoftContactNoPhysics"
-            enabled_control="QuasarSoftSquish"
-            follows="left|top"
-            height="20"
-            layout="topleft"
-            left="334"
-            name="QuasarSoftContactNoPhysics"
-            tool_tip="For avatars wearing no Physics layer for a part (they never set up jiggle)."
-            top="572"
-            width="250">
-            <combo_box.item label="No physics worn: leave still" name="NoPhysicsOff" value="0" />
-            <combo_box.item label="No physics worn: dent only" name="NoPhysicsDent" value="1" />
-            <combo_box.item label="No physics worn: default physics" name="NoPhysicsDefault" value="2" />
-          </combo_box>
-          <check_box
-            control_name="QuasarAvatarTags"
-            enabled_control="QuasarSoftContact"
-            height="16"
-            label="Follow people's own Quasar physics tags"
-            layout="topleft"
-            name="QuasarAvatarTags"
-            tool_tip="Someone wearing a Quasar physics tag (a small worn object) chooses how soft and wobbly their own body is in Quasar Viewer; that replaces your Softness and Wobble sliders for them. Off: everyone uses your sliders."
-            width="360"
-            left="30"
-            top="598" />
-          <check_box
             control_name="QuasarSoftLegs"
-            enabled_control="QuasarSoftContact"
+            enabled_control="QuasarBodyCollision"
             height="16"
             label="Breasts and belly rest on the legs"
             layout="topleft"
             name="QuasarSoftLegs"
-            tool_tip="Sitting, crouching or bending forward, breasts and the belly rest on the thighs (lifting and squishing) instead of sinking into them."
+            tool_tip="Sitting, crouching or bending forward, breasts and the belly rest on the thighs instead of sinking into them."
             width="300"
-            left="400"
-            top="598" />
-          <slider
-            control_name="QuasarSoftGravity"
-            enabled_control="QuasarSoftContact"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            initial_value="1"
-            label="Gravity:"
-            label_width="90"
-            layout="topleft"
-            min_val="0"
-            max_val="2"
-            name="QuasarSoftGravity"
-            show_text="true"
-            tool_tip="How much breasts, butt and belly shift with gravity when the body tilts (lying down, on all fours, bending over). Standing is unchanged. 0 = off, 2 = twice as heavy."
-            width="250"
             left="30"
-            top="624" />
-          <slider
-            control_name="QuasarSoftJiggle"
-            enabled_control="QuasarSoftContact"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            initial_value="1"
-            label="Jiggle:"
-            label_width="90"
-            layout="topleft"
-            min_val="0"
-            max_val="2"
-            name="QuasarSoftJiggle"
-            show_text="true"
-            tool_tip="Jiggle from moving for avatars wearing no Physics layer (with one, SL's own jiggle runs). Bigger parts move heavier and slower. 0 = off, 2 = twice as much."
-            width="250"
-            left="334"
-            top="624" />
-          <check_box
-            control_name="QuasarSoftJiggleEngine"
-            enabled_control="QuasarSoftContact"
-            height="16"
-            label="Realistic SL physics (size, weight, gravity)"
-            layout="topleft"
-            name="QuasarSoftJiggleEngine"
-            tool_tip="For the nearby avatars Quasar corrects: their own Physics-layer settings, run with the part's real size (heavier, slower, swinging further) and gravity where the creator left it at 0. Off: SL's physics exactly as is."
-            width="360"
-            left="30"
-            top="648" />
+            top="552" />
           <check_box
             control_name="QuasarBodyCollisionCleavage"
             enabled_control="QuasarBodyCollision"
@@ -1048,18 +924,7 @@ Only used with a DLSS upscaling mode.
             tool_tip="When two big breasts press together, hands rest on the cleavage instead of going through the gap between them into the chest."
             width="300"
             left="400"
-            top="648" />
-          <check_box
-            control_name="QuasarSoftSquish"
-            enabled_control="QuasarSoftContact"
-            height="16"
-            label="Squish when touched (Softness, Wobble)"
-            layout="topleft"
-            name="QuasarSoftSquish"
-            tool_tip="Breasts, butt and belly dent and flatten when an arm presses in, then spring back. Off: arms are pushed out instead."
-            width="360"
-            left="30"
-            top="672" />
+            top="552" />
           <button
             follows="left|top"
             height="23"
@@ -1067,8 +932,8 @@ Only used with a DLSS upscaling mode.
             layout="topleft"
             left="30"
             name="QuasarMotionDefaults"
-            tool_tip="Every Avatar motion (Quasar) setting -- foot IK, body clipping, soft breasts, butt and belly, physics tags -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="696"
+            tool_tip="Every Avatar motion (Quasar) setting -- foot IK and body clipping -- back to Quasar's tuned defaults. Cancel undoes it."
+            top="578"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />

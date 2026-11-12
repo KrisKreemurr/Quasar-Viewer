@@ -6221,6 +6221,14 @@ namespace
         return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f));
     }
 
+    // Quasar's own breast / butt / belly PHYSICS -- gravity, jiggle, squish, the
+    // realistic-SL-physics changes and the physics tags -- is switched off, and its
+    // settings taken out of Avatar motion (user, 2026-11-12: "keep the collision stuff",
+    // SL's physics as it is). What stays on: contact that stops clipping -- breasts and the
+    // belly resting on the legs, the cleavage filler -- drawn as a plain move of the part.
+    // The code stays for a later try; set this true to bring it back (and its controls).
+    constexpr bool QL_SOFT_PHYSICS = false;
+
     // QUASAR SOFT CONTACT helpers.
     //
     // How far an ellipsoid's surface is from its centre along a unit direction.
@@ -7130,14 +7138,14 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         // The avatar's own wishes, if they wear a Quasar physics tag (and tags are on): their
         // values replace this viewer's sliders for them; "off" turns all of this off on them.
         static LLCachedControl<bool> s_tags(gSavedSettings, "QuasarAvatarTags", false);
-        qlReadPhysTag();
+        if (QL_SOFT_PHYSICS) qlReadPhysTag();
         const QLPhysTag& tag = mQLPhysTag;
-        const bool use_tag = s_tags && tag.present;
+        const bool use_tag = QL_SOFT_PHYSICS && s_tags && tag.present;
         const bool tag_off = use_tag && tag.off;
         const F32 give_all = use_tag && tag.soft >= 0.f ? tag.soft : llclamp((F32)s_give, 0.f, 1.f);
         const F32 wobble = use_tag && tag.wobble >= 0.f ? tag.wobble : llclamp((F32)s_wobble, 0.f, 2.f);
-        const F32 gravity = llclamp((F32)s_gravity, 0.f, 2.f);
-        const F32 jiggle = llclamp((F32)s_jiggle, 0.f, 2.f);
+        const F32 gravity = QL_SOFT_PHYSICS ? llclamp((F32)s_gravity, 0.f, 2.f) : 0.f;
+        const F32 jiggle = QL_SOFT_PHYSICS ? llclamp((F32)s_jiggle, 0.f, 2.f) : 0.f;
         // BODY AGAINST LEGS (QuasarSoftLegs, on): breasts and the belly against the thighs --
         // resting on the lap when sitting, crouching or bending forward. The legs follow
         // their animation; the soft part gives way (dented like an arm's press, so resting
@@ -7218,7 +7226,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // Squish is opt-in (QuasarSoftSquish, off): without it no part gives way to an arm
             // (the arm is pushed out, as body collision always did) and dents from the legs move
             // the part without flattening it (qlSoftContactDraw).
-            const F32 give = !s_squish ? 0.f
+            const F32 give = !(QL_SOFT_PHYSICS && s_squish) ? 0.f
                            : use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all * PART_GIVE[part_of];
 
             // The avatar's own physics for this part.
@@ -7234,7 +7242,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // Realistic SL physics (QuasarSoftJiggleEngine): SL's own step runs this avatar's
             // worn physics with size, scaled swing and default gravity (llphysicsmotion.cpp),
             // so Quasar adds no jiggle or gravity of its own to parts wearing physics.
-            const bool engine = s_engine;
+            const bool engine = QL_SOFT_PHYSICS && s_engine;
             engine_this_frame = engine_this_frame || engine;
             F32 spring = 10.f, damping = 0.2f, mass = 0.1f;
             if (physics_worn)
@@ -7252,7 +7260,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // Never below 0.15: SL's default (0.1) is a jiggle that never quite stops --
             // a dent with it kept wobbling over 3 s after the arm left.
             const F32 own_zeta = llclamp(damping / (2.f * sqrtf(spring * mass)), 0.15f, 1.f);
-            const F32 zeta = dent_wobbles ? with_wobble(own_zeta) : 1.f;
+            const F32 zeta = QL_SOFT_PHYSICS && dent_wobbles ? with_wobble(own_zeta) : 1.f;   // contact only: no wobble
             // Firmness for gravity and jiggle. A Physics layer's spring hints at it, but only
             // a little: creators set the spring high to make jiggle snappy, not to make a part
             // firm (spring/(spring+10) made most bodies so firm that lying down moved a breast
@@ -7447,7 +7455,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     << "cm give=" << llformat("%.2f", give) << " physics=" << (physics_worn ? "worn" : "none")
                     << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f legs=%.1fcm", omega, zeta,
                                 firmness, size, part_size * 100.f, tilt_amount, legs_depth * 100.f)
-                    << (use_tag ? " (their tag)" : "") << (engine && physics_worn ? " (realistic SL physics)" : "") << (s_squish ? "" : " (no squish)") << LL_ENDL;
+                    << (use_tag ? " (their tag)" : "") << (engine && physics_worn ? " (realistic SL physics)" : "") << (QL_SOFT_PHYSICS && s_squish ? "" : " (no squish)") << LL_ENDL;
             }
         }
         mQLSoftEngine = engine_this_frame;
@@ -7742,7 +7750,7 @@ void LLVOAvatar::qlSoftContactDraw()
             // The parent frame is upright (z up): a dent pointing up = pressed from below,
             // which lifts the part -- at most half the dent (was 80 %: a breast resting on
             // crossed forearms rose much too far). Without squish the whole dent moves it.
-            const F32 lift = !s_squish ? 1.f : 0.3f + 0.2f * llmax(0.f, n_local.mV[VZ]);
+            const F32 lift = !(QL_SOFT_PHYSICS && s_squish) ? 1.f : 0.3f + 0.2f * llmax(0.f, n_local.mV[VZ]);
             n = n_local * parent_rot;
             const F32 depth = ql_radius_along(part.shape_a, n);   // centre to surface, the dent's way
             if (depth > 0.001f)
