@@ -7210,7 +7210,9 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // most half, a third, a fifth of the part's depth. A tag's own value for one part
             // is used as given.
             static const F32 PART_GIVE[3] = { 1.f, 0.7f, 0.3f };
-            static const F32 PART_DENT[3] = { 0.5f, 0.35f, 0.2f };
+            // (breasts were 0.5: an AO made for a smaller body puts crossed forearms deep inside
+            // big breasts, and half their depth as lift shoved them up toward the chin -- user)
+            static const F32 PART_DENT[3] = { 0.3f, 0.3f, 0.2f };
             static const F32 PART_FIRM[3] = { 0.f, 0.6f, 0.85f };   // least firmness for gravity / jiggle
             const F32 give = use_tag && tag.part_soft[part_of] >= 0.f ? tag.part_soft[part_of] : give_all * PART_GIVE[part_of];
 
@@ -7332,14 +7334,18 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     legs_depth = llmax(legs_depth, deepest * thigh_fade[leg]);
                 }
             }
-            // At most the part's share of its own depth that way (PART_DENT), and 15 cm.
+            // At most the part's share of its own depth that way (PART_DENT), and 15 cm, reached
+            // gradually: a light press dents about as much as it presses, a deep one -- usually
+            // an animation made for a smaller body, not a real squeeze -- levels off toward the
+            // limit (limit x (1 - e^(-press / limit))) and the arm takes the rest.
             F32 max_len = 0.15f;
             if (target.lengthSquared() > 1.0e-10f)
             {
                 LLVector3 n = target;
                 n.normVec();
                 max_len = llmin(0.15f, PART_DENT[part_of] * ql_radius_along(torso[t].axis, n));
-                if (target.length() > max_len) target *= max_len / target.length();
+                const F32 press = target.length();
+                if (max_len > 1.0e-4f) target = n * (max_len * (1.f - expf(-press / max_len)));
             }
             const LLQuaternion parent_rot = parent->getWorldRotation();
             const LLVector3 target_local = target * ~parent_rot;
@@ -7719,8 +7725,10 @@ void LLVOAvatar::qlSoftContactDraw()
         {
             const F32 len = part.x.length();
             const LLVector3 n_local = part.x / len;
-            // The parent frame is upright (z up): a dent pointing up = pressed from below.
-            const F32 lift = 0.3f + 0.5f * llmax(0.f, n_local.mV[VZ]);
+            // The parent frame is upright (z up): a dent pointing up = pressed from below,
+            // which lifts the part -- at most half the dent (was 80 %: a breast resting on
+            // crossed forearms rose much too far).
+            const F32 lift = 0.3f + 0.2f * llmax(0.f, n_local.mV[VZ]);
             n = n_local * parent_rot;
             const F32 depth = ql_radius_along(part.shape_a, n);   // centre to surface, the dent's way
             if (depth > 0.001f)
