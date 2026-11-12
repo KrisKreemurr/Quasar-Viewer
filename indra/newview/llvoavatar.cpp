@@ -6560,6 +6560,7 @@ namespace
         // Fitting, after measuring: the even fits at once, then one area's shaped fit a frame.
         F32    bin = 0.05f;    // histogram step (volume units): the measured range / BINS
         F32    cap = 10.f;     // the largest fit, as QuasarBodyCollisionFitMax was when this started
+        S32    detail = 0;     // the levels of detail shown when this started, added up
         bool   evens_done = false;
         S32    fit_next = 0;
         F32    fit[10] = {};
@@ -6588,6 +6589,7 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         for (F32& fit : mQLBodyFit) fit = 1.f;
         for (QLBodyShape& shape : mQLBodyShape) shape = QLBodyShape();
         mQLBodyFitKey = 0;
+        mQLBodyFitDetail = 0;
         sQLFitJobs.erase(getID());
         return;
     }
@@ -6606,6 +6608,7 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         std::vector<LLPointer<LLVOVolume>> rigged;
         U64 key = 1469598103934665603ULL;
         U32 total = 0;
+        S32 detail = 0;   // the levels of detail shown, added up
         auto consider = [&](LLViewerObject* object)
         {
             LLVOVolume* vo = dynamic_cast<LLVOVolume*>(object);
@@ -6613,9 +6616,15 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
             LLVolume* volume = vo->getVolume();
             U32 vertices = 0;
             for (S32 f = 0; f < volume->getNumVolumeFaces(); ++f) vertices += (U32)volume->getVolumeFace(f).mNumVertices;
+            // What is worn and whether it has loaded -- not its vertex count: that changes
+            // with the level of detail shown, so looking away from an avatar (lower LOD)
+            // re-measured it from its rough low-detail meshes, the shapes came out bigger and
+            // the arms were pushed out until the camera came back (user saw exactly that).
             key = (key ^ vo->getID().getCRC32()) * 1099511628211ULL;
-            key = (key ^ vertices) * 1099511628211ULL;
+            key = (key ^ volume->getParams().getSculptID().getCRC32()) * 1099511628211ULL;
+            key = (key ^ (vertices > 0 ? 1u : 0u)) * 1099511628211ULL;
             total += vertices;
+            detail += LLVolumeLODGroup::getVolumeDetailFromScale(volume->getDetail());
             rigged.push_back(vo);
         };
         for (const auto& [point, attachment] : mAttachmentPoints)
@@ -6635,9 +6644,13 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         const F32 limit = s_fit_max;
         memcpy(&limit_bits, &limit, sizeof(limit_bits));
         key = (key ^ limit_bits) * 1099511628211ULL;
-        if (key != mQLBodyFitKey)
+        // The same outfit shown in more detail than when it was measured (meshes arrive at
+        // low detail first at login) measures it again -- in less detail (looking away) not.
+        const bool more_detail = key == mQLBodyFitKey && detail > mQLBodyFitDetail;
+        if (key != mQLBodyFitKey || more_detail)
         {
             QLFitJob job;
+            job.detail = detail;
             job.meshes = std::move(rigged);
             job.stride = llmax(1u, total / 12000u);
             job.key = key;
@@ -6675,31 +6688,47 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         const U32 joints = LLSkinningUtil::getMeshJointCount(skin);
         if (!joints || skin->mJointNames.size() < joints || skin->mInvBindMatrix.size() < joints) continue;
 
-        // The vertices: the volume's own, or -- released to the renderer -- a temporary
-        // decode of the same asset bytes (same faces, same order).
+        // The vertices, from the most detailed version the viewer has: a temporary decode of
+        // the highest level of detail whose asset bytes are kept (same faces, same order),
+        // else the volume's own (or, released to the renderer, its own level's bytes). The
+        // level on screen drops when the camera looks away, and low-detail meshes are rough
+        // and often puffier, so measuring whatever was shown made the fit depend on the camera.
         LLPointer<LLVolume> decoded;
-        if (volume->hasReleasedFaceGeometry())
+        U32 mesh_stride = job.stride;
         {
-            std::vector<U8> bytes;
             const LLVolumeParams& params = volume->getParams();
-            const S32 lod = LLVolumeLODGroup::getVolumeDetailFromScale(volume->getDetail());
-            if (!LLCleanMeshAsset::instance().getRawMesh(params.getSculptID(), lod, bytes) || bytes.empty())
+            const S32 shown = LLVolumeLODGroup::getVolumeDetailFromScale(volume->getDetail());
+            const S32 lowest = volume->hasReleasedFaceGeometry() ? shown : shown + 1;
+            for (S32 lod = 3; lod >= lowest && decoded.isNull(); --lod)
+            {
+                std::vector<U8> bytes;
+                if (!LLCleanMeshAsset::instance().getRawMesh(params.getSculptID(), lod, bytes) || bytes.empty()) continue;
+                LLPointer<LLVolume> attempt = new LLVolume(params, LLVolumeLODGroup::getVolumeScaleFromDetail(lod));
+                if (attempt->unpackVolumeFaces(bytes.data(), (S32)bytes.size())) decoded = attempt;
+            }
+            if (decoded.notNull())
+            {
+                // About as many samples from this mesh as from the level it was counted at
+                // (each level of detail has roughly 4x the last's vertices).
+                U32 shown_vertices = 0, decoded_vertices = 0;
+                for (S32 f = 0; f < volume->getNumVolumeFaces(); ++f) shown_vertices += (U32)volume->getVolumeFace(f).mNumVertices;
+                for (S32 f = 0; f < decoded->getNumVolumeFaces(); ++f) decoded_vertices += (U32)decoded->getVolumeFace(f).mNumVertices;
+                if (shown_vertices > 0 && decoded_vertices > shown_vertices)
+                {
+                    mesh_stride = llmax(job.stride, (U32)((U64)job.stride * decoded_vertices / shown_vertices));
+                }
+                volume = decoded.get();
+                ++job.decoded;
+            }
+            else if (volume->hasReleasedFaceGeometry())
             {
                 ++job.missing;
                 continue;
             }
-            decoded = new LLVolume(params, volume->getDetail());
-            if (!decoded->unpackVolumeFaces(bytes.data(), (S32)bytes.size()))
+            else
             {
-                ++job.missing;
-                continue;
+                ++job.direct;
             }
-            volume = decoded.get();
-            ++job.decoded;
-        }
-        else
-        {
-            ++job.direct;
         }
 
         LLMatrix4a palette[LL_CHARACTER_MAX_ANIMATED_JOINTS];
@@ -6726,7 +6755,7 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
             const LLVolumeFace& face = volume->getVolumeFace(f);
             if (!face.mWeights || !face.mPositions) continue;
             const U32 n = (U32)face.mNumVertices;
-            for (U32 v = job.phase % job.stride; v < n; v += job.stride)
+            for (U32 v = job.phase % mesh_stride; v < n; v += mesh_stride)
             {
                 F32* w = face.mWeights[v].getF32ptr();
                 S32 body = -1, dominant = -1;
@@ -6846,6 +6875,7 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
         mQLBodyShape[kind[t]] = job.shape[t];
     }
     mQLBodyFitKey = job.key;
+    mQLBodyFitDetail = job.detail;
     // One line per measuring (not per frame): your own avatar with QuasarBodyCollisionDebug,
     // and other avatars too with QuasarBodyCollisionDebugOthers.
     static LLCachedControl<bool> s_debug_others(gSavedSettings, "QuasarBodyCollisionDebugOthers", false);

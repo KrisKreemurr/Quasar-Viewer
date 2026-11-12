@@ -837,6 +837,7 @@ public:
 private:
     QLBodyShape mQLBodyShape[10];
     U64         mQLBodyFitKey = 0;           // what was worn when last measured
+    S32         mQLBodyFitDetail = 0;        // the levels of detail shown then, added up
     F64         mQLBodyFitNextCheck = 0.0;   // next look at what is worn (gFrameTimeSeconds)
 
     // QUASAR HANDS AS FEET (QuasarFootIKHands, llvoavatar.cpp): a hand the animation holds
