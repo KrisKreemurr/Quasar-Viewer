@@ -12709,6 +12709,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarSoftContactDebug</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact: log each dent (who, which part, how deep, the spring used) to the viewer log, at most 4 lines a second per avatar. Search the log for "soft (".</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarSoftContactGive</key>
   <map>
     <key>Comment</key>

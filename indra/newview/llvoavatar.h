@@ -792,6 +792,7 @@ private:
     };
     QLSoftPart  mQLSoft[10];
     bool        mQLSoftDrawn = false;
+    F64         mQLSoftDebugNext = 0.0;   // QuasarSoftContactDebug rate limit
     void        qlSoftContactDraw();
     // QUASAR PHYSICS TAG (QuasarAvatarTags, doc/quasar_physics_tag.md): a worn object's
     // hover text may hold "[qlphys soft=0.6 wobble=1.4 breast=0.7 butt=0.4 belly=0.3]" --

@@ -7132,6 +7132,20 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             }
             // The arm meets the part where it is now: dented.
             torso[t].c += part.x * parent_rot;
+
+            // QuasarSoftContactDebug: a line per dented part, at most 4 a second per avatar.
+            static LLCachedControl<bool> s_soft_debug(gSavedSettings, "QuasarSoftContactDebug", false);
+            if (s_soft_debug && (part.x.length() > 0.002f || target.length() > 0.002f)
+                && gFrameTimeSeconds >= mQLSoftDebugNext)
+            {
+                mQLSoftDebugNext = gFrameTimeSeconds + 0.25;
+                LL_INFOS("QuasarSoftContact") << "soft (" << (isSelf() ? std::string("you") : getFullname()) << ") "
+                    << torso_name[t] << " dent=" << llformat("%.1f", part.x.length() * 100.f)
+                    << "cm target=" << llformat("%.1f", target.length() * 100.f)
+                    << "cm give=" << llformat("%.2f", give) << " physics=" << (max_effect > 0.f ? "worn" : "none")
+                    << llformat(" freq=%.1f damping=%.2f size=%.2f", omega, zeta, size)
+                    << (use_tag ? " (their tag)" : "") << LL_ENDL;
+            }
         }
     }
 
