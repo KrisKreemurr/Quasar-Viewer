@@ -7084,6 +7084,39 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         const F32 wobble = use_tag && tag.wobble >= 0.f ? tag.wobble : llclamp((F32)s_wobble, 0.f, 2.f);
         const F32 gravity = llclamp((F32)s_gravity, 0.f, 2.f);
         const F32 jiggle = llclamp((F32)s_jiggle, 0.f, 2.f);
+        // BODY AGAINST LEGS (QuasarSoftLegs, on): breasts and the belly against the thighs --
+        // resting on the lap when sitting, crouching or bending forward. The legs follow
+        // their animation; the soft part gives way (dented like an arm's press, so resting
+        // on a thigh from below mostly lifts it). Only while that thigh is raised toward the
+        // body: standing, the fitted belly and the tops of the thighs already overlap at the
+        // hips, which would dent every belly for good. Raised = the angle between the thigh
+        // and the spine's "down", counted from 40 degrees, fully by 70 (sitting is ~90).
+        static LLCachedControl<bool> s_legs_contact(gSavedSettings, "QuasarSoftLegs", true);
+        S32 thigh_slot[2] = { -1, -1 };
+        F32 thigh_fade[2] = { 0.f, 0.f };
+        if (s_legs_contact)
+        {
+            static const char* const HIPS[2] = { "mHipLeft", "mHipRight" };
+            static const char* const KNEES[2] = { "mKneeLeft", "mKneeRight" };
+            LLJoint* torso_joint = getJoint("mTorso");
+            const LLVector3 spine_down = torso_joint ? LLVector3(0.f, 0.f, -1.f) * torso_joint->getWorldRotation()
+                                                     : LLVector3(0.f, 0.f, -1.f);
+            for (S32 t = 0; t < torso_count; ++t)
+            {
+                const S32 leg = torso_kind[t] == 8 ? 0 : torso_kind[t] == 9 ? 1 : -1;   // L/R_UPPER_LEG
+                if (leg < 0) continue;
+                LLJoint* hip = getJoint(HIPS[leg]);
+                LLJoint* knee = getJoint(KNEES[leg]);
+                if (!hip || !knee) continue;
+                LLVector3 along = knee->getWorldPosition() - hip->getWorldPosition();
+                if (along.lengthSquared() < 1.0e-6f) continue;
+                along.normVec();
+                const F32 c = along * spine_down;   // 1 standing, ~0 sitting
+                thigh_slot[leg] = t;
+                thigh_fade[leg] = 1.f - ql_smoothstep(0.34f, 0.77f, c);   // cos 70 .. cos 40
+            }
+        }
+
         // Scales a damping ratio by the wobble setting: 0 = no wobble, 1 = as given, 2 = livelier.
         auto with_wobble = [&](F32 zeta)
         {
@@ -7161,6 +7194,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
 
             // How deep the animation puts each arm into this part, as animated.
             LLVector3 target;
+            F32 legs_depth = 0.f;   // for the debug line
             if (dents)
             {
                 for (S32 i = 0; i < 2; ++i)
@@ -7179,6 +7213,64 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     }
                     // The arm would be pushed out along d; the part gives way the other way.
                     target -= deepest_push * (give * (1.f - as_foot));
+                }
+            }
+            // Against the raised thighs (breasts and the belly): points around the part's
+            // fitted surface (26 directions) inside a thigh's shape push the part out of it,
+            // straight away from the thigh's centre; the deepest counts, in full (a leg doesn't
+            // give way), faded by how far the thigh is raised.
+            if (part_of != 1)
+            {
+                static LLVector3 DIRS[26];
+                static bool dirs_ready = false;
+                if (!dirs_ready)
+                {
+                    S32 n = 0;
+                    for (S32 dx = -1; dx <= 1; ++dx)
+                        for (S32 dy = -1; dy <= 1; ++dy)
+                            for (S32 dz = -1; dz <= 1; ++dz)
+                            {
+                                if (!dx && !dy && !dz) continue;
+                                LLVector3 d((F32)dx, (F32)dy, (F32)dz);
+                                d.normVec();
+                                DIRS[n++] = d;
+                            }
+                    dirs_ready = true;
+                }
+                for (S32 leg = 0; leg < 2; ++leg)
+                {
+                    if (thigh_slot[leg] < 0 || thigh_fade[leg] <= 0.f) continue;
+                    const QLEllipsoid& thigh = torso[thigh_slot[leg]];
+                    LLVector3 deepest_push;
+                    F32 deepest = 0.f;
+                    for (const LLVector3& dir : DIRS)
+                    {
+                        LLVector3 p = torso[t].c;
+                        for (S32 k = 0; k < 3; ++k) p += torso[t].axis[k] * dir.mV[k];
+                        const LLVector3 off = p - thigh.c;
+                        F32 sum = 0.f;
+                        LLVector3 grad;   // of the thigh's unit distance, times that distance
+                        for (S32 k = 0; k < 3; ++k)
+                        {
+                            const F32 len2 = llmax(thigh.axis[k].lengthSquared(), 1.0e-12f);
+                            const F32 u = (off * thigh.axis[k]) / len2;
+                            sum += u * u;
+                            grad += thigh.axis[k] * (u / len2);
+                        }
+                        const F32 d = sqrtf(sum);
+                        if (d >= 1.f || d < 1.0e-4f) continue;
+                        // Out along the thigh's surface normal by about the depth (1 - d) / |grad d|
+                        // -- straight away from its centre pushed a breast along a long thigh, and
+                        // too far (offline: 9.5 cm for a 6 cm overlap; this gives 6.0, upward).
+                        grad *= 1.f / d;
+                        const F32 slope = grad.length();
+                        if (slope < 1.0e-6f) continue;
+                        const LLVector3 push = grad * ((1.f - d) / (slope * slope));
+                        const F32 depth = push.length();
+                        if (depth > deepest) { deepest = depth; deepest_push = push; }
+                    }
+                    target += deepest_push * thigh_fade[leg];
+                    legs_depth = llmax(legs_depth, deepest * thigh_fade[leg]);
                 }
             }
             // At most the part's share of its own depth that way (PART_DENT), and 15 cm.
@@ -7264,8 +7356,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     << "cm target=" << llformat("%.1f", target.length() * 100.f)
                     << "cm move=" << llformat("%.1f", part.m.length() * 100.f)
                     << "cm give=" << llformat("%.2f", give) << " physics=" << (physics_worn ? "worn" : "none")
-                    << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f", omega, zeta, firmness, size,
-                                part_size * 100.f, tilt_amount)
+                    << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f legs=%.1fcm", omega, zeta,
+                                firmness, size, part_size * 100.f, tilt_amount, legs_depth * 100.f)
                     << (use_tag ? " (their tag)" : "") << LL_ENDL;
             }
         }

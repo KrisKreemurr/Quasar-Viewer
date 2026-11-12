@@ -975,8 +975,19 @@ Only used with a DLSS upscaling mode.
             layout="topleft"
             name="QuasarAvatarTags"
             tool_tip="Someone wearing a Quasar physics tag (a small worn object) chooses how soft and wobbly their own body is in Quasar Viewer; that replaces your Softness and Wobble sliders for them. Off: everyone uses your sliders."
-            width="400"
+            width="360"
             left="30"
+            top="598" />
+          <check_box
+            control_name="QuasarSoftLegs"
+            enabled_control="QuasarSoftContact"
+            height="16"
+            label="Breasts and belly rest on the legs"
+            layout="topleft"
+            name="QuasarSoftLegs"
+            tool_tip="Sitting, crouching or bending forward, breasts and the belly rest on the thighs (lifting and squishing) instead of sinking into them."
+            width="300"
+            left="400"
             top="598" />
           <slider
             control_name="QuasarSoftGravity"

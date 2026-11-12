@@ -12742,6 +12742,17 @@
     <key>Value</key>
     <real>1</real>
   </map>
+  <key>QuasarSoftLegs</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar soft contact: breasts and the belly don't sink into the thighs -- resting on the lap when sitting, crouching or bending forward they give way (lift / squish) instead. Only while a thigh is raised toward the body (from 40 degrees, fully by 70), so standing is unchanged.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarSoftContactGive</key>
   <map>
     <key>Comment</key>
