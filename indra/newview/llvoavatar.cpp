@@ -7021,9 +7021,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     //    shifts toward where gravity now pulls, relative to standing upright -- standing, it
     //    looks exactly as its creator made it (any sag is already in the shape); on the back
     //    it settles toward the chest and up, face down or on all fours it hangs away from the
-    //    body, on a side it falls to the lower side. How far: 0.3 x the part's size x
-    //    (1 - firmness), at most half its size and 25 cm. Firmness from the Physics layer's
-    //    spring (10 -> 0.5, 100 -> 0.9); no physics worn counts as firm (0.7).
+    //    body, on a side it falls to the lower side. How far: 0.7 x the part's size x
+    //    (1 - firmness), at most half its size and 25 cm. Firmness: a little from the
+    //    Physics layer's spring (10 -> 0.37, 40 -> 0.53), 0.5 with none worn; at least 0.6
+    //    for a butt and 0.85 for a belly.
     //  - Jiggle from moving (QuasarSoftJiggle, 1; 0 off), only for parts with no Physics
     //    layer (with one, SL's own jiggle already runs, so nothing doubles up): the part lags
     //    behind its anchor bone's acceleration -- walking, jumping, turning -- with the same
@@ -7115,7 +7116,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // a dent with it kept wobbling over 3 s after the arm left.
             const F32 own_zeta = llclamp(damping / (2.f * sqrtf(spring * mass)), 0.15f, 1.f);
             const F32 zeta = dent_wobbles ? with_wobble(own_zeta) : 1.f;
-            const F32 firmness = llmax(PART_FIRM[part_of], physics_worn ? llclamp(spring / (spring + 10.f), 0.f, 0.95f) : 0.7f);
+            // Firmness for gravity and jiggle. A Physics layer's spring hints at it, but only
+            // a little: creators set the spring high to make jiggle snappy, not to make a part
+            // firm (spring/(spring+10) made most bodies so firm that lying down moved a breast
+            // 1-2 cm -- nothing to see). Spring 10 -> 0.37, 40 -> 0.53; none worn -> 0.5.
+            const F32 firmness = llmax(PART_FIRM[part_of], physics_worn ? 0.2f + 0.5f * spring / (spring + 20.f) : 0.5f);
             const F32 part_size = (torso[t].axis[0].length() + torso[t].axis[1].length() + torso[t].axis[2].length()) / 3.f;
 
             // How deep the animation puts each arm into this part, as animated.
@@ -7171,7 +7176,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             {
                 const LLVector3 down_now = LLVector3(0.f, 0.f, -1.f) * ~parent_rot;
                 const LLVector3 tilt = down_now - LLVector3(0.f, 0.f, -1.f);   // 0 standing upright
-                move_target += tilt * (gravity * 0.3f * part_size * (1.f - firmness));
+                move_target += tilt * (gravity * 0.7f * part_size * (1.f - firmness));
             }
             // Heavier parts lag further behind (a 9x hyper breast about twice a 2x one): its
             // slower spring alone smoothed the steps away (offline: it swung 1.0 cm walking,
