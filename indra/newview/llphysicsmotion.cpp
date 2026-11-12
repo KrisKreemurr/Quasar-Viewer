@@ -541,7 +541,8 @@ bool LLPhysicsMotion::onUpdate(F32 time)
         // soft physics; at most QuasarFootIKMaxAvatars) always get full physics detail. Below
         // 1.0 the visible jiggle only redraws once it has moved (1 - lod) * 40 % of its range
         // -- at 0.9, steps of 4 % -- which read as snapping rather than a smooth bounce (user).
-        if (LLVOAvatar* avatar = dynamic_cast<LLVOAvatar*>(mCharacter); avatar && avatar->qlFootIKSelected())
+        LLVOAvatar* ql_avatar = dynamic_cast<LLVOAvatar*>(mCharacter);
+        if (ql_avatar && ql_avatar->qlFootIKSelected())
         {
                 lod_factor = 1.f;
         }
@@ -555,6 +556,15 @@ bool LLPhysicsMotion::onUpdate(F32 time)
         const F32 behavior_damping = getParamValue(DAMPING);
         const F32 behavior_drag = getParamValue(DRAG);
         F32 behavior_maxeffect = getParamValue(MAX_EFFECT);
+        // Quasar jiggle (QuasarSoftJiggleEngine): for an avatar whose breasts, butt and belly
+        // Quasar moves itself -- from these same Physics-layer values, with weight, gravity
+        // and contact -- SL's own bounce is held at rest (as with Max Effect 0: the part sits
+        // at the shape's own position and nothing is redrawn while it stays there), so the two
+        // never bounce the same part twice. The avatar's real settings are untouched.
+        if (ql_avatar && ql_avatar->qlSoftEngineOn())
+        {
+                behavior_maxeffect = 0.f;
+        }
 
         const bool physics_test = false; // Enable this to simulate bouncing on all parts.
 

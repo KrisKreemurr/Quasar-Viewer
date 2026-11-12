@@ -6941,6 +6941,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     if (!wanted)
     {
         mQLBodyTracking = false;
+        mQLSoftEngine = false;   // SL's own jiggle again
         for (QLSoftPart& part : mQLSoft)
         {
             part.x.clearVec();
@@ -6959,7 +6960,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                                          "L_UPPER_LEG", "R_UPPER_LEG" };
     static const char* const ARM[2][3] = { { "L_UPPER_ARM", "L_LOWER_ARM", "L_HAND" },
                                            { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
-    constexpr S32 MAX_TORSO = 10;
+    constexpr S32 MAX_TORSO = 11;   // the 10 volumes + the cleavage filler
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
     S32 torso_kind[MAX_TORSO] = {};   // index into TORSO (mQLBodyFit's order)
@@ -7023,6 +7024,54 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         }
     }
 
+    // CLEAVAGE FILLER (QuasarBodyCollisionCleavage, on). Each breast is its own egg, and two
+    // eggs side by side leave a V-shaped gap in front between them that no shape covers --
+    // where big breasts really press together, so a hand went straight through the cleavage
+    // into the chest (user, a friend's hyper avatar). When the two breast shapes reach each
+    // other (their sizes toward each other add up to 90 % of the distance between their
+    // centres or more: big breasts, close together), one more shape bridges them: centred
+    // between the two, reaching into each breast, a little short of their fronts (85 %) and
+    // of their height (75 %), so a hand can still rest a little into the valley. Collision
+    // only (kind -1: no soft dent of its own).
+    {
+        static LLCachedControl<bool> s_cleavage(gSavedSettings, "QuasarBodyCollisionCleavage", true);
+        S32 left = -1, right = -1;
+        for (S32 t = 0; t < torso_count; ++t)
+        {
+            if (torso_kind[t] == 5) left = t;
+            if (torso_kind[t] == 6) right = t;
+        }
+        if (s_cleavage && left >= 0 && right >= 0 && torso_count < MAX_TORSO)
+        {
+            const QLEllipsoid& lp = torso[left];
+            const QLEllipsoid& rp = torso[right];
+            LLVector3 across = lp.c - rp.c;
+            const F32 gap = across.length();
+            if (gap > 0.01f)
+            {
+                across *= 1.f / gap;
+                const F32 reach = ql_radius_along(lp.axis, -across) + ql_radius_along(rp.axis, across);
+                if (reach >= 0.9f * gap)
+                {
+                    // A PEC volume's axes: x forward, y sideways, z up (avatar_skeleton.xml).
+                    LLVector3 fwd = (lp.axis[0] + rp.axis[0]) * 0.5f;
+                    LLVector3 up = (lp.axis[2] + rp.axis[2]) * 0.5f;
+                    fwd -= across * (fwd * across);
+                    up -= across * (up * across);
+                    QLEllipsoid& fill = torso[torso_count];
+                    fill.c = (lp.c + rp.c) * 0.5f;
+                    fill.axis[0] = fwd * 0.85f;
+                    fill.axis[1] = across * (0.5f * gap);
+                    fill.axis[2] = up * 0.75f;
+                    torso_kind[torso_count] = -1;
+                    torso_vol[torso_count] = nullptr;
+                    torso_name[torso_count] = "CLEAVAGE";
+                    ++torso_count;
+                }
+            }
+        }
+    }
+
     // The arms' capsules as animated; the upper arm without its top third (in the shoulder).
     QLCapsule caps[2][3];
     bool have[2][3] = { { false, false, false }, { false, false, false } };
@@ -7066,6 +7115,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         static LLCachedControl<S32>  s_no_physics(gSavedSettings, "QuasarSoftContactNoPhysics", 1);
         static LLCachedControl<F32>  s_gravity(gSavedSettings, "QuasarSoftGravity", 1.f);
         static LLCachedControl<F32>  s_jiggle(gSavedSettings, "QuasarSoftJiggle", 1.f);
+        static LLCachedControl<bool> s_engine(gSavedSettings, "QuasarSoftJiggleEngine", true);
+        // This frame: does Quasar move this avatar's soft parts itself (SL's own bounce held
+        // at rest by LLPhysicsMotion)? Set below once the block runs for the avatar.
+        bool engine_this_frame = false;
         // The real time since this avatar's physics last ran -- not the screen's frame time:
         // an avatar animated at a reduced rate (15-30 updates a second, Slipstream's rate
         // ladder) advanced by one 180 Hz frame per update and ran up to 6x too slow.
@@ -7164,10 +7217,16 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // The avatar's own physics for this part.
             static const char* const PREFIX[3] = { "Breast_Physics_", "Butt_Physics_", "Belly_Physics_" };
             const std::string pre = PREFIX[part_of];
-            F32 max_effect = getVisualParamWeight((pre + "UpDown_Max_Effect").c_str());
-            if (part_of == 0) max_effect += getVisualParamWeight((pre + "InOut_Max_Effect").c_str());
-            if (part_of != 2) max_effect += getVisualParamWeight((pre + "LeftRight_Max_Effect").c_str());
+            // Per direction, in the part's parent frame: Bounce = up/down (z), Cleavage =
+            // in/out (x, breasts only), Sway = left/right (y, breasts and butt).
+            const F32 effect_up = getVisualParamWeight((pre + "UpDown_Max_Effect").c_str());
+            const F32 effect_in = part_of == 0 ? getVisualParamWeight((pre + "InOut_Max_Effect").c_str()) : 0.f;
+            const F32 effect_side = part_of != 2 ? getVisualParamWeight((pre + "LeftRight_Max_Effect").c_str()) : 0.f;
+            const F32 max_effect = effect_up + effect_in + effect_side;
             const bool physics_worn = max_effect > 0.f;
+            // Quasar's own jiggle replaces SL's for this part's avatar (QuasarSoftJiggleEngine).
+            const bool engine = s_engine && jiggle > 0.f;
+            engine_this_frame = engine_this_frame || engine;
             F32 spring = 10.f, damping = 0.2f, mass = 0.1f;
             if (physics_worn)
             {
@@ -7311,7 +7370,24 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // Heavier parts lag further behind (a 9x hyper breast about twice a 2x one): its
             // slower spring alone smoothed the steps away (offline: it swung 1.0 cm walking,
             // less than a normal breast's 1.2).
-            const F32 lag = physics_worn ? 0.f : jiggle * (1.f - firmness) * sqrtf(llmax(size, 2.f) / 2.f);
+            // With the Quasar jiggle, a part wearing physics jiggles from its own settings: Gain
+            // (default 10) scales how strongly it reacts, and each direction's Max Effect (0-3)
+            // how far that way -- a creator's bouncy setup stays bouncy, now with weight. Without
+            // it (SL's own jiggle running), worn parts get only gravity and contact from Quasar.
+            F32 lag = 0.f;
+            LLVector3 lag_axes(1.f, 1.f, 1.f);
+            if (!physics_worn)
+            {
+                lag = jiggle * (1.f - firmness) * sqrtf(llmax(size, 2.f) / 2.f);
+            }
+            else if (engine)
+            {
+                const F32 gain = llclamp(getVisualParamWeight((pre + "UpDown_Gain").c_str()) / 10.f, 0.3f, 3.f);
+                lag = jiggle * gain * (1.f - firmness) * sqrtf(llmax(size, 2.f) / 2.f);
+                lag_axes.set(llclamp(effect_in, 0.f, 2.f), llclamp(effect_side, 0.f, 2.f), llclamp(effect_up, 0.f, 2.f));
+                if (part_of == 1) lag_axes.mV[VX] = 0.3f * lag_axes.mV[VZ];   // a butt: no cleavage setting
+                if (part_of == 2) lag_axes.set(0.3f * effect_up, 0.3f * effect_up, effect_up);   // a belly: bounce only
+            }
             const LLVector3 anchor = parent->getWorldPosition();
             if (lag > 0.f && soft_dt > 0.f)
             {
@@ -7323,7 +7399,9 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     part.anchor_accel += (accel - part.anchor_accel) * llmin(1.f, soft_dt * 20.f);
                     part.anchor_vel = vel;
                     // A spring pulled by inertia: x'' = w^2 (T - x) - ... - a  =>  T' = T - a / w^2.
-                    move_target -= (part.anchor_accel * ~parent_rot) * (lag / (omega * omega));
+                    LLVector3 sway = (part.anchor_accel * ~parent_rot) * (lag / (omega * omega));
+                    for (S32 k = 0; k < 3; ++k) sway.mV[k] *= lag_axes.mV[k];
+                    move_target -= sway;
                 }
                 else
                 {
@@ -7338,7 +7416,9 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             }
             part.anchor_prev = anchor;
             if (move_target.length() > move_max) move_target *= move_max / move_target.length();
-            const F32 move_zeta = physics_worn ? 0.6f : with_wobble(0.35f);
+            // Settling: a part with the Quasar jiggle uses its own damping (so a bouncy setup
+            // keeps bouncing); with SL's jiggle running, Quasar's gravity only eases in (0.6).
+            const F32 move_zeta = !physics_worn ? with_wobble(0.35f) : engine ? with_wobble(own_zeta) : 0.6f;
             ql_soft_spring(part.m, part.mv, move_target, omega, move_zeta, soft_dt, llmax(move_max, 0.01f));
 
             // The arm meets the part where it is now: dented, sagged, swinging.
@@ -7358,9 +7438,10 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     << "cm give=" << llformat("%.2f", give) << " physics=" << (physics_worn ? "worn" : "none")
                     << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f legs=%.1fcm", omega, zeta,
                                 firmness, size, part_size * 100.f, tilt_amount, legs_depth * 100.f)
-                    << (use_tag ? " (their tag)" : "") << LL_ENDL;
+                    << (use_tag ? " (their tag)" : "") << (engine && physics_worn ? " (Quasar jiggle)" : "") << LL_ENDL;
             }
         }
+        mQLSoftEngine = engine_this_frame;
     }
 
     // Solve: a few passes, each turning each arm out of its deepest torso contact, then the

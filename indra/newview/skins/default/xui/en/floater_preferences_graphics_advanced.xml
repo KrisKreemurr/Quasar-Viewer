@@ -1027,6 +1027,28 @@ Only used with a DLSS upscaling mode.
             width="250"
             left="334"
             top="624" />
+          <check_box
+            control_name="QuasarSoftJiggleEngine"
+            enabled_control="QuasarSoftContact"
+            height="16"
+            label="Quasar jiggle (replaces SL's, same settings)"
+            layout="topleft"
+            name="QuasarSoftJiggleEngine"
+            tool_tip="For the nearby avatars Quasar corrects: Quasar moves breasts, butt and belly itself -- bounce, sway, gravity and touch together, heavier for bigger parts -- from the same Physics-layer settings they already wear. Off: SL's own jiggle, with Quasar's gravity and touch on top."
+            width="360"
+            left="30"
+            top="648" />
+          <check_box
+            control_name="QuasarBodyCollisionCleavage"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Fill the cleavage (big breasts)"
+            layout="topleft"
+            name="QuasarBodyCollisionCleavage"
+            tool_tip="When two big breasts press together, hands rest on the cleavage instead of going through the gap between them into the chest."
+            width="300"
+            left="400"
+            top="648" />
           <button
             follows="left|top"
             height="23"
@@ -1035,7 +1057,7 @@ Only used with a DLSS upscaling mode.
             left="30"
             name="QuasarMotionDefaults"
             tool_tip="Every Avatar motion (Quasar) setting -- foot IK, body clipping, soft breasts, butt and belly, physics tags -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="648"
+            top="672"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />

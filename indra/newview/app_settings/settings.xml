@@ -12753,6 +12753,28 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarSoftJiggleEngine</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar jiggle: for the nearby avatars Quasar corrects, Quasar moves breasts, butt and belly itself -- bounce, sway, gravity and contact in one system, with weight from their measured size -- from the same Physics-layer settings (Max Effect per direction, Gain, Spring, Damping, Mass); SL's own bounce is held at rest for them. Off: SL's jiggle runs and Quasar adds only gravity and contact on bodies wearing physics. Needs QuasarSoftJiggle above 0.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarBodyCollisionCleavage</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: when two big breast shapes reach each other, an extra shape fills the V-shaped gap between them in front, so hands rest on the cleavage instead of going through it into the chest.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarSoftContactGive</key>
   <map>
     <key>Comment</key>
