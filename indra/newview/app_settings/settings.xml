@@ -12786,6 +12786,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionNatural</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: natural arm fixes. Each way out of a contact is scored (how deep the arm still is, how far the elbow and wrist move from the animation, lifting costs extra, how far it moves from last frame's fix) and the least change wins; last frame's fix is kept unless another is clearly better, so arms rest on bodies and stay steady instead of being thrown up and over. Off: the quick shortest-way-out solve.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionCleavage</key>
   <map>
     <key>Comment</key>

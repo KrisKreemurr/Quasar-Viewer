@@ -778,6 +778,12 @@ private:
         LLQuaternion elbow_pre, elbow_set;
         LLQuaternion elbow_correction;
         bool         elbow_applied = false;
+        // Natural arm fixes (QuasarBodyCollisionNatural): last frame's fix, for steadiness --
+        // the shoulder's turn and the elbow/wrist moves in the shoulder's parent frame.
+        bool         nat_have = false;
+        LLQuaternion nat_s_local;
+        F32          nat_h = 0.f;
+        LLVector3    nat_de, nat_dw;
     };
     QLBodyArm   mQLBodyArm[2];
     bool        mQLBodyApplied = false;

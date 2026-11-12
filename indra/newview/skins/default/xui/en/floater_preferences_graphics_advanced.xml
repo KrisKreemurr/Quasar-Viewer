@@ -947,6 +947,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="574" />
+          <check_box
+            control_name="QuasarBodyCollisionNatural"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Natural arm fixes (least change, steady)"
+            layout="topleft"
+            name="QuasarBodyCollisionNatural"
+            tool_tip="Picks the fix that moves the arm least from the animation and keeps it steady, so hands rest on bodies instead of arms being thrown up and over shoulders. Off: the quick fix that pushes arms the shortest way out."
+            width="360"
+            left="30"
+            top="596" />
           <button
             follows="left|top"
             height="23"
@@ -955,7 +966,7 @@ Only used with a DLSS upscaling mode.
             left="30"
             name="QuasarMotionDefaults"
             tool_tip="Every Avatar motion (Quasar) setting -- foot IK and body clipping -- back to Quasar's tuned defaults. Cancel undoes it."
-            top="600"
+            top="622"
             width="280">
             <button.commit_callback
               function="Pref.QuasarMotionDefaults" />

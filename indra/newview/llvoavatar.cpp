@@ -6242,6 +6242,289 @@ namespace
         return 2.f * acosf(llclamp(fabsf(q.mQ[VW]), 0.f, 1.f));
     }
 
+    // QUASAR NATURAL ARM FIXES (QuasarBodyCollisionNatural). The quick solve turns an arm
+    // the shortest way out of its deepest contact -- in a hug that is often straight up, the
+    // arms thrown over the other's shoulders. Here every way out gets a score instead: how
+    // deep the arm still is (past the allowed overlap), how far the elbow and wrist moved
+    // from the animation (lifting them costs extra), and how far the fix moved from last
+    // frame's. The pose with the lowest score wins: the least change that doesn't clip,
+    // the hand resting on the surface rather than thrown clear. A few starting points are
+    // polished (last frame's fix, the quick solve's, the animation as it is) and last
+    // frame's is kept unless another is clearly better (5 %), so an arm doesn't flip
+    // between two answers -- over and under a shoulder -- unless the pose really changes.
+    // A pose: the shoulder's world turn as a rotation vector (s; it includes the upper
+    // arm's roll) and the elbow's bend (h, about the hinge, applied first).
+    struct QLArmPose { LLVector3 s; F32 h = 0.f; };
+    struct QLNaturalArm
+    {
+        LLVector3 pivot, elbow, wrist;          // shoulder, elbow, wrist as animated
+        QLCapsule caps[3];
+        bool      have[3] = { false, false, false };
+        bool      hinge_ok = false;             // a clear elbow hinge (not a straight arm)
+        LLVector3 hinge_axis;
+        F32       hinge_lo = 0.f, hinge_hi = 0.f;
+        F32       contact_weight = 1.f;         // less while the arm stands as a front leg
+        bool      have_last = false;            // last frame's fix (world)
+        QLArmPose last;
+        LLVector3 last_de, last_dw;             // ... and how far it moved elbow and wrist
+        const QLEllipsoid* shapes[64];
+        S32       shape_count = 0;
+        const QLCapsule* other = nullptr;       // the other arm as posed (3), may be null
+        const bool* other_have = nullptr;
+        F32       overlap = 0.01f;
+    };
+
+    LLQuaternion ql_rot_quat(const LLVector3& v)
+    {
+        const F32 a = v.length();
+        return a < 1.0e-6f ? LLQuaternion::DEFAULT : LLQuaternion(a, v * (1.f / a));
+    }
+
+    LLVector3 ql_rot_vec(LLQuaternion q)
+    {
+        q.normalize();
+        const F32 v = sqrtf(q.mQ[VX] * q.mQ[VX] + q.mQ[VY] * q.mQ[VY] + q.mQ[VZ] * q.mQ[VZ]);
+        if (v < 1.0e-7f) return LLVector3::zero;
+        F32 w = q.mQ[VW], k = 1.f / v;
+        if (w < 0.f) { w = -w; k = -k; }
+        const F32 angle = 2.f * atan2f(v, w);
+        return LLVector3(q.mQ[VX], q.mQ[VY], q.mQ[VZ]) * (k * angle);
+    }
+
+    constexpr S32 QL_NAT_RES = 18;
+
+    // The score of a pose (sum of squares of the residuals, each in metres times a weight).
+    F32 ql_arm_score(const QLNaturalArm& arm, const QLArmPose& p, F32* r)
+    {
+        const LLQuaternion R = ql_rot_quat(p.s);
+        const LLQuaternion H = arm.hinge_ok && fabsf(p.h) > 1.0e-6f ? LLQuaternion(p.h, arm.hinge_axis) : LLQuaternion::DEFAULT;
+        auto place = [&](LLVector3 q, bool forearm)
+        {
+            if (forearm && arm.hinge_ok) q = arm.elbow + (q - arm.elbow) * H;
+            return arm.pivot + (q - arm.pivot) * R;
+        };
+        S32 n = 0;
+        QLCapsule posed[3];
+        for (S32 k = 0; k < 3; ++k)
+        {
+            F32 sum = 0.f;
+            if (arm.have[k])
+            {
+                posed[k] = arm.caps[k];
+                posed[k].a = place(arm.caps[k].a, k > 0);
+                posed[k].b = place(arm.caps[k].b, k > 0);
+                for (S32 t = 0; t < arm.shape_count; ++t)
+                {
+                    LLVector3 at, push;
+                    if (!ql_penetration(posed[k], *arm.shapes[t], at, push)) continue;
+                    const F32 excess = push.length() - arm.overlap;
+                    if (excess > 0.f) sum += excess * excess;
+                }
+            }
+            r[n++] = sqrtf(sum) * arm.contact_weight;
+        }
+        {
+            F32 sum = 0.f;
+            if (arm.other)
+            {
+                for (S32 k = 0; k < 3; ++k)
+                {
+                    if (!arm.have[k]) continue;
+                    for (S32 j = 0; j < 3; ++j)
+                    {
+                        if (!arm.other_have[j]) continue;
+                        LLVector3 c0, c1;
+                        ql_closest_segments(posed[k].a, posed[k].b, arm.other[j].a, arm.other[j].b, c0, c1);
+                        const F32 excess = posed[k].r + arm.other[j].r - (c0 - c1).length() - arm.overlap;
+                        if (excess > 0.f) sum += excess * excess;
+                    }
+                }
+            }
+            r[n++] = sqrtf(sum);
+        }
+        const LLVector3 de = place(arm.elbow, false) - arm.elbow;
+        const LLVector3 dw = place(arm.wrist, true) - arm.wrist;
+        for (S32 k = 0; k < 3; ++k) r[n++] = de.mV[k] * 0.14f;   // moving the elbow (weight 0.02)
+        for (S32 k = 0; k < 3; ++k) r[n++] = dw.mV[k] * 0.10f;   // ... the wrist (0.01)
+        r[n++] = llmax(0.f, de.mV[VZ]) * 0.30f;                 // lifting them (0.09 more)
+        r[n++] = llmax(0.f, dw.mV[VZ]) * 0.30f;
+        // Steadiness: how far the fix moved from last frame's (weaker than the change itself,
+        // so a fix no longer needed still lets go over a few frames).
+        const LLVector3 se = arm.have_last ? de - arm.last_de : LLVector3::zero;
+        const LLVector3 sw = arm.have_last ? dw - arm.last_dw : LLVector3::zero;
+        for (S32 k = 0; k < 3; ++k) r[n++] = se.mV[k] * 0.10f;
+        for (S32 k = 0; k < 3; ++k) r[n++] = sw.mV[k] * 0.10f;
+        F32 cost = 0.f;
+        for (S32 k = 0; k < QL_NAT_RES; ++k) cost += r[k] * r[k];
+        return cost;
+    }
+
+    void ql_arm_clamp(const QLNaturalArm& arm, QLArmPose& p)
+    {
+        const F32 a = p.s.length(), a_max = 90.f * DEG_TO_RAD;
+        if (a > a_max) p.s *= a_max / a;
+        p.h = arm.hinge_ok ? llclamp(p.h, arm.hinge_lo, arm.hinge_hi) : 0.f;
+    }
+
+    // Polishes a pose (damped Gauss-Newton, numeric slopes): 6 steps.
+    F32 ql_arm_refine(const QLNaturalArm& arm, QLArmPose& p)
+    {
+        ql_arm_clamp(arm, p);
+        F32 r[QL_NAT_RES], rj[QL_NAT_RES], J[QL_NAT_RES][4];
+        F32 cost = ql_arm_score(arm, p, r);
+        F32 lambda = 1.0e-3f;
+        const S32 params = arm.hinge_ok ? 4 : 3;
+        for (S32 it = 0; it < 6; ++it)
+        {
+            for (S32 j = 0; j < params; ++j)
+            {
+                QLArmPose q = p;
+                const F32 eps = 1.0e-3f;
+                if (j < 3) q.s.mV[j] += eps; else q.h += eps;
+                ql_arm_score(arm, q, rj);
+                for (S32 k = 0; k < QL_NAT_RES; ++k) J[k][j] = (rj[k] - r[k]) / eps;
+            }
+            F32 A[4][5] = {};
+            for (S32 a = 0; a < params; ++a)
+            {
+                for (S32 b = 0; b < params; ++b)
+                {
+                    F32 sum = 0.f;
+                    for (S32 k = 0; k < QL_NAT_RES; ++k) sum += J[k][a] * J[k][b];
+                    A[a][b] = sum;
+                }
+                F32 g = 0.f;
+                for (S32 k = 0; k < QL_NAT_RES; ++k) g += J[k][a] * r[k];
+                A[a][4] = -g;
+            }
+            bool improved = false;
+            for (S32 tries = 0; tries < 4 && !improved; ++tries)
+            {
+                F32 M[4][5];
+                for (S32 a = 0; a < params; ++a)
+                {
+                    for (S32 b = 0; b < 5; ++b) M[a][b] = A[a][b];
+                    M[a][a] += lambda * (1.f + A[a][a]);
+                }
+                // Gaussian elimination (the matrix is symmetric positive definite)
+                bool ok = true;
+                for (S32 c = 0; c < params && ok; ++c)
+                {
+                    if (fabsf(M[c][c]) < 1.0e-12f) { ok = false; break; }
+                    for (S32 row = c + 1; row < params; ++row)
+                    {
+                        const F32 f = M[row][c] / M[c][c];
+                        for (S32 b = c; b < 5; ++b) M[row][b] -= f * M[c][b];
+                    }
+                }
+                if (!ok) break;
+                F32 x[4] = { 0.f, 0.f, 0.f, 0.f };
+                for (S32 c = params - 1; c >= 0; --c)
+                {
+                    F32 sum = M[c][4];
+                    for (S32 b = c + 1; b < params; ++b) sum -= M[c][b] * x[b];
+                    x[c] = sum / M[c][c];
+                }
+                QLArmPose q = p;
+                q.s += LLVector3(x[0], x[1], x[2]);
+                if (params == 4) q.h += x[3];
+                ql_arm_clamp(arm, q);
+                F32 rq[QL_NAT_RES];
+                const F32 cq = ql_arm_score(arm, q, rq);
+                if (cq < cost)
+                {
+                    p = q;
+                    cost = cq;
+                    for (S32 k = 0; k < QL_NAT_RES; ++k) r[k] = rq[k];
+                    lambda = llmax(lambda * 0.3f, 1.0e-6f);
+                    improved = true;
+                }
+                else
+                {
+                    lambda *= 4.f;
+                }
+            }
+            if (!improved) break;
+        }
+        return cost;
+    }
+
+    // The fix for one arm from its starting points (starts[0] = last frame's when have_last):
+    // the lowest score, last frame's kept unless another beats it by more than 5 %.
+    // Returns which start won (-1: nothing to fix).
+    S32 ql_natural_arm(QLNaturalArm& arm, const QLArmPose* starts, S32 start_count, QLArmPose& out, F32& out_cost)
+    {
+        // Only shapes near the arm as posed by any start (12 cm to spare: the polishing moves
+        // it less than that): a handful, not the whole body and everyone near.
+        const QLEllipsoid* all[64];
+        const S32 all_count = arm.shape_count;
+        for (S32 t = 0; t < all_count; ++t) all[t] = arm.shapes[t];
+        QLCapsule posed[4][3];
+        const S32 pose_count = llmin(start_count, 3) + 1;
+        for (S32 i = 0; i < pose_count; ++i)
+        {
+            const QLArmPose p = i < pose_count - 1 ? starts[i] : QLArmPose();
+            const LLQuaternion R = ql_rot_quat(p.s);
+            const LLQuaternion H = arm.hinge_ok ? LLQuaternion(p.h, arm.hinge_axis) : LLQuaternion::DEFAULT;
+            for (S32 k = 0; k < 3; ++k)
+            {
+                if (!arm.have[k]) continue;
+                QLCapsule c = arm.caps[k];
+                if (k > 0 && arm.hinge_ok) { c.a = arm.elbow + (c.a - arm.elbow) * H; c.b = arm.elbow + (c.b - arm.elbow) * H; }
+                c.a = arm.pivot + (c.a - arm.pivot) * R;
+                c.b = arm.pivot + (c.b - arm.pivot) * R;
+                posed[i][k] = c;
+            }
+        }
+        arm.shape_count = 0;
+        for (S32 t = 0; t < all_count; ++t)
+        {
+            const QLEllipsoid& e = *all[t];
+            const F32 size = llmax(e.axis[0].length(), llmax(e.axis[1].length(), e.axis[2].length()));
+            bool close_by = false;
+            for (S32 i = 0; i < pose_count && !close_by; ++i)
+            {
+                for (S32 k = 0; k < 3 && !close_by; ++k)
+                {
+                    if (!arm.have[k]) continue;
+                    const LLVector3 ab = posed[i][k].b - posed[i][k].a;
+                    const F32 dd = ab.lengthSquared();
+                    const F32 u = dd < 1.0e-10f ? 0.f : llclamp(((e.c - posed[i][k].a) * ab) / dd, 0.f, 1.f);
+                    close_by = (posed[i][k].a + ab * u - e.c).length() < size + posed[i][k].r + 0.12f;
+                }
+            }
+            if (close_by) arm.shapes[arm.shape_count++] = all[t];
+        }
+        F32 r[QL_NAT_RES];
+        QLArmPose none;
+        const F32 none_cost = ql_arm_score(arm, none, r);
+        const bool touching = r[0] > 0.f || r[1] > 0.f || r[2] > 0.f || r[3] > 0.f;
+        if (!touching && !arm.have_last)
+        {
+            out = none;
+            out_cost = none_cost;
+            return -1;
+        }
+        S32 best = -1;
+        F32 best_cost = 0.f, kept_cost = 0.f;
+        QLArmPose kept;
+        for (S32 i = 0; i < start_count; ++i)
+        {
+            QLArmPose p = starts[i];
+            const F32 c = ql_arm_refine(arm, p);
+            if (i == 0 && arm.have_last) { kept = p; kept_cost = c; }
+            if (best < 0 || c < best_cost) { best = i; best_cost = c; out = p; }
+        }
+        if (arm.have_last && kept_cost <= best_cost * 1.05f + 1.0e-7f)
+        {
+            out = kept;
+            best_cost = kept_cost;
+            best = 0;
+        }
+        out_cost = best_cost;
+        return best;
+    }
+
     // Quasar's own breast / butt / belly PHYSICS -- gravity, jiggle, squish, the
     // realistic-SL-physics changes and the physics tags -- is switched off, and its
     // settings taken out of Avatar motion (user, 2026-11-12: "keep the collision stuff",
@@ -7690,6 +7973,99 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         }
     }
 
+    // QUASAR NATURAL ARM FIXES (see ql_natural_arm): the quick solve above is one starting
+    // point; the scored fix replaces it. Your own avatar always; others while this frame's
+    // 1 ms budget lasts (then the quick solve, as before).
+    static LLCachedControl<bool> s_natural(gSavedSettings, "QuasarBodyCollisionNatural", true);
+    const char* natural_won[2] = { "-", "-" };
+    if (s_natural)
+    {
+        static U32 s_budget_frame = 0;
+        static F64 s_budget_used = 0.0;
+        if (s_budget_frame != LLFrameTimer::getFrameCount())
+        {
+            s_budget_frame = LLFrameTimer::getFrameCount();
+            s_budget_used = 0.0;
+        }
+        if (isSelf() || s_budget_used < 0.001)
+        {
+            const F64 started = LLTimer::getTotalSeconds();
+            for (S32 i = 0; i < 2; ++i)
+            {
+                if (!wrists[i]) continue;
+                QLBodyArm& arm_state = mQLBodyArm[i];
+                const LLQuaternion parent = shoulders[i]->getParent()->getWorldRotation();
+                QLNaturalArm na;
+                na.pivot = pivot[i];
+                na.elbow = elbows[i] ? elbows[i]->getWorldPosition() : caps[i][0].b;
+                na.wrist = wrists[i]->getWorldPosition();
+                for (S32 k = 0; k < 3; ++k) { na.caps[k] = caps[i][k]; na.have[k] = have[i][k]; }
+                na.hinge_ok = elbow_ok[i];
+                if (elbow_ok[i])
+                {
+                    na.elbow = elbow_at[i];
+                    na.hinge_axis = hinge_axis[i];
+                    na.hinge_lo = llmax(2.f * DEG_TO_RAD - bend0[i], -60.f * DEG_TO_RAD);
+                    na.hinge_hi = llmin(150.f * DEG_TO_RAD - bend0[i], 60.f * DEG_TO_RAD);
+                }
+                na.contact_weight = 1.f - mQLHandFoot[i].fade;
+                na.overlap = overlap;
+                na.shape_count = llmin(torso_count, 64);
+                for (S32 t = 0; t < na.shape_count; ++t) na.shapes[t] = &torso[t];
+                QLCapsule other_caps[3];
+                bool other_have[3] = { false, false, false };
+                if (s_arms)
+                {
+                    for (S32 k = 0; k < 3; ++k) { other_have[k] = have[1 - i][k]; if (other_have[k]) other_caps[k] = posed(1 - i, k); }
+                    na.other = other_caps;
+                    na.other_have = other_have;
+                }
+                na.have_last = arm_state.nat_have && mQLBodyTracking;
+                if (na.have_last)
+                {
+                    na.last.s = ql_rot_vec(~parent * arm_state.nat_s_local * parent);
+                    na.last.h = arm_state.nat_h;
+                    na.last_de = arm_state.nat_de * parent;
+                    na.last_dw = arm_state.nat_dw * parent;
+                }
+                QLArmPose starts[3];
+                S32 start_count = 0;
+                if (na.have_last) starts[start_count++] = na.last;
+                QLArmPose quick;
+                quick.s = ql_rot_vec(elbow_ok[i] ? LLQuaternion(roll[i], upper_dir[i]) * turn[i] : turn[i]);
+                quick.h = elbow_ok[i] ? hinge[i] : 0.f;
+                starts[start_count++] = quick;
+                starts[start_count++] = QLArmPose();
+                QLArmPose fix;
+                F32 score = 0.f;
+                const S32 won = ql_natural_arm(na, starts, start_count, fix, score);
+                natural_won[i] = won < 0 ? "none" : (na.have_last && won == 0 ? "kept" : (won == start_count - 1 ? "as animated" : "quick"));
+                // Back into the solve's terms: the shoulder's turn (roll included), the bend.
+                turn[i] = ql_rot_quat(fix.s);
+                roll[i] = 0.f;
+                hinge[i] = elbow_ok[i] ? fix.h : 0.f;
+                // Remember it in the shoulder's parent frame (it rides with the body).
+                LLQuaternion local = parent * turn[i] * ~parent;
+                local.normalize();
+                arm_state.nat_s_local = local;
+                arm_state.nat_h = hinge[i];
+                const LLQuaternion R = turn[i];
+                const LLVector3 e = na.pivot + (na.elbow - na.pivot) * R;
+                LLVector3 w = na.wrist;
+                if (na.hinge_ok) w = na.elbow + (w - na.elbow) * LLQuaternion(hinge[i], na.hinge_axis);
+                w = na.pivot + (w - na.pivot) * R;
+                arm_state.nat_de = (e - na.elbow) * ~parent;
+                arm_state.nat_dw = (w - na.wrist) * ~parent;
+                arm_state.nat_have = true;
+            }
+            if (!isSelf()) s_budget_used += LLTimer::getTotalSeconds() - started;
+        }
+        else
+        {
+            mQLBodyArm[0].nat_have = mQLBodyArm[1].nat_have = false;
+        }
+    }
+
     // QUASAR LEGS AGAINST OTHERS. Each leg (thigh, shin, foot capsules from its volumes; the
     // top fifth of the thigh skipped -- it sits in the hip) is turned at the hip out of the
     // deepest of the other avatars' shapes, like an arm at the shoulder: a few passes,
@@ -7853,7 +8229,8 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         LL_INFOS("QuasarBodyCollision") << llformat("L torso=%.1fcm (%s) R torso=%.1fcm (%s) arms=%.1fcm | L turn=%.1f R turn=%.1f deg | L elbow=%.1f roll=%.1f R elbow=%.1f roll=%.1f deg",
             first_depth[0] * 100.f, first_hit[0], first_depth[1] * 100.f, first_hit[1], first_arms * 100.f,
             ql_quat_angle(mQLBodyArm[0].correction) * RAD_TO_DEG, ql_quat_angle(mQLBodyArm[1].correction) * RAD_TO_DEG,
-            hinge[0] * RAD_TO_DEG, roll[0] * RAD_TO_DEG, hinge[1] * RAD_TO_DEG, roll[1] * RAD_TO_DEG) << LL_ENDL;
+            hinge[0] * RAD_TO_DEG, roll[0] * RAD_TO_DEG, hinge[1] * RAD_TO_DEG, roll[1] * RAD_TO_DEG)
+            << " | natural L=" << natural_won[0] << " R=" << natural_won[1] << LL_ENDL;
     }
     if (!any && !any_elbow) return;   // nothing to push out: the animation as it is
 
