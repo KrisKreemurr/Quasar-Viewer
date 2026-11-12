@@ -7393,8 +7393,13 @@ void process_script_dialog(LLMessageSystem* msg, void**)
     msg->getUUID("OwnerData", "OwnerID", owner_id);
     }
 
+    // Quasar: one line per script menu that arrives, so "the furniture menu never shows"
+    // can be split into "the sim never sent one" and "it came but wasn't shown".
+    LL_INFOS("QuasarDialog") << "Script dialog arrived from object " << object_id << " owner " << owner_id << LL_ENDL;
+
     if (LLMuteList::getInstance()->isMuted(object_id) || LLMuteList::getInstance()->isMuted(owner_id))
     {
+        LL_INFOS("QuasarDialog") << "Script dialog dropped: object or owner is blocked" << LL_ENDL;
         return;
     }
 
@@ -7444,6 +7449,7 @@ void process_script_dialog(LLMessageSystem* msg, void**)
     if (chat_channel == SLBridge::CONSENT_CHANNEL && SLPoseSync::instanceExists() &&
         !SLPoseSync::instance().onConsentDialog(owner_id, first_button))
     {
+        LL_INFOS("QuasarDialog") << "Script dialog dropped: Pose Studio consent channel" << LL_ENDL;
         return;
     }
     // The consent-confirm channel carries only statements our own viewer makes for us; no

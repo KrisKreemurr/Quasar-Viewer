@@ -540,6 +540,18 @@ bool LLToolPie::handleLeftClickPick()
         parent = object->getRootEdit();
     }
 
+    // Quasar: one line per left click on an object, so a furniture menu that never opens
+    // shows whether the click reached the furniture (or landed on an attachment or avatar).
+    if (object)
+    {
+        LL_INFOS("QuasarDialog") << "Left click on " << object->getID()
+            << (object->isAvatar() ? " AVATAR" : (object->isHUDAttachment() ? " HUD" : (object->isAttachment() ? " ATTACHMENT" : " WORLD")))
+            << " root=" << (parent ? parent->getID() : LLUUID::null)
+            << " touch=" << (object->flagHandleTouch() || (parent && parent->flagHandleTouch()))
+            << " click_action=" << (S32)object->getClickAction() << "/" << (S32)(parent ? parent->getClickAction() : 0)
+            << LL_ENDL;
+    }
+
     if (handleMediaClick(mPick))
     {
         return true;
@@ -552,6 +564,7 @@ bool LLToolPie::handleLeftClickPick()
         // Blanket block all left-click special actions on objects the user can't interact with
         if ( (RlvActions::isRlvEnabled()) && (!RlvActions::canInteract(object, mPick.mObjectOffset)) )
         {
+            LL_INFOS("QuasarDialog") << "Left click blocked by RLV (an RLV restriction stops touching)" << LL_ENDL;
             return true;
         }
 // [/RLVa:KB]
@@ -707,8 +720,10 @@ bool LLToolPie::handleLeftClickPick()
         // Triggered by left-clicking on a touchable object
         if ( (RlvActions::isRlvEnabled()) && (!RlvActions::canTouch(object, mPick.mObjectOffset)) )
         {
+            LL_INFOS("QuasarDialog") << "Touch blocked by RLV (an RLV restriction stops touching)" << LL_ENDL;
             return LLTool::handleMouseDown(x, y, mask);
         }
+        LL_INFOS("QuasarDialog") << "Touch: sending to the furniture" << LL_ENDL;
 // [/RLVa:KB]
 
         gGrabTransientTool = this;

@@ -1235,6 +1235,7 @@ void send_ObjectGrab_message(LLViewerObject* object, const LLPickInfo & pick, co
     msg->addVector3("Normal", pick.mNormal);
     msg->addVector3("Binormal", pick.mBinormal);
     log_touch_surface("ObjectGrab", object, pick);
+    LL_INFOS("QuasarDialog") << "Touch start sent to " << object->getID() << LL_ENDL;
     msg->sendMessage( object->getRegion()->getHost());
 
     /*  Diagnostic code
@@ -1272,6 +1273,7 @@ void send_ObjectDeGrab_message(LLViewerObject* object, const LLPickInfo & pick)
     msg->addVector3("Normal", pick.mNormal);
     msg->addVector3("Binormal", pick.mBinormal);
     log_touch_surface("ObjectDeGrab", object, pick);
+    LL_INFOS("QuasarDialog") << "Touch end sent to " << object->getID() << LL_ENDL;
     msg->sendMessage(object->getRegion()->getHost());
 }
 

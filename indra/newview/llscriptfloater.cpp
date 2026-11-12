@@ -128,6 +128,17 @@ LLScriptFloater* LLScriptFloater::show(const LLUUID& notification_id)
     //LLDialog(LLGiveInventory and LLLoadURL) should no longer steal focus (see EXT-5445)
     LLFloaterReg::showTypedInstance<LLScriptFloater>("script_floater", notification_id, false);
 
+    // Quasar: where the menu ended up, to find menus that open off screen or hidden.
+    {
+        const LLRect r = floater->getRect();
+        const LLView* parent = floater->getParent();
+        const LLRect pr = parent ? parent->getRect() : LLRect();
+        LL_INFOS("QuasarDialog") << "Script menu shown: visible=" << floater->getVisible()
+            << " docked=" << floater->isDocked() << " minimized=" << floater->isMinimized()
+            << " rect=" << r.mLeft << "," << r.mBottom << " " << r.getWidth() << "x" << r.getHeight()
+            << " screen=" << pr.getWidth() << "x" << pr.getHeight() << LL_ENDL;
+    }
+
     return floater;
 }
 
