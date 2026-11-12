@@ -822,7 +822,7 @@ Only used with a DLSS upscaling mode.
             name="QuasarBodyCollisionArms"
             tool_tip="Also keep the arms out of each other, for crossed arms and clasped hands. Each arm moves half the way."
             width="250"
-            left="334"
+            left="400"
             top="420" />
           <slider
             control_name="QuasarBodyCollisionOverlap"
@@ -1076,7 +1076,7 @@ Only used with a DLSS upscaling mode.
             name="QuasarBodyCollisionLegs"
             tool_tip="Keep the hands and arms out of the thighs as well (hands resting on big thighs, sitting or standing), not only the torso."
             width="250"
-            left="334"
+            left="400"
             top="442" />
         </panel>
       </scroll_container>
