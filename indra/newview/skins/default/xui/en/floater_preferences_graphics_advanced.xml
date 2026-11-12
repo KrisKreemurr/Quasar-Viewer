@@ -958,6 +958,17 @@ Only used with a DLSS upscaling mode.
             width="360"
             left="30"
             top="596" />
+          <check_box
+            control_name="QuasarBodyCollisionShow"
+            enabled_control="QuasarBodyCollision"
+            height="16"
+            label="Show collision shapes"
+            layout="topleft"
+            name="QuasarBodyCollisionShow"
+            tool_tip="Draws the shapes the clipping fix uses: bodies in blue (orange where an arm touches), arms and legs in green (red when the animation put them into a body, with a faint red copy where the animation had them)."
+            width="300"
+            left="400"
+            top="596" />
           <button
             follows="left|top"
             height="23"

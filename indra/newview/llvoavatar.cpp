@@ -7255,6 +7255,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         mQLBodyTracking = false;
         mQLBodyLegsTracking = false;
         mQLShapesOut.clear();
+        mQLLimbsOut.clear();
         mQLSoftEngine = false;   // SL's own jiggle again
         for (QLSoftPart& part : mQLSoft)
         {
@@ -7290,6 +7291,14 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     {
         LLAvatarJointCollisionVolume* volume = &mCollisionVolumes[v];
         const std::string& name = volume->getName();
+        // The thighs are both: body shapes (for hands) and the top of each leg (for legs
+        // against other avatars) -- so the limbs are looked up before the body shapes.
+        for (S32 i = 0; i < 2; ++i)
+            for (S32 k = 0; k < 3; ++k)
+            {
+                if (name == ARM[i][k]) arm_volume[i][k] = volume;
+                if (name == LEG[i][k]) leg_volume[i][k] = volume;
+            }
         bool matched = false;
         for (S32 kind = 0; kind < (S32)LL_ARRAY_SIZE(TORSO); ++kind)
         {
@@ -7311,13 +7320,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 break;
             }
         }
-        if (matched) continue;
-        for (S32 i = 0; i < 2; ++i)
-            for (S32 k = 0; k < 3; ++k)
-            {
-                if (name == ARM[i][k]) arm_volume[i][k] = volume;
-                if (name == LEG[i][k]) leg_volume[i][k] = volume;
-            }
+        (void)matched;
     }
 
     // AUTO-FIT: measure how far the worn mesh reaches from each body volume (when what is
@@ -7404,12 +7407,14 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     // viewers, if both run Quasar, work out the same contacts from the same animations.
     const S32 own_count = torso_count;
     mQLShapesOut.clear();
+    mQLLimbsOut.clear();
     for (S32 t = 0; t < own_count; ++t)
     {
         QLShapeOut out;
         out.c = torso[t].c;
         for (S32 k = 0; k < 3; ++k) out.axis[k] = torso[t].axis[k];
         out.limb = torso_kind[t] == 8 || torso_kind[t] == 9;   // a thigh: that avatar moves it too
+        out.kind = torso_kind[t];
         mQLShapesOut.push_back(out);
     }
     mQLShapesTime = gFrameTimeSeconds;
@@ -8152,6 +8157,29 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 leg_turn[i] = slerp(lo, LLQuaternion::DEFAULT, leg_turn[i]);
             }
         }
+        static LLCachedControl<bool> s_show_legs(gSavedSettings, "QuasarBodyCollisionShow", false);
+        if (s_show_legs && hips[0] && hips[1])
+        {
+            for (S32 i = 0; i < 2; ++i)
+            {
+                const LLVector3 hip = hips[i]->getWorldPosition();
+                for (S32 k = 0; k < 3; ++k)
+                {
+                    QLCapsule c;
+                    if (!ql_capsule(leg_volume[i][k], k == 0 ? 0.2f : 0.f, c)) continue;
+                    QLLimbOut limb;
+                    limb.anim_a = c.a; limb.anim_b = c.b; limb.r = c.r;
+                    limb.a = ql_turn_point(c.a, hip, leg_turn[i]);
+                    limb.b = ql_turn_point(c.b, hip, leg_turn[i]);
+                    for (S32 t = own_count; t < torso_count && !limb.clipped; ++t)
+                    {
+                        LLVector3 p, d;
+                        limb.clipped = ql_penetration(c, torso[t], p, d) && d.length() > overlap;
+                    }
+                    mQLLimbsOut.push_back(limb);
+                }
+            }
+        }
         const F32 leg_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
         const F32 leg_follow = mQLBodyLegsTracking ? 1.f - expf(-leg_dt * 15.f) : 1.f;
         const F32 leg_max_step = 360.f * DEG_TO_RAD * leg_dt;
@@ -8196,6 +8224,34 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 leg.hip_set = hips[i]->getRotation();
             }
             mQLBodyLegsApplied = true;
+        }
+    }
+
+    // Show collision shapes: the arms as fixed and as animated, and which body shapes they
+    // touch (own shapes only: another avatar's are drawn with that avatar).
+    static LLCachedControl<bool> s_show(gSavedSettings, "QuasarBodyCollisionShow", false);
+    if (s_show)
+    {
+        for (S32 i = 0; i < 2; ++i)
+        {
+            for (S32 k = 0; k < 3; ++k)
+            {
+                if (!have[i][k]) continue;
+                QLLimbOut limb;
+                const QLCapsule fixed = posed(i, k);
+                limb.a = fixed.a; limb.b = fixed.b; limb.r = fixed.r;
+                limb.anim_a = caps[i][k].a; limb.anim_b = caps[i][k].b;
+                for (S32 t = 0; t < torso_count; ++t)
+                {
+                    LLVector3 p, d;
+                    if (ql_penetration(caps[i][k], torso[t], p, d) && d.length() > overlap)
+                    {
+                        limb.clipped = true;
+                        if (t < own_count && t < (S32)mQLShapesOut.size()) mQLShapesOut[t].touched = true;
+                    }
+                }
+                mQLLimbsOut.push_back(limb);
+            }
         }
     }
 
@@ -8283,6 +8339,113 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         }
     }
     mQLBodyApplied = true;
+}
+
+//-----------------------------------------------------------------------------
+// SHOW COLLISION SHAPES (QuasarBodyCollisionShow, Avatar motion > "Show collision shapes").
+// Every corrected avatar's body shapes as wire ellipsoids (blue; thighs teal, the cleavage
+// filler pink; orange where one of that avatar's own arms touches it) and its arms and legs
+// as wire capsules where the fix put them (green; red when the animation put them into a
+// body, with a faint red ghost where the animation had them). Drawn like the beacons: faint
+// through everything, bright where not hidden. Debug view: nothing else changes.
+//-----------------------------------------------------------------------------
+void LLVOAvatar::qlRenderCollisionShapes()
+{
+    static LLCachedControl<bool> s_show(gSavedSettings, "QuasarBodyCollisionShow", false);
+    if (!s_show) return;
+    std::vector<const LLVOAvatar*> shown;
+    for (LLCharacter* character : LLCharacter::sInstances)
+    {
+        const LLVOAvatar* av = static_cast<const LLVOAvatar*>(character);
+        if (av->isDead() || av->mQLShapesOut.empty() || gFrameTimeSeconds - av->mQLShapesTime > 0.3) continue;
+        shown.push_back(av);
+    }
+    if (shown.empty()) return;
+
+    constexpr S32 SEGS = 24;
+    auto ring = [](const LLVector3& c, const LLVector3& a, const LLVector3& b, F32 from, F32 to)
+    {
+        const S32 n = llmax(2, (S32)(SEGS * (to - from) / F_TWO_PI + 0.5f));
+        LLVector3 prev = c + a * cosf(from) + b * sinf(from);
+        for (S32 i = 1; i <= n; ++i)
+        {
+            const F32 t = from + (to - from) * i / n;
+            const LLVector3 p = c + a * cosf(t) + b * sinf(t);
+            gGL.vertex3fv(prev.mV);
+            gGL.vertex3fv(p.mV);
+            prev = p;
+        }
+    };
+    auto capsule = [&](const LLVector3& a, const LLVector3& b, F32 r)
+    {
+        LLVector3 axis = b - a;
+        const F32 len = axis.length();
+        if (len < 1.0e-4f || r <= 0.f) return;
+        axis /= len;
+        LLVector3 u = fabsf(axis.mV[VZ]) < 0.9f ? axis % LLVector3::z_axis : axis % LLVector3::x_axis;
+        u.normVec();
+        const LLVector3 v = axis % u;
+        ring(a, u * r, v * r, 0.f, F_TWO_PI);
+        ring(b, u * r, v * r, 0.f, F_TWO_PI);
+        for (S32 k = 0; k < 4; ++k)
+        {
+            const F32 t = k * F_PI_BY_TWO;
+            const LLVector3 off = u * (r * cosf(t)) + v * (r * sinf(t));
+            gGL.vertex3fv((a + off).mV);
+            gGL.vertex3fv((b + off).mV);
+        }
+        ring(a, u * r, -axis * r, 0.f, F_PI);   // the round ends
+        ring(a, v * r, -axis * r, 0.f, F_PI);
+        ring(b, u * r, axis * r, 0.f, F_PI);
+        ring(b, v * r, axis * r, 0.f, F_PI);
+    };
+    auto draw_all = [&](F32 alpha)
+    {
+        gGL.begin(LLRender::LINES);
+        for (const LLVOAvatar* av : shown)
+        {
+            for (const QLShapeOut& sh : av->mQLShapesOut)
+            {
+                LLColor4 col = sh.kind == -1 ? LLColor4(1.f, 0.45f, 0.8f, 1.f)
+                             : (sh.limb ? LLColor4(0.2f, 0.9f, 0.75f, 1.f) : LLColor4(0.35f, 0.65f, 1.f, 1.f));
+                if (sh.touched) col = LLColor4(1.f, 0.6f, 0.15f, 1.f);
+                col.mV[VALPHA] *= alpha;
+                gGL.color4fv(col.mV);
+                ring(sh.c, sh.axis[0], sh.axis[1], 0.f, F_TWO_PI);
+                ring(sh.c, sh.axis[1], sh.axis[2], 0.f, F_TWO_PI);
+                ring(sh.c, sh.axis[0], sh.axis[2], 0.f, F_TWO_PI);
+            }
+            for (const QLLimbOut& limb : av->mQLLimbsOut)
+            {
+                if (limb.clipped)
+                {
+                    gGL.color4f(1.f, 0.2f, 0.2f, 0.35f * alpha);   // where the animation had it
+                    capsule(limb.anim_a, limb.anim_b, limb.r);
+                }
+                LLColor4 col = limb.clipped ? LLColor4(1.f, 0.25f, 0.2f, 1.f) : LLColor4(0.3f, 1.f, 0.35f, 1.f);
+                col.mV[VALPHA] *= alpha;
+                gGL.color4fv(col.mV);
+                capsule(limb.a, limb.b, limb.r);
+            }
+        }
+        gGL.end();
+    };
+
+    LLRender::UIScope gls_ui;
+    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+    gGL.flush();
+    gGL.setLineWidth(2.f);
+    {
+        LLRender::DepthScope depth(false, false);   // faint, through everything
+        draw_all(0.25f);
+    }
+    {
+        LLRender::DepthScope depth(true, false);    // bright where not hidden
+        draw_all(1.f);
+    }
+    gGL.flush();
+    gGL.setLineWidth(1.f);
+    gGL.color4f(1.f, 1.f, 1.f, 1.f);
 }
 
 // The measured size of the part an SL physics motion drives (its driver param's name:

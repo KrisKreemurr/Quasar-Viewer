@@ -12797,6 +12797,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarBodyCollisionShow</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: show the collision shapes of every corrected avatar -- body shapes as wire ellipsoids (blue, thighs teal, cleavage filler pink, orange where an arm touches), arms and legs as wire capsules where the fix put them (green; red when the animation put them into a body, with a faint red ghost where the animation had them). A debug view: nothing else changes.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>QuasarBodyCollisionCleavage</key>
   <map>
     <key>Comment</key>

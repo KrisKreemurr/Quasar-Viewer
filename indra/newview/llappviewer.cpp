@@ -7959,6 +7959,7 @@ void displayVulkanUI()
                     if (SLPoseIK::instanceExists())
                         SLPoseIK::instance().render();
                     gObjectList.renderObjectBeacons();
+                    LLVOAvatar::qlRenderCollisionShapes();   // Quasar: Avatar motion > Show collision shapes
                     gSky.addSunMoonBeacons();
                     // Develop > Render Metadata > Physics Shapes / Bounding Boxes (#29).
                     LLPipeline::renderDebugOverlaysVK();

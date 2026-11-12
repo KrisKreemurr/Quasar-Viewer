@@ -803,9 +803,23 @@ public:
     {
         LLVector3 c, axis[3];
         bool      limb = false;   // a thigh: its own viewer moves it too
+        S32       kind = 0;       // mQLBodyFit's order; -1 the cleavage filler
+        bool      touched = false;   // an arm or leg of this avatar touches it this frame (shown)
     };
     std::vector<QLShapeOut> mQLShapesOut;
     F64         mQLShapesTime = -1.0;
+    // Show collision shapes (QuasarBodyCollisionShow): this avatar's arm and leg capsules as
+    // fixed, and where the animation had them when that clipped.
+    struct QLLimbOut
+    {
+        LLVector3 a, b;           // as fixed
+        LLVector3 anim_a, anim_b; // as animated
+        F32       r = 0.f;
+        bool      clipped = false;   // the animation put it into a body
+    };
+    std::vector<QLLimbOut> mQLLimbsOut;
+    // Draws every corrected avatar's shapes (the VK world-overlay pass, world camera loaded).
+    static void qlRenderCollisionShapes();
 private:
     // QUASAR SOFT CONTACT (QuasarSoftContact, llvoavatar.cpp "QUASAR SOFT CONTACT"): an arm
     // pressing into a breast, the butt or the belly dents it (part moved away, part
