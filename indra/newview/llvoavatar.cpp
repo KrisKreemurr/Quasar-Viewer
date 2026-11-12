@@ -7208,10 +7208,12 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // and for parts with no Physics layer, the lag behind the anchor's acceleration.
             const F32 move_max = llmin(0.25f, 0.5f * part_size);
             LLVector3 move_target;
+            F32 tilt_amount = 0.f;   // for the debug line: 0 upright, 1.41 lying flat, 2 upside down
             if (gravity > 0.f)
             {
                 const LLVector3 down_now = LLVector3(0.f, 0.f, -1.f) * ~parent_rot;
                 const LLVector3 tilt = down_now - LLVector3(0.f, 0.f, -1.f);   // 0 standing upright
+                tilt_amount = tilt.length();
                 move_target += tilt * (gravity * 0.7f * part_size * (1.f - firmness));
             }
             // Heavier parts lag further behind (a 9x hyper breast about twice a 2x one): its
@@ -7250,18 +7252,20 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             // The arm meets the part where it is now: dented, sagged, swinging.
             torso[t].c += (part.x + part.m) * parent_rot;
 
-            // QuasarSoftContactDebug: a line per moved part, at most 4 a second per avatar.
+            // QuasarSoftContactDebug: a line per part, each at most twice a second. (One limit
+            // per avatar let the first part listed -- a belly an arm rests on -- take every
+            // turn, and a friend's breast lines never showed.)
             static LLCachedControl<bool> s_soft_debug(gSavedSettings, "QuasarSoftContactDebug", false);
-            if (s_soft_debug && (part.x.length() > 0.002f || target.length() > 0.002f || part.m.length() > 0.005f)
-                && gFrameTimeSeconds >= mQLSoftDebugNext)
+            if (s_soft_debug && gFrameTimeSeconds >= part.debug_next)
             {
-                mQLSoftDebugNext = gFrameTimeSeconds + 0.25;
+                part.debug_next = gFrameTimeSeconds + 0.5;
                 LL_INFOS("QuasarSoftContact") << "soft (" << (isSelf() ? std::string("you") : getFullname()) << ") "
                     << torso_name[t] << " dent=" << llformat("%.1f", part.x.length() * 100.f)
                     << "cm target=" << llformat("%.1f", target.length() * 100.f)
                     << "cm move=" << llformat("%.1f", part.m.length() * 100.f)
                     << "cm give=" << llformat("%.2f", give) << " physics=" << (physics_worn ? "worn" : "none")
-                    << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f", omega, zeta, firmness, size)
+                    << llformat(" freq=%.1f damping=%.2f firm=%.2f size=%.2f part=%.1fcm tilt=%.2f", omega, zeta, firmness, size,
+                                part_size * 100.f, tilt_amount)
                     << (use_tag ? " (their tag)" : "") << LL_ENDL;
             }
         }
