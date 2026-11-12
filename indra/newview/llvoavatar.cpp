@@ -8113,10 +8113,43 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                     if (deepest > overlap)
                     {
                         const F32 share = limb ? 0.5f : 1.f;
-                        const LLVector3 needed = push * ((deepest - overlap) / deepest) * share;
+                        LLVector3 needed = push * ((deepest - overlap) / deepest) * share;
+                        // Never pushed down: someone sitting on your lap would drive your legs
+                        // through the floor or the seat (user, 2026-11-12). Bodies aren't moved,
+                        // so their weight can't lift them off you; a little of them sinking into
+                        // your lap looks far better. Sideways and up still work.
+                        needed.mV[VZ] = llmax(needed.mV[VZ], 0.f);
                         leg_turn[i] = leg_turn[i] * ql_turn_toward(hip_at[i], at, needed);
                     }
                 }
+            }
+            // ... and a sideways turn about the hip can still swing a knee or foot lower: at
+            // most 2 cm below where the animation had it, the turn eased back until it is.
+            for (S32 i = 0; i < 2; ++i)
+            {
+                if (ql_quat_angle(leg_turn[i]) < 1.0e-4f) continue;
+                auto drop_for = [&](const LLQuaternion& q)
+                {
+                    F32 drop = 0.f;
+                    for (S32 k = 0; k < 3; ++k)
+                    {
+                        if (!leg_have[i][k]) continue;
+                        const LLVector3 ends[2] = { leg_caps[i][k].a, leg_caps[i][k].b };
+                        for (const LLVector3& p : ends)
+                        {
+                            drop = llmax(drop, p.mV[VZ] - ql_turn_point(p, hip_at[i], q).mV[VZ]);
+                        }
+                    }
+                    return drop;
+                };
+                if (drop_for(leg_turn[i]) <= 0.02f) continue;
+                F32 lo = 0.f, hi = 1.f;
+                for (S32 step = 0; step < 8; ++step)
+                {
+                    const F32 mid = 0.5f * (lo + hi);
+                    if (drop_for(slerp(mid, LLQuaternion::DEFAULT, leg_turn[i])) <= 0.02f) lo = mid; else hi = mid;
+                }
+                leg_turn[i] = slerp(lo, LLQuaternion::DEFAULT, leg_turn[i]);
             }
         }
         const F32 leg_dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
