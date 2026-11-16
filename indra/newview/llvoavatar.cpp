@@ -7747,6 +7747,34 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
         look_ok = own != LOOKAT_TARGET_FREELOOK && own != LOOKAT_TARGET_MOUSELOOK && own != LOOKAT_TARGET_SELECT
                && own != LOOKAT_TARGET_FOCUS && own != LOOKAT_TARGET_RESPOND && own != LOOKAT_TARGET_CONVERSATION;
     }
+    // Sharing a pose: the animation owns the head (couple and intimate animations place
+    // heads on purpose -- a kiss, looking at each other -- and looking around broke them;
+    // user, 2026-11-16). Shared = sitting on the same furniture as someone else (same root
+    // object), or someone's head within 70 cm of this one (hugs, kisses, cuddles standing).
+    if (look_ok)
+    {
+        LLViewerObject* seat = getParent() ? static_cast<LLViewerObject*>(getParent()) : nullptr;
+        LLViewerObject* furniture = seat ? seat->getRootEdit() : nullptr;
+        LLJoint* my_head = mQLBodyIK[HEAD].joint;
+        const LLVector3 my_head_at = my_head->getWorldPosition();
+        for (LLCharacter* character : LLCharacter::sInstances)
+        {
+            LLVOAvatar* av = static_cast<LLVOAvatar*>(character);
+            if (av == this || av->isDead() || av->isUIAvatar() || av->mIsDummy) continue;
+            if (furniture && av->getParent()
+                && static_cast<LLViewerObject*>(av->getParent())->getRootEdit() == furniture)
+            {
+                look_ok = false;
+                break;
+            }
+            LLJoint* their_head = av->getJoint("mHead");
+            if (their_head && (their_head->getWorldPosition() - my_head_at).length() < 0.7f)
+            {
+                look_ok = false;
+                break;
+            }
+        }
+    }
     LLVector3 look_at;
     const bool looking = look_ok && qlLookTarget(look_at);
     if (!look_ok) mQLLook = QLLook();
