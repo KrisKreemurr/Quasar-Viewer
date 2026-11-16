@@ -12918,6 +12918,50 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarLookAround</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar look around (only on this screen, nothing is sent): the heads and eyes of avatars near you follow the people near them -- a face for 2-5 s (longer while they talk), now and then a short body glance, sometimes nobody -- weighted by closeness, talking or typing, and looking back. Works over AOs.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarLookAroundSelf</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar look around for your own avatar too (your own look-at -- free camera, mouselook, clicking, focusing -- always wins).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarLookAroundDistance</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar look around: how far away people still draw a glance (metres).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>8.0</real>
+  </map>
+  <key>QuasarLookAroundBody</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar look around: the chance a pick is a short glance at a body (chest) instead of a face, for people within 3 m (0..1).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.15</real>
+  </map>
   <key>QuasarFullBodyIK</key>
   <map>
     <key>Comment</key>

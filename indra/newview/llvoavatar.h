@@ -913,13 +913,25 @@ private:
         LLQuaternion correction;        // smoothed, in the parent's frame
         bool         applied = false;
     };
-    static constexpr S32 QL_BODY_IK_JOINTS = 9;
+    static constexpr S32 QL_BODY_IK_JOINTS = 11;
     QLBodyIKJoint mQLBodyIK[QL_BODY_IK_JOINTS];
     bool        mQLBodyIKApplied = false;
     bool        mQLBodyIKTracking = false;
     F32         mQLBodyIKRise = 0.f;   // how far the chest was lifted this frame (debug)
     LLVector3   mQLBodyIKTurn[QL_BODY_IK_JOINTS];   // last frame's answer (world turns), to start from
+    U32         mQLBodyIKSolvedFrame = 0;           // when it was last solved (the shared budget)
     void        qlBodyIKApply(bool visible);
+    // QUASAR LOOK AROUND (QuasarLookAround): who this avatar's head and eyes follow -- a
+    // nearby face, now and then a short glance at a body, or nobody (ahead) -- and until when.
+    struct QLLook
+    {
+        LLUUID target;            // null: looking ahead
+        S32    part = 0;          // 0 face, 1 chest
+        F64    until = 0.0;       // when to pick again (gFrameTimeSeconds)
+        bool   glanced = false;   // the last pick was a body glance
+    };
+    QLLook      mQLLook;
+    bool        qlLookTarget(LLVector3& at);
     bool        mQLHandFootApplied = false;
     bool        mQLHandFootTracking = false;
     F32         mQLFootIKDropApplied = 0.f;   // the pelvis drop foot IK wrote this frame (m, <= 0)

@@ -6562,11 +6562,12 @@ namespace
     };
     struct QLIKGoal
     {
-        enum Type { POINT, DIRECTION } type = POINT;
+        enum Type { POINT, DIRECTION, AIM } type = POINT;
         S32       node = 0;
         LLVector3 point;                  // POINT: a world point riding with the node (as animated)
-        LLVector3 dir;                    // DIRECTION: a world direction riding with the node
-        LLVector3 target;                 // where the point should be / the direction it should have
+        LLVector3 dir;                    // DIRECTION / AIM: a world direction riding with the node
+        LLVector3 target;                 // where the point should be / the direction it should have /
+                                          // AIM: the point it should point at, from where the node ends up
         F32       weight = 1.f;
     };
     constexpr S32 QL_IK_NODES = 16;
@@ -6598,6 +6599,13 @@ namespace
             if (node < 0 || goal_count >= QL_IK_GOALS) return;
             QLIKGoal& g = goals[goal_count++];
             g.type = QLIKGoal::DIRECTION; g.node = node; g.dir = dir; g.target = target; g.weight = weight;
+        }
+        // Points the node's direction `dir` at a world point (eyes, a head looking at someone).
+        void addAim(S32 node, const LLVector3& dir, const LLVector3& at, F32 weight)
+        {
+            if (node < 0 || goal_count >= QL_IK_GOALS) return;
+            QLIKGoal& g = goals[goal_count++];
+            g.type = QLIKGoal::AIM; g.node = node; g.dir = dir; g.target = at; g.weight = weight;
         }
     };
 
@@ -6634,9 +6642,24 @@ namespace
         {
             const QLIKGoal& goal = rig.goals[g];
             const F32 w = sqrtf(llmax(goal.weight, 0.f));
-            const LLVector3 now = goal.type == QLIKGoal::POINT ? goal.point * C[goal.node] + t[goal.node]
-                                                               : goal.dir * C[goal.node];
-            const LLVector3 miss = (now - goal.target) * w;
+            LLVector3 miss;
+            if (goal.type == QLIKGoal::POINT)
+            {
+                miss = goal.point * C[goal.node] + t[goal.node] - goal.target;
+            }
+            else if (goal.type == QLIKGoal::DIRECTION)
+            {
+                miss = goal.dir * C[goal.node] - goal.target;
+            }
+            else
+            {
+                // From where the node itself ends up (its turn carries it with its parents).
+                const LLVector3 from = rig.nodes[goal.node].pos * C[goal.node] + t[goal.node];
+                LLVector3 want = goal.target - from;
+                const F32 len = want.length();
+                miss = len > 1.0e-4f ? goal.dir * C[goal.node] - want * (1.f / len) : LLVector3::zero;
+            }
+            miss *= w;
             r[n++] = miss.mV[VX]; r[n++] = miss.mV[VY]; r[n++] = miss.mV[VZ];
         }
         for (S32 j = 0; j < rig.node_count; ++j)
@@ -6699,7 +6722,7 @@ namespace
                 b[a] = -g;
             }
             bool improved = false;
-            for (S32 tries = 0; tries < 4 && !improved; ++tries)
+            for (S32 tries = 0; tries < 8 && !improved; ++tries)
             {
                 static thread_local F32 L[MAXP][MAXP];
                 bool ok = true;
@@ -6753,7 +6776,7 @@ namespace
                 }
                 else
                 {
-                    lambda *= 4.f;
+                    lambda *= 10.f;   // a shorter, safer step (an aim can overshoot far)
                 }
             }
             if (!improved) break;
@@ -7469,6 +7492,182 @@ F32 LLVOAvatar::qlBodyAreaScale(const std::string& volume)
 }
 
 //-----------------------------------------------------------------------------
+// QUASAR LOOK AROUND (QuasarLookAround, on; only on this screen -- nothing is sent).
+// SL's head turning is a low-priority motion that most AOs override, so heads stare ahead.
+// Here each corrected avatar's head and eyes follow the people near it, the way people's
+// attention drifts: a face for 2-5 s (up to 8 while they talk), now and then a short
+// glance at a body (0.6-1.5 s, then usually back to the face; QuasarLookAroundBody, 15 %,
+// within 3 m), sometimes nobody (ahead, 1.5-4 s). Who: people in front of it (within
+// 100 degrees of its facing) and within QuasarLookAroundDistance (8 m), weighted by how
+// close (full within 1.2 m, the distance people talk at; a third by 3.5 m; little past
+// that), talking or typing, and looking back at it; the pick is weighted random, so it is
+// mostly the best one but not always. Returns false for ahead; `at` is the point to look at.
+//-----------------------------------------------------------------------------
+bool LLVOAvatar::qlLookTarget(LLVector3& at)
+{
+    static LLCachedControl<F32> s_dist(gSavedSettings, "QuasarLookAroundDistance", 8.f);
+    static LLCachedControl<F32> s_body(gSavedSettings, "QuasarLookAroundBody", 0.15f);
+    const F32 max_dist = llclamp((F32)s_dist, 1.f, 30.f);
+    const F64 now = gFrameTimeSeconds;
+    LLJoint* my_head = getJoint("mHead");
+    if (!my_head || !mRoot) return false;
+    const LLVector3 head = my_head->getWorldPosition();
+    LLVector3 facing = LLVector3::x_axis * mRoot->getWorldRotation();
+    facing.mV[VZ] = 0.f;
+    if (facing.length() < 0.01f) return false;
+    facing.normVec();
+
+    auto in_front = [&](const LLVector3& p)
+    {
+        LLVector3 d = p - head;
+        d.mV[VZ] = 0.f;
+        const F32 len = d.length();
+        return len < 0.05f || (d * facing) / len > cosf(100.f * DEG_TO_RAD);
+    };
+    auto face_of = [](LLVOAvatar* av, LLVector3& p)
+    {
+        LLJoint* l = av->getJoint("mEyeLeft");
+        LLJoint* r = av->getJoint("mEyeRight");
+        if (l && r) { p = (l->getWorldPosition() + r->getWorldPosition()) * 0.5f; return true; }
+        LLJoint* h = av->getJoint("mHead");
+        if (!h) return false;
+        p = h->getWorldPosition();
+        return true;
+    };
+    auto chest_of = [](LLVOAvatar* av, LLVector3& p)
+    {
+        // Between the breasts' volumes (their sliders and fitted mesh move them), else the chest.
+        LLVector3 sum;
+        S32 found = 0;
+        for (S32 v = 0; v < av->mNumCollisionVolumes; ++v)
+        {
+            const std::string& name = av->mCollisionVolumes[v].getName();
+            if (name == "LEFT_PEC" || name == "RIGHT_PEC")
+            {
+                av->mCollisionVolumes[v].updateWorldMatrix();
+                sum += av->mCollisionVolumes[v].getWorldPosition();
+                ++found;
+            }
+        }
+        if (found == 2) { p = sum * 0.5f; return true; }
+        LLJoint* c = av->getJoint("mChest");
+        if (!c) return false;
+        p = c->getWorldPosition();
+        return true;
+    };
+    auto find = [this](const LLUUID& id) -> LLVOAvatar*
+    {
+        if (id.isNull()) return nullptr;
+        for (LLCharacter* character : LLCharacter::sInstances)
+        {
+            LLVOAvatar* av = static_cast<LLVOAvatar*>(character);
+            if (av != this && av->getID() == id && !av->isDead()) return av;
+        }
+        return nullptr;
+    };
+    auto point_of = [&](LLVOAvatar* av, S32 part, LLVector3& p)
+    {
+        return part == 1 ? chest_of(av, p) : face_of(av, p);
+    };
+
+    // Keep the current pick while it lasts and still makes sense.
+    if (now < mQLLook.until)
+    {
+        if (mQLLook.target.isNull()) return false;
+        LLVOAvatar* av = find(mQLLook.target);
+        LLVector3 p;
+        if (av && point_of(av, mQLLook.part, p) && (p - head).length() < max_dist * 1.2f && in_front(p))
+        {
+            at = p;
+            return true;
+        }
+    }
+
+    // A new pick. Right after a body glance, usually back to that face.
+    const bool was_glance = mQLLook.glanced;
+    const LLUUID previous = mQLLook.target;
+    mQLLook.glanced = false;
+    if (was_glance && ll_frand() < 0.7f)
+    {
+        LLVOAvatar* av = find(previous);
+        LLVector3 p;
+        if (av && face_of(av, p) && (p - head).length() < max_dist && in_front(p))
+        {
+            mQLLook.part = 0;
+            mQLLook.until = now + 1.5 + 2.5 * ll_frand();
+            at = p;
+            return true;
+        }
+    }
+    struct Candidate { LLVOAvatar* av; F32 weight; F32 dist; bool talking; };
+    std::vector<Candidate> candidates;
+    F32 total = 0.f;
+    const bool voice = LLVoiceClient::instanceExists();
+    for (LLCharacter* character : LLCharacter::sInstances)
+    {
+        LLVOAvatar* av = static_cast<LLVOAvatar*>(character);
+        if (av == this || av->isDead() || av->isUIAvatar() || av->mIsDummy || av->isControlAvatar()) continue;
+        LLVector3 p;
+        if (!face_of(av, p)) continue;
+        const F32 dist = (p - head).length();
+        if (dist > max_dist || !in_front(p)) continue;
+        // Closeness: full within 1.2 m, a third by 3.5 m, a twentieth at the far edge.
+        F32 near_w = dist < 1.2f ? 1.f
+                   : (dist < 3.5f ? 1.f - 0.65f * (dist - 1.2f) / 2.3f
+                                  : 0.35f - 0.30f * (dist - 3.5f) / llmax(max_dist - 3.5f, 0.1f));
+        near_w = llmax(near_w, 0.05f);
+        const bool talking = (voice && LLVoiceClient::getInstance()->getIsSpeaking(av->getID())) || av->isTyping();
+        // Looking back at this avatar (their head's forward within 25 degrees of us).
+        bool looking_back = false;
+        if (LLJoint* their_head = av->getJoint("mHead"))
+        {
+            LLVector3 to_me = head - their_head->getWorldPosition();
+            const F32 len = to_me.length();
+            if (len > 0.05f)
+            {
+                const LLVector3 their_fwd = LLVector3::x_axis * their_head->getWorldRotation();
+                looking_back = (their_fwd * to_me) / len > cosf(25.f * DEG_TO_RAD);
+            }
+        }
+        F32 weight = near_w * (1.f + (talking ? 2.f : 0.f) + (looking_back ? 1.f : 0.f));
+        if (av->getID() == previous) weight *= 0.6f;   // attention drifts on
+        candidates.push_back({ av, weight, dist, talking });
+        total += weight;
+    }
+    // Nobody about, or by chance (more often when no one draws much attention): ahead.
+    const F32 ahead_chance = 0.2f + 0.4f * (1.f - llmin(total, 1.f));
+    if (candidates.empty() || ll_frand() < ahead_chance)
+    {
+        mQLLook.target.setNull();
+        mQLLook.part = 0;
+        mQLLook.until = now + 1.5 + 2.5 * ll_frand();
+        return false;
+    }
+    F32 roll = ll_frand() * total;
+    const Candidate* pick = &candidates.back();
+    for (const Candidate& c : candidates)
+    {
+        roll -= c.weight;
+        if (roll <= 0.f) { pick = &c; break; }
+    }
+    mQLLook.target = pick->av->getID();
+    mQLLook.part = 0;
+    F64 hold = 2.0 + 3.0 * ll_frand();
+    if (pick->talking) hold += 3.0 * ll_frand();
+    LLVector3 p;
+    if (pick->dist < 3.f && ll_frand() < llclamp((F32)s_body, 0.f, 1.f) && chest_of(pick->av, p))
+    {
+        mQLLook.part = 1;
+        mQLLook.glanced = true;
+        hold = 0.6 + 0.9 * ll_frand();
+    }
+    mQLLook.until = now + hold;
+    if (!point_of(pick->av, mQLLook.part, p)) return false;
+    at = p;
+    return true;
+}
+
+//-----------------------------------------------------------------------------
 // QUASAR FULL-BODY IK: THE CORE PASS (QuasarFullBodyIK, QuasarBodyIKSlopeTilt).
 // Runs on the finished animation before foot IK and hands as feet, on the joints none of
 // them moves: the pelvis, the spine (mTorso, mChest), the neck and head -- plus the hips
@@ -7495,8 +7694,11 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     const F32 strength = llclamp((F32)s_strength, 0.f, 1.f);
 
     static const char* const NAMES[QL_BODY_IK_JOINTS] = { "mPelvis", "mTorso", "mChest", "mNeck", "mHead",
-                                                          "mHipLeft", "mHipRight", "mShoulderLeft", "mShoulderRight" };
-    enum { PELVIS, TORSO, CHEST, NECK, HEAD, HIP_L, HIP_R, SHOULDER_L, SHOULDER_R };
+                                                          "mHipLeft", "mHipRight", "mShoulderLeft", "mShoulderRight",
+                                                          "mEyeLeft", "mEyeRight" };
+    enum { PELVIS, TORSO, CHEST, NECK, HEAD, HIP_L, HIP_R, SHOULDER_L, SHOULDER_R, EYE_L, EYE_R };
+    static LLCachedControl<bool> s_look(gSavedSettings, "QuasarLookAround", true);
+    static LLCachedControl<bool> s_look_self(gSavedSettings, "QuasarLookAroundSelf", true);
     for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
     {
         if (!mQLBodyIK[k].joint) mQLBodyIK[k].joint = getJoint(NAMES[k]);
@@ -7505,14 +7707,28 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     for (const QLBodyIKJoint& j : mQLBodyIK) joints_ok = joints_ok && j.joint != nullptr;
 
     qlFootIKRank();
-    const F32 four_legged = 0.5f * (mQLHandFoot[0].fade + mQLHandFoot[1].fade);
-    const bool wanted = s_on && s_tilt && s_foot_on && s_hands_on && mQLFootIKSelected && visible && strength > 0.f
-        && joints_ok && mRoot && getRegion() && !isSitting() && !getParent() && !mInAir
+    const bool base_ok = s_on && mQLFootIKSelected && visible && joints_ok && mRoot && getRegion()
         && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
         && !FSPoserAnimator::isAvatarPosedLocally(this);
+    const bool tilt_ok = base_ok && s_tilt && s_foot_on && s_hands_on && strength > 0.f
+        && !isSitting() && !getParent() && !mInAir;
+    const F32 four_legged = tilt_ok ? 0.5f * (mQLHandFoot[0].fade + mQLHandFoot[1].fade) : 0.f;
+    // Looking around: anyone corrected, sitting too. Your own avatar only while you aren't
+    // looking at something yourself (free camera, mouselook, a click, a focus, a reply):
+    // then SL's own look-at turns your head as always.
+    bool look_ok = base_ok && s_look && (!isSelf() || s_look_self);
+    if (look_ok && isSelf())
+    {
+        const ELookAtType own = gAgentCamera.getLookAtType();
+        look_ok = own != LOOKAT_TARGET_FREELOOK && own != LOOKAT_TARGET_MOUSELOOK && own != LOOKAT_TARGET_SELECT
+               && own != LOOKAT_TARGET_FOCUS && own != LOOKAT_TARGET_RESPOND && own != LOOKAT_TARGET_CONVERSATION;
+    }
+    LLVector3 look_at;
+    const bool looking = look_ok && qlLookTarget(look_at);
+    if (!look_ok) mQLLook = QLLook();
     bool holding = false;   // a correction still easing out
     for (const QLBodyIKJoint& j : mQLBodyIK) holding = holding || ql_quat_angle(j.correction) > 0.01f * DEG_TO_RAD;
-    if (!wanted || (four_legged < 0.01f && !holding))
+    if (!base_ok || (four_legged < 0.01f && !looking && !holding))
     {
         mQLBodyIKTracking = false;
         for (QLBodyIKJoint& j : mQLBodyIK) j.correction = LLQuaternion::DEFAULT;
@@ -7534,12 +7750,16 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     }
 
     // How much higher the ground under the chest is than under the pelvis.
-    F32 pelvis_ground = pos[PELVIS].mV[VZ], chest_ground = pos[CHEST].mV[VZ];
-    LLVector3 normal;
-    qlGroundUnder(pos[PELVIS], 0.5f, 3.f, pelvis_ground, normal);
-    chest_ground = pelvis_ground;
-    qlGroundUnder(pos[CHEST], 0.5f, 3.f, chest_ground, normal);
-    const F32 measured = chest_ground - pelvis_ground;
+    F32 measured = 0.f;
+    if (four_legged >= 0.01f)
+    {
+        F32 pelvis_ground = pos[PELVIS].mV[VZ], chest_ground = pos[CHEST].mV[VZ];
+        LLVector3 normal;
+        qlGroundUnder(pos[PELVIS], 0.5f, 3.f, pelvis_ground, normal);
+        chest_ground = pelvis_ground;
+        qlGroundUnder(pos[CHEST], 0.5f, 3.f, chest_ground, normal);
+        measured = chest_ground - pelvis_ground;
+    }
     const F32 dz = llmax(0.f, (F32)s_dead_zone);
     const F32 step = dz > 0.f ? measured * ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) : measured;
     // A drop past what legs could take (a ledge) is not followed.
@@ -7550,26 +7770,57 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     // The rig: each joint under the nearest rig joint above it.
     QLIKRig rig;
     S32 node[QL_BODY_IK_JOINTS];
-    static const F32 STIFF[QL_BODY_IK_JOINTS] = { 1.f, 2.f, 2.f, 1.f, 1.f, 0.2f, 0.2f, 0.2f, 0.2f };
-    static const F32 LIMIT[QL_BODY_IK_JOINTS] = { 32.f, 20.f, 20.f, 40.f, 40.f, 35.f, 35.f, 35.f, 35.f };
+    static const F32 STIFF[QL_BODY_IK_JOINTS] = { 1.f, 2.f, 2.f, 1.f, 1.f, 0.2f, 0.2f, 0.2f, 0.2f, 0.05f, 0.05f };
+    static const F32 LIMIT[QL_BODY_IK_JOINTS] = { 32.f, 20.f, 20.f, 40.f, 40.f, 35.f, 35.f, 35.f, 35.f, 25.f, 25.f };
+    const bool tilting = four_legged >= 0.01f;
+    // Only looking (no slope): the pelvis stays put, so the hips and shoulders needn't be
+    // solved (a cheaper rig: 7 joints instead of 11); the eyes only while looking.
+    bool used[QL_BODY_IK_JOINTS];
     for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
     {
+        const bool limb = k == HIP_L || k == HIP_R || k == SHOULDER_L || k == SHOULDER_R;
+        const bool eye = k == EYE_L || k == EYE_R;
+        used[k] = (!limb || tilting) && (!eye || looking);
+        node[k] = -1;
+    }
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
+    {
+        if (!used[k]) continue;
         S32 parent = -1;
         for (LLJoint* up = mQLBodyIK[k].joint->getParent(); up && parent < 0; up = up->getParent())
         {
             for (S32 m = 0; m < k; ++m)
             {
-                if (mQLBodyIK[m].joint == up) { parent = node[m]; break; }
+                if (used[m] && mQLBodyIK[m].joint == up) { parent = node[m]; break; }
             }
         }
-        node[k] = rig.addNode(pos[k], rot[k], parent, STIFF[k], LIMIT[k] * DEG_TO_RAD);
+        // Looking around turns the neck, head and eyes (and the chest a little), never the
+        // pelvis: it is only free to tilt for a slope.
+        // ... and the spine twists only a little for a big turn (stiffer than for a slope).
+        F32 stiffness = STIFF[k];
+        if (!tilting && k == PELVIS) stiffness = 50.f;
+        if (!tilting && (k == TORSO || k == CHEST)) stiffness = 7.f;
+        node[k] = rig.addNode(pos[k], rot[k], parent, stiffness, LIMIT[k] * DEG_TO_RAD);
     }
-    rig.addPoint(node[CHEST], pos[CHEST], pos[CHEST] + LLVector3(0.f, 0.f, rise), 300.f);
+    if (tilting) rig.addPoint(node[CHEST], pos[CHEST], pos[CHEST] + LLVector3(0.f, 0.f, rise), 300.f);
     const LLVector3 head_fwd = LLVector3::x_axis * rot[HEAD];
-    rig.addDirection(node[HEAD], head_fwd, head_fwd, 10.f);
+    if (looking)
+    {
+        // The head most of the way (the turn costs against the miss), the eyes the rest.
+        if ((look_at - pos[HEAD]).length() > 0.05f) rig.addAim(node[HEAD], head_fwd, look_at, 6.f);
+        for (S32 k = EYE_L; k <= EYE_R; ++k)
+        {
+            if ((look_at - pos[k]).length() > 0.05f) rig.addAim(node[k], LLVector3::x_axis * rot[k], look_at, 80.f);
+        }
+    }
+    else
+    {
+        rig.addDirection(node[HEAD], head_fwd, head_fwd, 10.f);
+    }
     static const S32 KEEP_POINTING[4] = { HIP_L, HIP_R, SHOULDER_L, SHOULDER_R };
     for (S32 k : KEEP_POINTING)
     {
+        if (!used[k]) continue;
         const LLVector3 x = LLVector3::x_axis * rot[k], z = LLVector3::z_axis * rot[k];
         rig.addDirection(node[k], x, x, 30.f);
         rig.addDirection(node[k], z, z, 30.f);
@@ -7586,27 +7837,37 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     }
     if (mQLBodyIKTracking)
     {
-        for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) rig.turn[node[k]] = mQLBodyIKTurn[k];
+        for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) if (used[k]) rig.turn[node[k]] = mQLBodyIKTurn[k];
     }
-    if (isSelf() || s_budget_used < 0.001 || !mQLBodyIKTracking)
+    // ... but anyone not solved for 3 frames gets a turn anyway, so the budget can't leave
+    // the same avatars frozen while others always go first.
+    const U32 frame = LLFrameTimer::getFrameCount();
+    const bool overdue = frame - mQLBodyIKSolvedFrame > 3;
+    if (isSelf() || s_budget_used < 0.001 || !mQLBodyIKTracking || overdue)
     {
         const F64 started = LLTimer::getTotalSeconds();
         ql_ik_solve(rig, mQLBodyIKTracking ? 4 : 8);
+        mQLBodyIKSolvedFrame = frame;
         if (!isSelf()) s_budget_used += LLTimer::getTotalSeconds() - started;
     }
-    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) mQLBodyIKTurn[k] = rig.turn[node[k]];
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) mQLBodyIKTurn[k] = used[k] ? rig.turn[node[k]] : LLVector3::zero;
 
     // Each joint's turn into its parent's frame, eased like foot IK (about a tenth of a
     // second), then written.
+    // Eased like foot IK (about a tenth of a second); for a change of gaze the eyes jump
+    // (about 50 ms) and the neck and head follow (about a third of a second).
     const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
-    const F32 follow = mQLBodyIKTracking ? 1.f - expf(-dt * 12.f) : 1.f;
+    const bool fresh = !mQLBodyIKTracking;
     mQLBodyIKTracking = true;
     QLAnimApplyScope scope;
     F32 shown[QL_BODY_IK_JOINTS] = {};
     for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
     {
         QLBodyIKJoint& j = mQLBodyIK[k];
-        LLQuaternion target = parent_rot[k] * ql_rot_quat(rig.turn[node[k]]) * ~parent_rot[k];
+        const F32 rate = (k == EYE_L || k == EYE_R) ? 20.f : ((k == NECK || k == HEAD) ? 7.f : 12.f);
+        const F32 follow = fresh ? 1.f : 1.f - expf(-dt * rate);
+        LLQuaternion target = used[k] ? parent_rot[k] * ql_rot_quat(rig.turn[node[k]]) * ~parent_rot[k]
+                                      : LLQuaternion::DEFAULT;   // not in the rig this frame: eases back
         target.normalize();
         j.correction = slerp(follow, j.correction, target);
         j.correction.normalize();
@@ -7625,8 +7886,10 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
         if (gFrameTimeSeconds >= s_next)
         {
             s_next = gFrameTimeSeconds + 0.5;
-            LL_INFOS("QuasarFootIK") << llformat("body ik: four-legged %.2f | chest ground %+.1fcm -> rise %+.1fcm | pelvis %.1f torso %.1f chest %.1f neck %.1f head %.1f deg",
-                four_legged, measured * 100.f, rise * 100.f, shown[PELVIS], shown[TORSO], shown[CHEST], shown[NECK], shown[HEAD]) << LL_ENDL;
+            LL_INFOS("QuasarFootIK") << llformat("body ik: four-legged %.2f | chest ground %+.1fcm -> rise %+.1fcm | pelvis %.1f torso %.1f chest %.1f neck %.1f head %.1f eyes %.1f deg | look %s",
+                four_legged, measured * 100.f, rise * 100.f, shown[PELVIS], shown[TORSO], shown[CHEST], shown[NECK], shown[HEAD],
+                0.5f * (shown[EYE_L] + shown[EYE_R]),
+                !looking ? "ahead" : (mQLLook.part == 1 ? "body glance" : "face")) << LL_ENDL;
         }
     }
 }

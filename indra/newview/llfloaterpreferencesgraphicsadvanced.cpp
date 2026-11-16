@@ -69,7 +69,7 @@ LLFloaterPreferenceGraphicsAdvanced::LLFloaterPreferenceGraphicsAdvanced(const L
         {
             void apply(const std::string& name, LLControlVariable* control) override
             {
-                static const char* const PREFIXES[] = { "QuasarFootIK", "QuasarBodyCollision", "QuasarSoftContact", "QuasarSoftLegs", "QuasarAvatarTags", "QuasarFullBodyIK", "QuasarBodyIK" };
+                static const char* const PREFIXES[] = { "QuasarFootIK", "QuasarBodyCollision", "QuasarSoftContact", "QuasarSoftLegs", "QuasarAvatarTags", "QuasarFullBodyIK", "QuasarBodyIK", "QuasarLookAround" };
                 if (!control) return;
                 for (const char* prefix : PREFIXES)
                 {

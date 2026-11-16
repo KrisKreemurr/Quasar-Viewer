@@ -776,6 +776,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="372" />
+          <check_box
+            control_name="QuasarLookAround"
+            enabled_control="QuasarFullBodyIK"
+            height="16"
+            label="Heads look at people nearby"
+            layout="topleft"
+            name="QuasarLookAround"
+            tool_tip="Only on your screen: heads and eyes follow nearby people the way attention drifts -- a face for a few seconds, now and then a short glance, sometimes nobody. Works over AOs. Your own looking (camera, clicks) always wins."
+            width="300"
+            left="400"
+            top="394" />
           <slider
             control_name="QuasarFootIKDistance"
             enabled_control="QuasarFootIKOthers"
