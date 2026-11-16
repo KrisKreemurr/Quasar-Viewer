@@ -765,6 +765,17 @@ Only used with a DLSS upscaling mode.
             width="300"
             left="400"
             top="350" />
+          <check_box
+            control_name="QuasarBodyIKSlopeTilt"
+            enabled_control="QuasarFootIKHands"
+            height="16"
+            label="Body follows slopes on all fours"
+            layout="topleft"
+            name="QuasarBodyIKSlopeTilt"
+            tool_tip="Four-legged avatars and crawling: the body tilts up or down along a hill instead of staying level, the legs keep pointing down and the head keeps looking ahead."
+            width="300"
+            left="400"
+            top="372" />
           <slider
             control_name="QuasarFootIKDistance"
             enabled_control="QuasarFootIKOthers"

@@ -904,6 +904,22 @@ private:
         LLVector3    normal = LLVector3::z_axis;
     };
     QLHandFoot  mQLHandFoot[2];
+    // QUASAR FULL-BODY IK, the core pass (llvoavatar.cpp): pelvis, spine, neck, head, hips
+    // and shoulders, solved together before foot IK (first use: four-legged slope tilt).
+    struct QLBodyIKJoint
+    {
+        LLJoint*     joint = nullptr;
+        LLQuaternion pre, set;          // the local before / what was written
+        LLQuaternion correction;        // smoothed, in the parent's frame
+        bool         applied = false;
+    };
+    static constexpr S32 QL_BODY_IK_JOINTS = 9;
+    QLBodyIKJoint mQLBodyIK[QL_BODY_IK_JOINTS];
+    bool        mQLBodyIKApplied = false;
+    bool        mQLBodyIKTracking = false;
+    F32         mQLBodyIKRise = 0.f;   // how far the chest was lifted this frame (debug)
+    LLVector3   mQLBodyIKTurn[QL_BODY_IK_JOINTS];   // last frame's answer (world turns), to start from
+    void        qlBodyIKApply(bool visible);
     bool        mQLHandFootApplied = false;
     bool        mQLHandFootTracking = false;
     F32         mQLFootIKDropApplied = 0.f;   // the pelvis drop foot IK wrote this frame (m, <= 0)

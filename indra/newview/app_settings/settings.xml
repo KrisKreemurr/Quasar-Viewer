@@ -12918,6 +12918,28 @@
     <key>Value</key>
     <integer>0</integer>
   </map>
+  <key>QuasarFullBodyIK</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar full-body IK: the core pass (pelvis, spine, neck, head) solved together before foot IK. Off: none of its uses run.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>QuasarBodyIKSlopeTilt</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar full-body IK: four-legged avatars and crawling tilt along a slope (the chest lifted by the ground under it minus the ground under the pelvis), legs kept pointing down, head kept looking ahead.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarFootIKHands</key>
   <map>
     <key>Comment</key>

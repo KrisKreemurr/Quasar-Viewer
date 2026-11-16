@@ -5178,6 +5178,7 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     if (!LLCleanAnimStore::instance().gpuDriven(this))
     {
         // Quasar foot IK corrects the finished pose (CPU path only: the IK writes joints).
+        qlBodyIKApply(visible);   // the core (pelvis, spine, head) first: the limbs reach from it
         qlFootIKApply(visible);
         qlHandFootApply(visible);
         qlBodyCollisionApply(visible);
@@ -5418,24 +5419,39 @@ void LLVOAvatar::qlFootIKRestore()
             if (wr && wr->getRotation() == hand.wrist_set) wr->setRotation(hand.wrist_pre);
         }
     }
-    if (!mQLFootIKApplied) return;
-    mQLFootIKApplied = false;
-    QLAnimApplyScope scope;
-    // Only where the joint still holds what the IK wrote: a value something else wrote
-    // since (an animation, a reset) is newer than the animation's we kept.
-    if (mPelvisp && mPelvisp->getPosition() == mQLFootIKPelvisSet)
+    if (mQLFootIKApplied)
     {
-        mPelvisp->setPosition(mQLFootIKPelvisPre);
+        mQLFootIKApplied = false;
+        QLAnimApplyScope scope;
+        // Only where the joint still holds what the IK wrote: a value something else wrote
+        // since (an animation, a reset) is newer than the animation's we kept.
+        if (mPelvisp && mPelvisp->getPosition() == mQLFootIKPelvisSet)
+        {
+            mPelvisp->setPosition(mQLFootIKPelvisPre);
+        }
+        LLJoint* hips[2]   = { mHipLeftp, mHipRightp };
+        LLJoint* knees[2]  = { mKneeLeftp, mKneeRightp };
+        LLJoint* ankles[2] = { mAnkleLeftp, mAnkleRightp };
+        for (S32 i = 0; i < 2; ++i)
+        {
+            QLFootIKLeg& leg = mQLFootIKLeg[i];
+            if (hips[i] && hips[i]->getRotation() == leg.hip_set)       hips[i]->setRotation(leg.hip_pre);
+            if (knees[i] && knees[i]->getRotation() == leg.knee_set)    knees[i]->setRotation(leg.knee_pre);
+            if (ankles[i] && ankles[i]->getRotation() == leg.ankle_set) ankles[i]->setRotation(leg.ankle_pre);
+        }
     }
-    LLJoint* hips[2]   = { mHipLeftp, mHipRightp };
-    LLJoint* knees[2]  = { mKneeLeftp, mKneeRightp };
-    LLJoint* ankles[2] = { mAnkleLeftp, mAnkleRightp };
-    for (S32 i = 0; i < 2; ++i)
+    // The full-body core (written before foot IK, so put back after it: foot IK's "pre" on
+    // the hips is what the core wrote).
+    if (mQLBodyIKApplied)
     {
-        QLFootIKLeg& leg = mQLFootIKLeg[i];
-        if (hips[i] && hips[i]->getRotation() == leg.hip_set)       hips[i]->setRotation(leg.hip_pre);
-        if (knees[i] && knees[i]->getRotation() == leg.knee_set)    knees[i]->setRotation(leg.knee_pre);
-        if (ankles[i] && ankles[i]->getRotation() == leg.ankle_set) ankles[i]->setRotation(leg.ankle_pre);
+        mQLBodyIKApplied = false;
+        QLAnimApplyScope scope;
+        for (QLBodyIKJoint& j : mQLBodyIK)
+        {
+            if (!j.applied) continue;
+            j.applied = false;
+            if (j.joint && j.joint->getRotation() == j.set) j.joint->setRotation(j.pre);
+        }
     }
 }
 
@@ -6525,6 +6541,226 @@ namespace
         return best;
     }
 
+    // QUASAR FULL-BODY IK (QuasarFullBodyIK). One solver for the whole skeleton: a set of
+    // joints (nodes), each able to turn a little from the animation, and goals for it to
+    // meet -- "this point of that joint goes here", "that joint keeps pointing this way" --
+    // each with a strength. The answer is the least change from the animation that meets
+    // the goals best: every turn costs (a joint's stiffness: the spine more than the pelvis)
+    // and every missed goal costs (its strength), and the lowest total wins (damped least
+    // squares, a few steps). No goals: no change. Joints turn within their limits.
+    // A node's turn is a world rotation about where the animation put it, applied before
+    // its parents' (the parents then carry it along) -- the same order the arm fixes use,
+    // so a node's local write is local x (P x turn x ~P), P = its parent's world rotation as
+    // animated.
+    struct QLIKNode
+    {
+        LLVector3    pos;                 // world, as animated
+        LLQuaternion rot;                 // world, as animated
+        S32          parent = -1;         // the nearest node above it (-1: none)
+        F32          stiffness = 1.f;     // cost of turning it, per radian squared
+        F32          max_angle = 0.5f;    // radians
+    };
+    struct QLIKGoal
+    {
+        enum Type { POINT, DIRECTION } type = POINT;
+        S32       node = 0;
+        LLVector3 point;                  // POINT: a world point riding with the node (as animated)
+        LLVector3 dir;                    // DIRECTION: a world direction riding with the node
+        LLVector3 target;                 // where the point should be / the direction it should have
+        F32       weight = 1.f;
+    };
+    constexpr S32 QL_IK_NODES = 16;
+    constexpr S32 QL_IK_GOALS = 24;
+    struct QLIKRig
+    {
+        QLIKNode nodes[QL_IK_NODES];
+        S32      node_count = 0;
+        QLIKGoal goals[QL_IK_GOALS];
+        S32      goal_count = 0;
+        LLVector3 turn[QL_IK_NODES];      // the answer: each node's turn (rotation vector, world)
+
+        S32 addNode(const LLVector3& pos, const LLQuaternion& rot, S32 parent, F32 stiffness, F32 max_angle)
+        {
+            if (node_count >= QL_IK_NODES) return -1;
+            QLIKNode& n = nodes[node_count];
+            n.pos = pos; n.rot = rot; n.parent = parent; n.stiffness = stiffness; n.max_angle = max_angle;
+            turn[node_count] = LLVector3::zero;
+            return node_count++;
+        }
+        void addPoint(S32 node, const LLVector3& point, const LLVector3& target, F32 weight)
+        {
+            if (node < 0 || goal_count >= QL_IK_GOALS) return;
+            QLIKGoal& g = goals[goal_count++];
+            g.type = QLIKGoal::POINT; g.node = node; g.point = point; g.target = target; g.weight = weight;
+        }
+        void addDirection(S32 node, const LLVector3& dir, const LLVector3& target, F32 weight)
+        {
+            if (node < 0 || goal_count >= QL_IK_GOALS) return;
+            QLIKGoal& g = goals[goal_count++];
+            g.type = QLIKGoal::DIRECTION; g.node = node; g.dir = dir; g.target = target; g.weight = weight;
+        }
+    };
+
+    // Where everything goes for a set of turns: each node's carry (rotation C, offset t:
+    // a point x riding with the node goes to x*C + t). Nodes are listed parents first.
+    void ql_ik_carry(const QLIKRig& rig, const LLVector3* turn, LLQuaternion* C, LLVector3* t)
+    {
+        for (S32 j = 0; j < rig.node_count; ++j)
+        {
+            const QLIKNode& n = rig.nodes[j];
+            const LLQuaternion D = ql_rot_quat(turn[j]);
+            const LLVector3 d = n.pos - n.pos * D;   // the turn is about the node's own place
+            if (n.parent < 0)
+            {
+                C[j] = D;
+                t[j] = d;
+            }
+            else
+            {
+                C[j] = D * C[n.parent];
+                t[j] = d * C[n.parent] + t[n.parent];
+            }
+        }
+    }
+
+    // The residuals: the goals' misses (x sqrt(strength)) then the turns (x sqrt(stiffness)).
+    S32 ql_ik_residuals(const QLIKRig& rig, const LLVector3* turn, F32* r)
+    {
+        LLQuaternion C[QL_IK_NODES];
+        LLVector3 t[QL_IK_NODES];
+        ql_ik_carry(rig, turn, C, t);
+        S32 n = 0;
+        for (S32 g = 0; g < rig.goal_count; ++g)
+        {
+            const QLIKGoal& goal = rig.goals[g];
+            const F32 w = sqrtf(llmax(goal.weight, 0.f));
+            const LLVector3 now = goal.type == QLIKGoal::POINT ? goal.point * C[goal.node] + t[goal.node]
+                                                               : goal.dir * C[goal.node];
+            const LLVector3 miss = (now - goal.target) * w;
+            r[n++] = miss.mV[VX]; r[n++] = miss.mV[VY]; r[n++] = miss.mV[VZ];
+        }
+        for (S32 j = 0; j < rig.node_count; ++j)
+        {
+            const F32 s = sqrtf(llmax(rig.nodes[j].stiffness, 0.f));
+            r[n++] = turn[j].mV[VX] * s; r[n++] = turn[j].mV[VY] * s; r[n++] = turn[j].mV[VZ] * s;
+        }
+        return n;
+    }
+
+    void ql_ik_clamp(const QLIKRig& rig, LLVector3* turn)
+    {
+        for (S32 j = 0; j < rig.node_count; ++j)
+        {
+            const F32 a = turn[j].length();
+            if (a > rig.nodes[j].max_angle && a > 0.f) turn[j] *= rig.nodes[j].max_angle / a;
+        }
+    }
+
+    // Solves the rig (rig.turn starts as given, normally zero): `steps` damped Gauss-Newton
+    // steps with numeric slopes. Returns the final cost.
+    F32 ql_ik_solve(QLIKRig& rig, S32 steps)
+    {
+        constexpr S32 MAXP = QL_IK_NODES * 3;
+        constexpr S32 MAXR = QL_IK_GOALS * 3 + QL_IK_NODES * 3;
+        const S32 P = rig.node_count * 3;
+        if (P == 0 || rig.goal_count == 0) return 0.f;
+        static thread_local F32 J[MAXR][MAXP];
+        F32 r[MAXR], rp[MAXR];
+        ql_ik_clamp(rig, rig.turn);
+        S32 R = ql_ik_residuals(rig, rig.turn, r);
+        F32 cost = 0.f;
+        for (S32 k = 0; k < R; ++k) cost += r[k] * r[k];
+        if (cost < 1.0e-8f) return cost;   // every goal met already: nothing to change
+        F32 lambda = 1.0e-3f;
+        for (S32 it = 0; it < steps; ++it)
+        {
+            for (S32 p = 0; p < P; ++p)
+            {
+                LLVector3 trial[QL_IK_NODES];
+                for (S32 j = 0; j < rig.node_count; ++j) trial[j] = rig.turn[j];
+                const F32 eps = 1.0e-3f;
+                trial[p / 3].mV[p % 3] += eps;
+                ql_ik_residuals(rig, trial, rp);
+                for (S32 k = 0; k < R; ++k) J[k][p] = (rp[k] - r[k]) / eps;
+            }
+            // Normal equations (A = J'J, b = -J'r), solved by Cholesky with damping.
+            static thread_local F32 A[MAXP][MAXP];
+            F32 b[MAXP];
+            for (S32 a = 0; a < P; ++a)
+            {
+                for (S32 c = a; c < P; ++c)
+                {
+                    F32 sum = 0.f;
+                    for (S32 k = 0; k < R; ++k) sum += J[k][a] * J[k][c];
+                    A[a][c] = A[c][a] = sum;
+                }
+                F32 g = 0.f;
+                for (S32 k = 0; k < R; ++k) g += J[k][a] * r[k];
+                b[a] = -g;
+            }
+            bool improved = false;
+            for (S32 tries = 0; tries < 4 && !improved; ++tries)
+            {
+                static thread_local F32 L[MAXP][MAXP];
+                bool ok = true;
+                for (S32 a = 0; a < P && ok; ++a)
+                {
+                    for (S32 c = 0; c <= a; ++c)
+                    {
+                        F32 sum = A[a][c] + (a == c ? lambda * (1.f + A[a][a]) : 0.f);
+                        for (S32 k = 0; k < c; ++k) sum -= L[a][k] * L[c][k];
+                        if (a == c)
+                        {
+                            if (sum <= 1.0e-12f) { ok = false; break; }
+                            L[a][a] = sqrtf(sum);
+                        }
+                        else
+                        {
+                            L[a][c] = sum / L[c][c];
+                        }
+                    }
+                }
+                if (!ok) { lambda *= 10.f; continue; }
+                F32 y[MAXP], x[MAXP];
+                for (S32 a = 0; a < P; ++a)
+                {
+                    F32 sum = b[a];
+                    for (S32 k = 0; k < a; ++k) sum -= L[a][k] * y[k];
+                    y[a] = sum / L[a][a];
+                }
+                for (S32 a = P - 1; a >= 0; --a)
+                {
+                    F32 sum = y[a];
+                    for (S32 k = a + 1; k < P; ++k) sum -= L[k][a] * x[k];
+                    x[a] = sum / L[a][a];
+                }
+                LLVector3 trial[QL_IK_NODES];
+                for (S32 j = 0; j < rig.node_count; ++j)
+                {
+                    trial[j] = rig.turn[j] + LLVector3(x[j * 3], x[j * 3 + 1], x[j * 3 + 2]);
+                }
+                ql_ik_clamp(rig, trial);
+                ql_ik_residuals(rig, trial, rp);
+                F32 c = 0.f;
+                for (S32 k = 0; k < R; ++k) c += rp[k] * rp[k];
+                if (c < cost)
+                {
+                    for (S32 j = 0; j < rig.node_count; ++j) rig.turn[j] = trial[j];
+                    for (S32 k = 0; k < R; ++k) r[k] = rp[k];
+                    cost = c;
+                    lambda = llmax(lambda * 0.3f, 1.0e-6f);
+                    improved = true;
+                }
+                else
+                {
+                    lambda *= 4.f;
+                }
+            }
+            if (!improved) break;
+        }
+        return cost;
+    }
+
     // Quasar's own breast / butt / belly PHYSICS -- gravity, jiggle, squish, the
     // realistic-SL-physics changes and the physics tags -- is switched off, and its
     // settings taken out of Avatar motion (user, 2026-11-12: "keep the collision stuff",
@@ -7230,6 +7466,169 @@ F32 LLVOAvatar::qlBodyAreaScale(const std::string& volume)
     else if (volume == "PELVIS" || volume == "BUTT" || volume == "LOWER_BACK") scale = s_hips;
     else if (volume == "L_UPPER_LEG" || volume == "R_UPPER_LEG") scale = s_thighs;
     return llclamp(scale, 0.3f, 3.f);
+}
+
+//-----------------------------------------------------------------------------
+// QUASAR FULL-BODY IK: THE CORE PASS (QuasarFullBodyIK, QuasarBodyIKSlopeTilt).
+// Runs on the finished animation before foot IK and hands as feet, on the joints none of
+// them moves: the pelvis, the spine (mTorso, mChest), the neck and head -- plus the hips
+// and shoulders, only to keep the legs pointing where the animation had them. First use:
+// a four-legged avatar (or someone crawling) on a slope. The legs at both ends stay about
+// their own length above their own ground, so the body tilts along the hill; until now
+// each leg stretched to its patch of ground and a long body (an alligator) stayed level,
+// its front sunk into the hill. Here the chest is lifted by the ground under it minus the
+// ground under the pelvis (which the animation stands on), the pelvis tilting most and the
+// spine bending a little, while the hips and shoulders keep the legs pointing down and the
+// head keeps looking where it looked. Foot IK and hands as feet then put each foot on its
+// ground from there as before. Four-legged = how much hands as feet takes the hands as
+// front feet (last frame's, smoothed).
+//-----------------------------------------------------------------------------
+void LLVOAvatar::qlBodyIKApply(bool visible)
+{
+    static LLCachedControl<bool> s_on(gSavedSettings, "QuasarFullBodyIK", true);
+    static LLCachedControl<bool> s_tilt(gSavedSettings, "QuasarBodyIKSlopeTilt", true);
+    static LLCachedControl<bool> s_foot_on(gSavedSettings, "QuasarFootIK", true);
+    static LLCachedControl<bool> s_hands_on(gSavedSettings, "QuasarFootIKHands", true);
+    static LLCachedControl<F32>  s_strength(gSavedSettings, "QuasarFootIKStrength", 1.f);
+    static LLCachedControl<F32>  s_dead_zone(gSavedSettings, "QuasarFootIKDeadZone", 0.01f);
+    static LLCachedControl<bool> s_debug(gSavedSettings, "QuasarFootIKDebug", false);
+    const F32 strength = llclamp((F32)s_strength, 0.f, 1.f);
+
+    static const char* const NAMES[QL_BODY_IK_JOINTS] = { "mPelvis", "mTorso", "mChest", "mNeck", "mHead",
+                                                          "mHipLeft", "mHipRight", "mShoulderLeft", "mShoulderRight" };
+    enum { PELVIS, TORSO, CHEST, NECK, HEAD, HIP_L, HIP_R, SHOULDER_L, SHOULDER_R };
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
+    {
+        if (!mQLBodyIK[k].joint) mQLBodyIK[k].joint = getJoint(NAMES[k]);
+    }
+    bool joints_ok = true;
+    for (const QLBodyIKJoint& j : mQLBodyIK) joints_ok = joints_ok && j.joint != nullptr;
+
+    qlFootIKRank();
+    const F32 four_legged = 0.5f * (mQLHandFoot[0].fade + mQLHandFoot[1].fade);
+    const bool wanted = s_on && s_tilt && s_foot_on && s_hands_on && mQLFootIKSelected && visible && strength > 0.f
+        && joints_ok && mRoot && getRegion() && !isSitting() && !getParent() && !mInAir
+        && !isUIAvatar() && !mIsDummy && !isControlAvatar() && mSpecialRenderMode == 0
+        && !FSPoserAnimator::isAvatarPosedLocally(this);
+    bool holding = false;   // a correction still easing out
+    for (const QLBodyIKJoint& j : mQLBodyIK) holding = holding || ql_quat_angle(j.correction) > 0.01f * DEG_TO_RAD;
+    if (!wanted || (four_legged < 0.01f && !holding))
+    {
+        mQLBodyIKTracking = false;
+        for (QLBodyIKJoint& j : mQLBodyIK) j.correction = LLQuaternion::DEFAULT;
+        for (LLVector3& t : mQLBodyIKTurn) t = LLVector3::zero;
+        mQLBodyIKRise = 0.f;
+        return;
+    }
+
+    // The pose as animated.
+    mRoot->updateWorldMatrixChildren();
+    LLVector3 pos[QL_BODY_IK_JOINTS];
+    LLQuaternion rot[QL_BODY_IK_JOINTS], parent_rot[QL_BODY_IK_JOINTS];
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
+    {
+        LLJoint* j = mQLBodyIK[k].joint;
+        pos[k] = j->getWorldPosition();
+        rot[k] = j->getWorldRotation();
+        parent_rot[k] = j->getParent() ? j->getParent()->getWorldRotation() : LLQuaternion::DEFAULT;
+    }
+
+    // How much higher the ground under the chest is than under the pelvis.
+    F32 pelvis_ground = pos[PELVIS].mV[VZ], chest_ground = pos[CHEST].mV[VZ];
+    LLVector3 normal;
+    qlGroundUnder(pos[PELVIS], 0.5f, 3.f, pelvis_ground, normal);
+    chest_ground = pelvis_ground;
+    qlGroundUnder(pos[CHEST], 0.5f, 3.f, chest_ground, normal);
+    const F32 measured = chest_ground - pelvis_ground;
+    const F32 dz = llmax(0.f, (F32)s_dead_zone);
+    const F32 step = dz > 0.f ? measured * ql_smoothstep(0.5f * dz, 1.5f * dz, fabsf(measured)) : measured;
+    // A drop past what legs could take (a ledge) is not followed.
+    const F32 reach = 1.f - ql_smoothstep(0.6f, 0.9f, fabsf(measured));
+    const F32 rise = step * four_legged * strength * reach;
+    mQLBodyIKRise = rise;
+
+    // The rig: each joint under the nearest rig joint above it.
+    QLIKRig rig;
+    S32 node[QL_BODY_IK_JOINTS];
+    static const F32 STIFF[QL_BODY_IK_JOINTS] = { 1.f, 2.f, 2.f, 1.f, 1.f, 0.2f, 0.2f, 0.2f, 0.2f };
+    static const F32 LIMIT[QL_BODY_IK_JOINTS] = { 32.f, 20.f, 20.f, 40.f, 40.f, 35.f, 35.f, 35.f, 35.f };
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
+    {
+        S32 parent = -1;
+        for (LLJoint* up = mQLBodyIK[k].joint->getParent(); up && parent < 0; up = up->getParent())
+        {
+            for (S32 m = 0; m < k; ++m)
+            {
+                if (mQLBodyIK[m].joint == up) { parent = node[m]; break; }
+            }
+        }
+        node[k] = rig.addNode(pos[k], rot[k], parent, STIFF[k], LIMIT[k] * DEG_TO_RAD);
+    }
+    rig.addPoint(node[CHEST], pos[CHEST], pos[CHEST] + LLVector3(0.f, 0.f, rise), 300.f);
+    const LLVector3 head_fwd = LLVector3::x_axis * rot[HEAD];
+    rig.addDirection(node[HEAD], head_fwd, head_fwd, 10.f);
+    static const S32 KEEP_POINTING[4] = { HIP_L, HIP_R, SHOULDER_L, SHOULDER_R };
+    for (S32 k : KEEP_POINTING)
+    {
+        const LLVector3 x = LLVector3::x_axis * rot[k], z = LLVector3::z_axis * rot[k];
+        rig.addDirection(node[k], x, x, 30.f);
+        rig.addDirection(node[k], z, z, 30.f);
+    }
+    // Starting from last frame's answer (the pose changes little from frame to frame) four
+    // steps are plenty. Other avatars share 1 ms a frame; past it they keep last frame's
+    // turns (eased the same way), so a hillside of four-legged avatars can't slow things.
+    static U32 s_budget_frame = 0;
+    static F64 s_budget_used = 0.0;
+    if (s_budget_frame != LLFrameTimer::getFrameCount())
+    {
+        s_budget_frame = LLFrameTimer::getFrameCount();
+        s_budget_used = 0.0;
+    }
+    if (mQLBodyIKTracking)
+    {
+        for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) rig.turn[node[k]] = mQLBodyIKTurn[k];
+    }
+    if (isSelf() || s_budget_used < 0.001 || !mQLBodyIKTracking)
+    {
+        const F64 started = LLTimer::getTotalSeconds();
+        ql_ik_solve(rig, mQLBodyIKTracking ? 4 : 8);
+        if (!isSelf()) s_budget_used += LLTimer::getTotalSeconds() - started;
+    }
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k) mQLBodyIKTurn[k] = rig.turn[node[k]];
+
+    // Each joint's turn into its parent's frame, eased like foot IK (about a tenth of a
+    // second), then written.
+    const F32 dt = llclamp(gFrameIntervalSeconds.value(), 0.f, 0.1f);
+    const F32 follow = mQLBodyIKTracking ? 1.f - expf(-dt * 12.f) : 1.f;
+    mQLBodyIKTracking = true;
+    QLAnimApplyScope scope;
+    F32 shown[QL_BODY_IK_JOINTS] = {};
+    for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
+    {
+        QLBodyIKJoint& j = mQLBodyIK[k];
+        LLQuaternion target = parent_rot[k] * ql_rot_quat(rig.turn[node[k]]) * ~parent_rot[k];
+        target.normalize();
+        j.correction = slerp(follow, j.correction, target);
+        j.correction.normalize();
+        shown[k] = ql_quat_angle(j.correction) * RAD_TO_DEG;
+        if (shown[k] < 0.01f) continue;
+        j.pre = j.joint->getRotation();
+        j.joint->setRotation(j.pre * j.correction);
+        j.set = j.joint->getRotation();
+        j.applied = true;
+        mQLBodyIKApplied = true;
+    }
+
+    if (s_debug && isSelf())
+    {
+        static F64 s_next = 0.0;
+        if (gFrameTimeSeconds >= s_next)
+        {
+            s_next = gFrameTimeSeconds + 0.5;
+            LL_INFOS("QuasarFootIK") << llformat("body ik: four-legged %.2f | chest ground %+.1fcm -> rise %+.1fcm | pelvis %.1f torso %.1f chest %.1f neck %.1f head %.1f deg",
+                four_legged, measured * 100.f, rise * 100.f, shown[PELVIS], shown[TORSO], shown[CHEST], shown[NECK], shown[HEAD]) << LL_ENDL;
+        }
+    }
 }
 
 void LLVOAvatar::qlBodyCollisionApply(bool visible)
