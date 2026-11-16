@@ -7507,6 +7507,9 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
 {
     static LLCachedControl<F32> s_dist(gSavedSettings, "QuasarLookAroundDistance", 8.f);
     static LLCachedControl<F32> s_body(gSavedSettings, "QuasarLookAroundBody", 0.15f);
+    // How long each look lasts, times this (1 = the defaults below; 2 = twice as long).
+    static LLCachedControl<F32> s_hold(gSavedSettings, "QuasarLookAroundHold", 1.f);
+    const F64 hold_scale = llclamp((F32)s_hold, 0.25f, 4.f);
     const F32 max_dist = llclamp((F32)s_dist, 1.f, 30.f);
     const F64 now = gFrameTimeSeconds;
     LLJoint* my_head = getJoint("mHead");
@@ -7579,11 +7582,15 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
         if (av && point_of(av, mQLLook.part, p) && (p - head).length() < max_dist * 1.2f && in_front(p))
         {
             at = p;
+            mQLLook.at = p;
+            mQLLook.has_at = true;
             return true;
         }
     }
 
     // A new pick. Right after a body glance, usually back to that face.
+    const bool has_last_at = mQLLook.has_at;
+    const LLVector3 last_at = mQLLook.at;
     const bool was_glance = mQLLook.glanced;
     const LLUUID previous = mQLLook.target;
     mQLLook.glanced = false;
@@ -7594,8 +7601,10 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
         if (av && face_of(av, p) && (p - head).length() < max_dist && in_front(p))
         {
             mQLLook.part = 0;
-            mQLLook.until = now + 1.5 + 2.5 * ll_frand();
+            mQLLook.until = now + (2.0 + 3.0 * ll_frand()) * hold_scale;
             at = p;
+            mQLLook.at = p;
+            mQLLook.has_at = true;
             return true;
         }
     }
@@ -7631,6 +7640,17 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
         }
         F32 weight = near_w * (1.f + (talking ? 2.f : 0.f) + (looking_back ? 1.f : 0.f));
         if (av->getID() == previous) weight *= 0.6f;   // attention drifts on
+        // ... mostly to someone near where it already looks (a small turn), less often across.
+        if (has_last_at)
+        {
+            LLVector3 a = last_at - head, b = p - head;
+            a.mV[VZ] = 0.f; b.mV[VZ] = 0.f;
+            if (a.length() > 0.05f && b.length() > 0.05f)
+            {
+                const F32 c = (a * b) / (a.length() * b.length());
+                weight *= 0.35f + 0.65f * (0.5f + 0.5f * c);
+            }
+        }
         candidates.push_back({ av, weight, dist, talking });
         total += weight;
     }
@@ -7640,7 +7660,9 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
     {
         mQLLook.target.setNull();
         mQLLook.part = 0;
-        mQLLook.until = now + 1.5 + 2.5 * ll_frand();
+        mQLLook.until = now + (2.0 + 3.0 * ll_frand()) * hold_scale;
+        mQLLook.at = head + facing * 2.f;   // ahead: the next pick prefers people in front
+        mQLLook.has_at = true;
         return false;
     }
     F32 roll = ll_frand() * total;
@@ -7652,18 +7674,20 @@ bool LLVOAvatar::qlLookTarget(LLVector3& at)
     }
     mQLLook.target = pick->av->getID();
     mQLLook.part = 0;
-    F64 hold = 2.0 + 3.0 * ll_frand();
-    if (pick->talking) hold += 3.0 * ll_frand();
+    F64 hold = 3.0 + 4.0 * ll_frand();
+    if (pick->talking) hold += 4.0 * ll_frand();
     LLVector3 p;
     if (pick->dist < 3.f && ll_frand() < llclamp((F32)s_body, 0.f, 1.f) && chest_of(pick->av, p))
     {
         mQLLook.part = 1;
         mQLLook.glanced = true;
-        hold = 0.6 + 0.9 * ll_frand();
+        hold = 0.8 + 1.0 * ll_frand();
     }
-    mQLLook.until = now + hold;
+    mQLLook.until = now + hold * hold_scale;
     if (!point_of(pick->av, mQLLook.part, p)) return false;
     at = p;
+    mQLLook.at = p;
+    mQLLook.has_at = true;
     return true;
 }
 
@@ -7864,12 +7888,25 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
     {
         QLBodyIKJoint& j = mQLBodyIK[k];
-        const F32 rate = (k == EYE_L || k == EYE_R) ? 20.f : ((k == NECK || k == HEAD) ? 7.f : 12.f);
+        // User (2026-11-16): "a bit fast at times" -- the head now settles over about 0.6 s
+        // (was 0.3) and the eyes over about 0.1 s, and neither turns faster than a calm
+        // glance (head 90, eyes 300 degrees a second), so a switch across the room is a
+        // turn, not a whip.
+        const bool eye = k == EYE_L || k == EYE_R;
+        const bool gaze = eye || k == NECK || k == HEAD;
+        const F32 rate = eye ? 10.f : (gaze ? 3.5f : 12.f);
         const F32 follow = fresh ? 1.f : 1.f - expf(-dt * rate);
         LLQuaternion target = used[k] ? parent_rot[k] * ql_rot_quat(rig.turn[node[k]]) * ~parent_rot[k]
                                       : LLQuaternion::DEFAULT;   // not in the rig this frame: eases back
         target.normalize();
-        j.correction = slerp(follow, j.correction, target);
+        LLQuaternion next = slerp(follow, j.correction, target);
+        if (gaze && !fresh)
+        {
+            const F32 max_step = (eye ? 300.f : 90.f) * DEG_TO_RAD * dt;
+            const F32 step = ql_quat_angle(next * ~j.correction);
+            if (step > max_step && step > 0.f) next = slerp(max_step / step, j.correction, next);
+        }
+        j.correction = next;
         j.correction.normalize();
         shown[k] = ql_quat_angle(j.correction) * RAD_TO_DEG;
         if (shown[k] < 0.01f) continue;

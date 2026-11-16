@@ -929,6 +929,8 @@ private:
         S32    part = 0;          // 0 face, 1 chest
         F64    until = 0.0;       // when to pick again (gFrameTimeSeconds)
         bool   glanced = false;   // the last pick was a body glance
+        LLVector3 at;             // where it last looked (a new pick prefers people near it)
+        bool   has_at = false;
     };
     QLLook      mQLLook;
     bool        qlLookTarget(LLVector3& at);

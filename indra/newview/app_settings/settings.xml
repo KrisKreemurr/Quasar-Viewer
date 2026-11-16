@@ -12929,6 +12929,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>QuasarLookAroundHold</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar look around: how long each look lasts, times this (1 = faces 3-7 s, longer while they talk, glances 0.8-1.8 s, ahead 2-5 s; 2 = twice as long, 0.5 = half).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
   <key>QuasarLookAroundSelf</key>
   <map>
     <key>Comment</key>
