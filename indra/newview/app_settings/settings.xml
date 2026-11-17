@@ -12885,6 +12885,17 @@
     <key>Value</key>
     <real>10</real>
   </map>
+  <key>QuasarBodyCollisionFitParts</key>
+  <map>
+    <key>Comment</key>
+    <string>Quasar body collision: big breasts are fitted as 4 slices from the chest to the tip (each its own egg, following the sag and taper) instead of one egg, which floats over the upper slope and falls short of the low front. Only kept where the slices hug the mesh closer than one egg (mostly hyper sizes). Needs "Match each body part's shape".</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
   <key>QuasarBodyCollisionFitShape</key>
   <map>
     <key>Comment</key>

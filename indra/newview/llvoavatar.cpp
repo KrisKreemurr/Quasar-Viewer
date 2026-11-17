@@ -6271,6 +6271,7 @@ namespace
     // A pose: the shoulder's world turn as a rotation vector (s; it includes the upper
     // arm's roll) and the elbow's bend (h, about the hinge, applied first).
     struct QLArmPose { LLVector3 s; F32 h = 0.f; };
+    constexpr S32 QL_NAT_SHAPES = 96;   // shapes an arm is scored against (own + 3 others' bodies)
     struct QLNaturalArm
     {
         LLVector3 pivot, elbow, wrist;          // shoulder, elbow, wrist as animated
@@ -6283,7 +6284,7 @@ namespace
         bool      have_last = false;            // last frame's fix (world)
         QLArmPose last;
         LLVector3 last_de, last_dw;             // ... and how far it moved elbow and wrist
-        const QLEllipsoid* shapes[64];
+        const QLEllipsoid* shapes[QL_NAT_SHAPES];
         S32       shape_count = 0;
         const QLCapsule* other = nullptr;       // the other arm as posed (3), may be null
         const bool* other_have = nullptr;
@@ -6472,7 +6473,7 @@ namespace
     {
         // Only shapes near the arm as posed by any start (12 cm to spare: the polishing moves
         // it less than that): a handful, not the whole body and everyone near.
-        const QLEllipsoid* all[64];
+        const QLEllipsoid* all[QL_NAT_SHAPES];
         const S32 all_count = arm.shape_count;
         for (S32 t = 0; t < all_count; ++t) all[t] = arm.shapes[t];
         QLCapsule posed[4][3];
@@ -7092,6 +7093,114 @@ namespace
         }
         return gap_shaped < gap_even;
     }
+
+    // BREAST SLICES (QuasarBodyCollisionFitParts, on). One egg can't follow a big breast:
+    // it is a teardrop -- a thin upper slope off the chest, most of it low and forward -- so
+    // the best single egg floats over the upper slope (user's screenshot, 2026-11-17: open
+    // space above a hyper breast's top) and falls short of the low front, where hands
+    // touch: hyper avatars still clipped. Here a breast's measured vertices are cut into
+    // QL_FIT_PARTS slices from the chest out to the tip (along the volume's forward axis),
+    // and each slice gets its own egg, centred where that slice is and as wide and tall as
+    // it is: the slices follow the sag and the taper. Each reaches its neighbours' middles
+    // (no seams to slip through), widened 7 % for the narrowing between them, then all are
+    // scaled together to the same "cover" as the even fit (a hand rests slightly in). Kept
+    // only when they hug the vertices closer than the single egg.
+    constexpr S32 QL_FIT_PARTS = 4;   // = QLBodyShape::part_half's size (llvoavatar.h)
+
+    // How far a point is from the slices' surface, as each slice's own unit distance (the
+    // smallest: inside any slice counts as inside).
+    F32 ql_parts_distance(const LLVector3& p, const F32 half[][3], const F32 centre[][3], S32 parts)
+    {
+        F32 best = 1.0e9f;
+        for (S32 j = 0; j < parts; ++j)
+        {
+            F32 r2 = 0.f;
+            for (S32 k = 0; k < 3; ++k)
+            {
+                const F32 d = (p.mV[k] - centre[j][k]) / llmax(half[j][k], 1.0e-4f);
+                r2 += d * d;
+            }
+            best = llmin(best, sqrtf(r2));
+        }
+        return best;
+    }
+
+    // The value below which `share` of the values lie (sorts a copy).
+    F32 ql_percentile(std::vector<F32> values, F32 share)
+    {
+        if (values.empty()) return 0.f;
+        const size_t at = llmin(values.size() - 1, (size_t)(share * (values.size() - 1) + 0.5f));
+        std::nth_element(values.begin(), values.begin() + at, values.end());
+        return values[at];
+    }
+
+    // Fits the slices; false when there are too few vertices or they don't beat the single
+    // egg (single_half/single_centre; the even fit when the shaped fit wasn't kept).
+    bool ql_fit_slices(const std::vector<LLVector3>& all, F32 even, F32 cap,
+                       const F32 single_half[3], const F32 single_centre[3],
+                       F32 half_out[QL_FIT_PARTS][3], F32 centre_out[QL_FIT_PARTS][3])
+    {
+        if (all.size() < 120 || even <= 0.f) return false;
+        const size_t step = llmax((size_t)1, all.size() / 1600);
+        std::vector<LLVector3> pts;
+        pts.reserve(all.size() / step + 1);
+        for (size_t i = 0; i < all.size(); i += step) pts.push_back(all[i]);
+
+        std::vector<F32> xs;
+        xs.reserve(pts.size());
+        for (const LLVector3& p : pts) xs.push_back(p.mV[0]);
+        const F32 x_lo = ql_percentile(xs, 0.03f), x_hi = ql_percentile(xs, 0.97f);
+        const F32 band = (x_hi - x_lo) / QL_FIT_PARTS;
+        if (band <= 1.0e-3f) return false;
+
+        F32 half[QL_FIT_PARTS][3], centre[QL_FIT_PARTS][3];
+        for (S32 j = 0; j < QL_FIT_PARTS; ++j)
+        {
+            const F32 from = x_lo + band * j, to = from + band;
+            std::vector<F32> ys, zs;
+            for (const LLVector3& p : pts)
+            {
+                // Each slice's band and a quarter band past each side (smooths between them).
+                if (p.mV[0] < from - 0.25f * band || p.mV[0] > to + 0.25f * band) continue;
+                ys.push_back(p.mV[1]);
+                zs.push_back(p.mV[2]);
+            }
+            if (ys.size() < 12) return false;   // a slice with too few vertices: one egg is safer
+            const F32 y_lo = ql_percentile(ys, 0.05f), y_hi = ql_percentile(ys, 0.95f);
+            const F32 z_lo = ql_percentile(zs, 0.05f), z_hi = ql_percentile(zs, 0.95f);
+            centre[j][0] = from + 0.5f * band;
+            centre[j][1] = 0.5f * (y_lo + y_hi);
+            centre[j][2] = 0.5f * (z_lo + z_hi);
+            // Along the breast: to the neighbours' middles; the last one out to the tip.
+            half[j][0] = (j == QL_FIT_PARTS - 1) ? llmax(band, x_hi - centre[j][0]) : band;
+            half[j][1] = 0.5f * (y_hi - y_lo) * 1.07f;
+            half[j][2] = 0.5f * (z_hi - z_lo) * 1.07f;
+            // The first slice also reaches back into the chest (the breast's root).
+            if (j == 0) { half[j][0] *= 1.5f; centre[j][0] -= 0.25f * band; }
+            for (S32 k = 0; k < 3; ++k) half[j][k] = llclamp(half[j][k], 0.05f, cap * 1.25f);
+        }
+
+        // All scaled together (about each slice's own centre) to the even fit's cover.
+        const F32 cover = ql_fit_cover(even);
+        std::vector<F32> dist;
+        dist.reserve(pts.size());
+        for (const LLVector3& p : pts) dist.push_back(ql_parts_distance(p, half, centre, QL_FIT_PARTS));
+        const F32 scale = llclamp(ql_percentile(dist, cover), 0.5f, 1.5f);
+        for (S32 j = 0; j < QL_FIT_PARTS; ++j)
+            for (S32 k = 0; k < 3; ++k) half[j][k] *= scale;
+
+        // Never worse: the average gap (in each shape's own units) must beat the single egg's.
+        F32 gap_parts = 0.f, gap_single = 0.f;
+        for (const LLVector3& p : pts)
+        {
+            gap_parts += fabsf(ql_parts_distance(p, half, centre, QL_FIT_PARTS) - 1.f);
+            gap_single += fabsf(ql_parts_distance(p, (const F32(*)[3])single_half, (const F32(*)[3])single_centre, 1) - 1.f);
+        }
+        if (gap_parts >= gap_single) return false;
+        for (S32 j = 0; j < QL_FIT_PARTS; ++j)
+            for (S32 k = 0; k < 3; ++k) { half_out[j][k] = half[j][k]; centre_out[j][k] = centre[j][k]; }
+        return true;
+    }
 }
 
 // QUASAR BODY COLLISION AUTO-FIT (QuasarBodyCollisionAutoFit)
@@ -7436,6 +7545,21 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
             shape.shaped = ql_fit_shape(job.points[t], job.fit[t], job.cap, shape.half, shape.centre);
             if (shape.shaped && middle) shape.centre[1] = 0.f;
             if (!shape.shaped) shape = QLBodyShape();
+            // A breast: slices from the chest to the tip when they hug it closer than one egg.
+            if (area == "LEFT_PEC" || area == "RIGHT_PEC")
+            {
+                F32 single_half[3], single_centre[3];
+                for (S32 k = 0; k < 3; ++k)
+                {
+                    single_half[k] = shape.shaped ? shape.half[k] : job.fit[t];
+                    single_centre[k] = shape.shaped ? shape.centre[k] : 0.f;
+                }
+                if (ql_fit_slices(job.points[t], job.fit[t], job.cap, single_half, single_centre,
+                                  shape.part_half, shape.part_centre))
+                {
+                    shape.parts = QL_FIT_PARTS;
+                }
+            }
         }
         s_budget_used += fit_timer.getElapsedTimeF64() * 1000.0;
         if (job.fit_next < slots) return;   // the next area next frame
@@ -7463,6 +7587,15 @@ void LLVOAvatar::qlBodyCollisionFit(const void* torso_in, const S32* kind, const
             {
                 line += llformat("[%.2f %.2f %.2f @%+.2f %+.2f %+.2f]", shape.half[0], shape.half[1], shape.half[2],
                                  shape.centre[0], shape.centre[1], shape.centre[2]);
+            }
+            if (shape.parts > 0)
+            {
+                line += " slices";
+                for (S32 j = 0; j < shape.parts; ++j)
+                {
+                    line += llformat("[%.2f %.2f %.2f @%+.2f %+.2f %+.2f]", shape.part_half[j][0], shape.part_half[j][1],
+                                     shape.part_half[j][2], shape.part_centre[j][0], shape.part_centre[j][1], shape.part_centre[j][2]);
+                }
             }
         }
         LL_INFOS("QuasarBodyCollision") << "auto-fit (" << (isSelf() ? std::string("you") : getFullname()) << ") from "
@@ -8004,12 +8137,17 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                                          "L_UPPER_LEG", "R_UPPER_LEG" };
     static const char* const ARM[2][3] = { { "L_UPPER_ARM", "L_LOWER_ARM", "L_HAND" },
                                            { "R_UPPER_ARM", "R_LOWER_ARM", "R_HAND" } };
-    constexpr S32 MAX_OWN = 11;                    // the 10 volumes + the cleavage filler
+    constexpr S32 MAX_OWN = 19;                    // the 10 volumes, 2 x 4 breast slices, the cleavage filler
     constexpr S32 MAX_OTHERS = 3;                  // nearby avatars whose bodies limbs meet
     constexpr S32 MAX_TORSO = MAX_OWN * (1 + MAX_OTHERS);
     QLEllipsoid torso[MAX_TORSO];
     const char* torso_name[MAX_TORSO] = {};
     S32 torso_kind[MAX_TORSO] = {};   // index into TORSO (mQLBodyFit's order)
+    // Collision uses the shape (false: a breast's one egg while its slices collide; it stays
+    // for the legs contact and the cleavage filler) / the breast a slice belongs to (-1: none).
+    bool torso_hit[MAX_TORSO];
+    S32 torso_parent[MAX_TORSO];
+    for (S32 t = 0; t < MAX_TORSO; ++t) { torso_hit[t] = true; torso_parent[t] = -1; }
     LLAvatarJointCollisionVolume* torso_vol[MAX_TORSO] = {};
     S32 torso_count = 0;
     LLAvatarJointCollisionVolume* arm_volume[2][3] = { { nullptr, nullptr, nullptr }, { nullptr, nullptr, nullptr } };
@@ -8061,10 +8199,27 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
     // Shaped fit (QuasarBodyCollisionFitShape, on): each area's own width, depth and height
     // and where it sits; off, or where the shaped fit wasn't kept, the even fit.
     static LLCachedControl<bool> s_shaped(gSavedSettings, "QuasarBodyCollisionFitShape", true);
+    static LLCachedControl<bool> s_parts(gSavedSettings, "QuasarBodyCollisionFitParts", true);
+    QLEllipsoid slices[2 * QL_FIT_PARTS];
+    S32 slice_breast[2 * QL_FIT_PARTS];
+    S32 slice_count = 0;
     for (S32 t = 0; t < torso_count; ++t)
     {
         const F32 size = body_size * qlBodyAreaScale(torso_name[t]);
         const QLBodyShape& shape = mQLBodyShape[torso_kind[t]];
+        // Breast slices, from the volume as it is (before its own egg is sized below).
+        if (s_shaped && s_parts && shape.parts > 0 && (torso_kind[t] == 5 || torso_kind[t] == 6))
+        {
+            for (S32 j = 0; j < shape.parts && slice_count < 2 * QL_FIT_PARTS; ++j)
+            {
+                QLEllipsoid& part = slices[slice_count];
+                part.c = torso[t].c;
+                for (S32 k = 0; k < 3; ++k) part.c += torso[t].axis[k] * shape.part_centre[j][k];
+                for (S32 k = 0; k < 3; ++k) part.axis[k] = torso[t].axis[k] * (shape.part_half[j][k] * size);
+                slice_breast[slice_count++] = t;
+            }
+            torso_hit[t] = false;
+        }
         if (s_shaped && shape.shaped)
         {
             LLVector3 shift;
@@ -8076,6 +8231,16 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         {
             for (LLVector3& axis : torso[t].axis) axis *= size * mQLBodyFit[torso_kind[t]];
         }
+    }
+    for (S32 j = 0; j < slice_count && torso_count < MAX_TORSO; ++j)
+    {
+        const S32 breast = slice_breast[j];
+        torso[torso_count] = slices[j];
+        torso_kind[torso_count] = torso_kind[breast] == 5 ? -4 : -5;
+        torso_vol[torso_count] = nullptr;
+        torso_name[torso_count] = torso_kind[breast] == 5 ? "LEFT_PEC_SLICE" : "RIGHT_PEC_SLICE";
+        torso_parent[torso_count] = breast;
+        ++torso_count;
     }
 
     // CLEAVAGE FILLER (QuasarBodyCollisionCleavage, on). Each breast is its own egg, and two
@@ -8144,6 +8309,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         for (S32 k = 0; k < 3; ++k) out.axis[k] = torso[t].axis[k];
         out.limb = torso_kind[t] == 8 || torso_kind[t] == 9;   // a thigh: that avatar moves it too
         out.kind = torso_kind[t];
+        out.collide = torso_hit[t];
         mQLShapesOut.push_back(out);
     }
     mQLShapesTime = gFrameTimeSeconds;
@@ -8167,6 +8333,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
         {
             for (const QLShapeOut& shape : near_others[o].second->mQLShapesOut)
             {
+                if (!shape.collide) continue;   // a breast's one egg: its slices collide
                 if (torso_count >= MAX_TORSO) break;
                 torso[torso_count].c = shape.c;
                 for (S32 k = 0; k < 3; ++k) torso[torso_count].axis[k] = shape.axis[k];
@@ -8563,8 +8730,13 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
             const F32 move_zeta = !physics_worn ? with_wobble(0.35f) : 0.6f;
             ql_soft_spring(part.m, part.mv, move_target, omega, move_zeta, soft_dt, llmax(move_max, 0.01f));
 
-            // The arm meets the part where it is now: dented, sagged, swinging.
-            torso[t].c += (part.x + part.m) * parent_rot;
+            // The arm meets the part where it is now: dented, sagged, swinging (its slices too).
+            const LLVector3 part_moved = (part.x + part.m) * parent_rot;
+            torso[t].c += part_moved;
+            for (S32 sl = 0; sl < torso_count; ++sl)
+            {
+                if (torso_parent[sl] == t) torso[sl].c += part_moved;
+            }
 
             // QuasarSoftContactDebug: a line per part, each at most twice a second. (One limit
             // per avatar let the first part listed -- a belly an arm rests on -- take every
@@ -8650,6 +8822,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 const QLCapsule c = posed(i, k);
                 for (S32 t = 0; t < torso_count; ++t)
                 {
+                    if (!torso_hit[t]) continue;
                     LLVector3 p, d;
                     if (!ql_penetration(c, torso[t], p, d)) continue;
                     const F32 depth = d.length();
@@ -8744,8 +8917,11 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 }
                 na.contact_weight = 1.f - mQLHandFoot[i].fade;
                 na.overlap = overlap;
-                na.shape_count = llmin(torso_count, 64);
-                for (S32 t = 0; t < na.shape_count; ++t) na.shapes[t] = &torso[t];
+                na.shape_count = 0;
+                for (S32 t = 0; t < torso_count && na.shape_count < QL_NAT_SHAPES; ++t)
+                {
+                    if (torso_hit[t]) na.shapes[na.shape_count++] = &torso[t];
+                }
                 QLCapsule other_caps[3];
                 bool other_have[3] = { false, false, false };
                 if (s_arms)
@@ -8972,6 +9148,7 @@ void LLVOAvatar::qlBodyCollisionApply(bool visible)
                 limb.anim_a = caps[i][k].a; limb.anim_b = caps[i][k].b;
                 for (S32 t = 0; t < torso_count; ++t)
                 {
+                    if (!torso_hit[t]) continue;
                     LLVector3 p, d;
                     if (ql_penetration(caps[i][k], torso[t], p, d) && d.length() > overlap)
                     {
@@ -9135,6 +9312,7 @@ void LLVOAvatar::qlRenderCollisionShapes()
         {
             for (const QLShapeOut& sh : av->mQLShapesOut)
             {
+                if (!sh.collide) continue;   // a breast's one egg while its slices are shown
                 LLColor4 col = sh.kind == -1 ? LLColor4(1.f, 0.45f, 0.8f, 1.f)
                              : (sh.limb ? LLColor4(0.2f, 0.9f, 0.75f, 1.f) : LLColor4(0.35f, 0.65f, 1.f, 1.f));
                 if (sh.touched) col = LLColor4(1.f, 0.6f, 0.15f, 1.f);

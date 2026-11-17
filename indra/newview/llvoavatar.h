@@ -803,8 +803,10 @@ public:
     {
         LLVector3 c, axis[3];
         bool      limb = false;   // a thigh: its own viewer moves it too
-        S32       kind = 0;       // mQLBodyFit's order; -1 the cleavage filler
+        S32       kind = 0;       // mQLBodyFit's order; -1 the cleavage filler; -4/-5 a left/right breast slice
         bool      touched = false;   // an arm or leg of this avatar touches it this frame (shown)
+        bool      collide = true;    // false: a breast's one egg kept for the legs contact / filler
+                                     // while its slices do the colliding (not shared, not shown)
     };
     std::vector<QLShapeOut> mQLShapesOut;
     F64         mQLShapesTime = -1.0;
@@ -884,6 +886,11 @@ public:
         bool shaped = false;
         F32  half[3] = { 1.f, 1.f, 1.f };
         F32  centre[3] = { 0.f, 0.f, 0.f };
+        // Breast slices (QuasarBodyCollisionFitParts): 0, or 4 eggs from the chest to the
+        // tip in the same units, used for collision in place of the one egg above.
+        S32  parts = 0;
+        F32  part_half[4][3] = {};
+        F32  part_centre[4][3] = {};
     };
 private:
     QLBodyShape mQLBodyShape[10];
