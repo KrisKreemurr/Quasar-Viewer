@@ -96,7 +96,7 @@ namespace
         static const char* const k[] = {"Off (native)", "FSR 3.1 Native AA", "FSR 3.1 Quality", "FSR 3.1 Balanced",
                                         "FSR 3.1 Performance", "FSR 3.1 Ultra Performance", "FSR 3.1 Custom scale",
                                         "DLSS DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance",
-                                        "DLSS Ultra Performance"};
+                                        "DLSS Ultra Performance", "Quasar internal resolution (no blending)"};
         return v < sizeof(k) / sizeof(k[0]) ? std::string(k[v]) : llformat("mode %u", v);
     }
 

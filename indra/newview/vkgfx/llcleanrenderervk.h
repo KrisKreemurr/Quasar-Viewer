@@ -2206,6 +2206,9 @@ private:
     // space passes that depth-test against it.
     GpuImage  mSceneHdr{};
     uint32_t  mSceneW = 0, mSceneH = 0;
+    // Quasar internal resolution (RenderVKUpscaler 12): the display height the frame is
+    // drawn at, so QuasarInternalHeight (1080, 720 ...) can be turned into a render scale.
+    uint32_t  mQLDisplayH = 0;
     // RENDER-TARGET GENERATION REGISTRY (#181, snapcrash #1 / #2). The contract every
     // size-dependent image and every descriptor set that names one follows:
     //  1. Every re-creation of a size-dependent target (depth, HDR, scene, glow, motion,

@@ -786,15 +786,22 @@ void LLFloaterPreferenceGraphicsAdvanced::refreshEnabledState()
         // An active upscaler is temporal by itself (its own resolve, plus the TAA glow
         // resolve), so the Antialiasing type is moot too.
         const U32 aa_type = gSavedSettings.getU32("RenderFSAAType");
-        const bool upscaler = gSavedSettings.getU32("RenderVKUpscaler") != 0;
-        const bool taa = upscaler || gSavedSettings.getBOOL("RenderVKTAA") || aa_type == 3;
+        const U32 up_setting = gSavedSettings.getU32("RenderVKUpscaler");
+        // Quasar internal resolution (12) blends no frames: TAA is off whatever is picked
+        // here, and FXAA / SMAA still apply (LLCleanRendererVK::taaRequested).
+        const bool plain = up_setting == 12;
+        const bool upscaler = up_setting != 0 && !plain;
+        const bool taa = !plain && (upscaler || gSavedSettings.getBOOL("RenderVKTAA") || aa_type == 3);
         const bool quality_used = (aa_type == 1 || aa_type == 2) && !taa;
         LLComboBox* aa_combo = getChild<LLComboBox>("fsaa");
         // Custom render scale (#410, RenderVKRenderScale) only applies with the upscaler on FSR Custom (6).
         if (LLSliderCtrl* scale = findChild<LLSliderCtrl>("RenderScale"))
         {
-            scale->setEnabled(gSavedSettings.getU32("RenderVKUpscaler") == 6);
+            scale->setEnabled(up_setting == 6 || (plain && gSavedSettings.getU32("QuasarInternalHeight") == 0));
         }
+        // Quasar internal resolution's own choice of lines: only with that mode.
+        if (LLComboBox* lines = findChild<LLComboBox>("InternalHeight")) lines->setEnabled(plain);
+        if (LLTextBox* label = findChild<LLTextBox>("InternalHeightText")) label->setEnabled(plain);
         // #870 / #962: the DLSS choices (7-11) need the user-installed shim, found at startup:
         // greyed out with the reason otherwise (a selected one runs the FSR preset).
         const LLVKNeuralRecon& nr = LLVKNeuralRecon::instance();

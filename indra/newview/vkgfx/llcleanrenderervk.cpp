@@ -27792,6 +27792,12 @@ bool LLCleanRendererVK::taaRequested() const
     // FSR 3.1 (RenderVKUpscaler 1-6) rides on the TAA plumbing (jitter, motion, reactive
     // mask) at every scale, its Native AA preset included; so does its TAA fallback.
     static LLCachedControl<U32> s_mode(gSavedSettings, "RenderVKUpscaler", 0);
+    // Quasar internal resolution (12): no frame blending at all -- the point of the mode
+    // (user: FSR / TAA upscaling "looks like dogshit compared to REAL 1080p": SL's hair,
+    // lace, particles and animated textures smear and ghost through the history). The
+    // world renders at the lower size and is stretched once (recordSceneUpscaleBlit);
+    // FXAA / SMAA still apply.
+    if ((U32)s_mode == 12u) return false;
     return s_taa || (U32)s_aa == 3u || (U32)s_mode != 0u;
 #else
     return false;
@@ -28586,7 +28592,7 @@ bool LLCleanRendererVK::fsrRequested() const
 {
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_mode(gSavedSettings, "RenderVKUpscaler", 0);
-    if ((U32)s_mode == 0u) return false;
+    if ((U32)s_mode == 0u || (U32)s_mode == 12u) return false;   // (12: Quasar internal resolution, no FSR)
     // Unsupported device: the TAA resolve upscales at the same render scale (logged once).
     // The output is written as rgba16f storage into mHdr (storage-capable with mRcasPipe).
     return mHdrFormat == VK_FORMAT_R16G16B16A16_SFLOAT && mRcasPipe && LLCleanFSR3VK::deviceSupported(mCtx);
@@ -29718,6 +29724,15 @@ float LLCleanRendererVK::renderScaleWanted()
     const U32 mode = ((U32)s_mode >= 7u && (U32)s_mode <= 11u) ? (U32)s_mode - 6u : (U32)s_mode;
     if (mode == 6u) s = (F32)s_scale;
     else if (mode >= 1u && mode <= 5u) s = kPreset[mode - 1u];
+    else if (mode == 12u)
+    {
+        // Quasar internal resolution: a height in lines (QuasarInternalHeight: 1080 renders a
+        // 1440-line window's world at 1080 lines), or 0 for the free RenderVKRenderScale. At
+        // or above the window's own height: native.
+        static LLCachedControl<U32> s_lines(gSavedSettings, "QuasarInternalHeight", 1080U);
+        if ((U32)s_lines > 0u && mQLDisplayH > 0u) s = (float)(U32)s_lines / (float)mQLDisplayH;
+        else if ((U32)s_lines == 0u) s = (F32)s_scale;
+    }
     const U32 dv = s_view;
     if (dv == 13u || dv == 14u || dv == 15u || dv == 18u || dv == 30u) return 1.f;
 #endif
@@ -29833,8 +29848,21 @@ void LLCleanRendererVK::recordSceneUpscaleBlit(VkCommandBuffer cmd)
     bl.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; bl.dstSubresource=bl.srcSubresource;
     bl.srcOffsets[1]={(int32_t)mSceneW, (int32_t)mSceneH, 1};
     bl.dstOffsets[1]={(int32_t)mHdrW, (int32_t)mHdrH, 1};
+    // Quasar: a whole-number ratio (720 lines on a 1440 window: each render pixel exactly
+    // 2x2) is stretched pixel for pixel -- it looks exactly like a real 720p frame; any
+    // other ratio (1080 on 1440) is smoothed, like a monitor stretching a lower resolution.
+    // QuasarInternalSharpStretch 0: always smooth.
+    VkFilter filter = VK_FILTER_LINEAR;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_sharp(gSavedSettings, "QuasarInternalSharpStretch", true);
+    if (s_sharp && mSceneW > 0 && mSceneH > 0 && mHdrW % mSceneW == 0 && mHdrH % mSceneH == 0
+        && mHdrW / mSceneW == mHdrH / mSceneH)
+    {
+        filter = VK_FILTER_NEAREST;
+    }
+#endif
     vkCmdBlitImage(cmd, mSceneHdr.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+                   mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, filter);
 
     VkImageMemoryBarrier2 a[2]{};
     for (auto& x : a) x.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -41667,6 +41695,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // #870 / #962: DLSS (RR or SR) renders at the network's exact size for its fixed mode.
         uint32_t rrW = width, rrH = height;
         mDlssFrame = rrPlan(width, height, rrW, rrH);
+        if (!mOffscreen) mQLDisplayH = height;   // (Quasar internal resolution: lines -> scale)
         const float scale = mDlssFrame ? 1.f : renderScaleWanted();
         if (mDlssFrame) { rw = rrW; rh = rrH; }
         else if (scale < 0.999f)

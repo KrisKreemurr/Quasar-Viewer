@@ -3304,7 +3304,7 @@ Only used with a DLSS upscaling mode.
             height="18"
             layout="topleft"
             name="UpscaleMode"
-            tool_tip="Render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS upscaling, DLAA at native size (GeForce RTX only; needs the separately built shim, see the DLSS page in the wiki; falls back to the matching FSR preset when unavailable). Ray Reconstruction (next to it) picks the DLSS network."
+            tool_tip="Internal resolution: draw the 3D world at a lower resolution (Internal resolution, right) and stretch it once, with no frame blending -- like running the game at that resolution, but menus stay sharp. FSR: render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS upscaling, DLAA at native size (GeForce RTX only; needs the separately built shim, see the DLSS page in the wiki; falls back to the matching FSR preset when unavailable). Ray Reconstruction (next to it) picks the DLSS network."
             width="230"
             left="205"
             top="108">
@@ -3314,6 +3314,10 @@ Only used with a DLSS upscaling mode.
               label="Off (native)"
               name="0"
               value="0" />
+            <combo_box.item
+              label="Internal resolution (no blending)"
+              name="12"
+              value="12" />
             <combo_box.item
               label="FSR Native AA (1x)"
               name="1"
@@ -3408,10 +3412,54 @@ Only used with a DLSS upscaling mode.
             max_val="1"
             min_val="0.25"
             name="RenderScale"
-            tool_tip="Fraction of the window resolution the world is rendered at (0.25 - 1) before FSR upscales it. Only used with the upscaler set to FSR Custom."
+            tool_tip="Fraction of the window resolution the world is rendered at (0.25 - 1) before FSR upscales it. Used with the upscaler set to FSR Custom, and with Internal resolution set to Custom scale."
             width="310"
             left="30"
             top="132" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="InternalHeightText"
+            width="125"
+            left="450"
+            top="132">
+            Internal resolution:
+          </text>
+          <combo_box
+            control_name="QuasarInternalHeight"
+            height="18"
+            layout="topleft"
+            name="InternalHeight"
+            tool_tip="With Upscaling set to Internal resolution: the 3D world is drawn at this many lines and stretched once to your window, like running the game at that resolution -- no frame blending, so no smearing or ghosting. Menus, name tags and HUDs stay at full resolution. Half your window's height (720 on a 1440 window) is stretched pixel for pixel; other sizes are smoothed. At or above your window's height it draws at full resolution."
+            width="110"
+            left="580"
+            top="132">
+            <combo_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+            <combo_box.item
+              label="1080p"
+              name="1080"
+              value="1080" />
+            <combo_box.item
+              label="900p"
+              name="900"
+              value="900" />
+            <combo_box.item
+              label="720p"
+              name="720"
+              value="720" />
+            <combo_box.item
+              label="540p"
+              name="540"
+              value="540" />
+            <combo_box.item
+              label="Custom scale"
+              name="0"
+              value="0" />
+          </combo_box>
           <slider
             control_name="RenderCASSharpness"
             decimal_digits="1"
