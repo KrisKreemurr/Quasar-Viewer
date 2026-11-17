@@ -7740,7 +7740,9 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     // Looking around: anyone corrected, sitting too. Your own avatar only while you aren't
     // looking at something yourself (free camera, mouselook, a click, a focus, a reply):
     // then SL's own look-at turns your head as always.
-    bool look_ok = base_ok && s_look && (!isSelf() || s_look_self);
+    // Not while sitting at all (furniture, pose balls, the ground): sit animations place the
+    // head on purpose and turning it looked wrong there (user, 2026-11-16).
+    bool look_ok = base_ok && s_look && (!isSelf() || s_look_self) && !isSitting() && !getParent();
     if (look_ok && isSelf())
     {
         const ELookAtType own = gAgentCamera.getLookAtType();
