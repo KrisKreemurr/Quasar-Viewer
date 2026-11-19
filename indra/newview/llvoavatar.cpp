@@ -9305,6 +9305,36 @@ void LLVOAvatar::qlRenderCollisionShapes()
         ring(b, u * r, axis * r, 0.f, F_PI);
         ring(b, v * r, axis * r, 0.f, F_PI);
     };
+    // An egg's true outline as seen from the camera (user, 2026-11-19: "the sphere doesn't
+    // match the entire boob" -- the three rings through its middle look smaller than the egg
+    // from an angle, so the view understated what it covers). In the egg's unit space the
+    // camera e sees the unit sphere's rim as the circle at e/|e|^2 with radius
+    // sqrt(1 - 1/|e|^2), in the plane facing e; mapped back through the axes, that is the
+    // exact outline on screen. Camera inside the egg: no outline.
+    const LLVector3 eye = LLViewerCamera::getInstance()->getOrigin();
+    auto outline = [&](const LLVector3& c, const LLVector3* axis)
+    {
+        // Unit space of the camera: solve [a0 a1 a2] u = eye - c (Cramer's rule).
+        const LLVector3 d = eye - c;
+        const F32 det = axis[0] * (axis[1] % axis[2]);
+        if (fabsf(det) < 1.0e-12f) return;
+        LLVector3 e((d * (axis[1] % axis[2])) / det, (axis[0] * (d % axis[2])) / det, (axis[0] * (axis[1] % d)) / det);
+        const F32 len2 = e.lengthSquared();
+        if (len2 <= 1.0001f) return;
+        const LLVector3 centre = e * (1.f / len2);
+        const F32 radius = sqrtf(1.f - 1.f / len2);
+        LLVector3 dir = e;
+        dir.normVec();
+        LLVector3 u = fabsf(dir.mV[VZ]) < 0.9f ? dir % LLVector3::z_axis : dir % LLVector3::x_axis;
+        u.normVec();
+        const LLVector3 v = dir % u;
+        auto to_world = [&](const LLVector3& q) { return c + axis[0] * q.mV[VX] + axis[1] * q.mV[VY] + axis[2] * q.mV[VZ]; };
+        // The rim in unit space (centre + radius (u cos + v sin)) mapped to world: a ring
+        // around the mapped centre with the mapped u and v as its two radii.
+        const LLVector3 wc = to_world(centre);
+        const LLVector3 wu = to_world(u * radius) - c, wv = to_world(v * radius) - c;
+        ring(wc, wu, wv, 0.f, F_TWO_PI);
+    };
     auto draw_all = [&](F32 alpha)
     {
         gGL.begin(LLRender::LINES);
@@ -9316,11 +9346,17 @@ void LLVOAvatar::qlRenderCollisionShapes()
                 LLColor4 col = sh.kind == -1 ? LLColor4(1.f, 0.45f, 0.8f, 1.f)
                              : (sh.limb ? LLColor4(0.2f, 0.9f, 0.75f, 1.f) : LLColor4(0.35f, 0.65f, 1.f, 1.f));
                 if (sh.touched) col = LLColor4(1.f, 0.6f, 0.15f, 1.f);
-                col.mV[VALPHA] *= alpha;
-                gGL.color4fv(col.mV);
+                // The three rings through the middle, faint: the shape's orientation.
+                LLColor4 inner = col;
+                inner.mV[VALPHA] *= alpha * 0.45f;
+                gGL.color4fv(inner.mV);
                 ring(sh.c, sh.axis[0], sh.axis[1], 0.f, F_TWO_PI);
                 ring(sh.c, sh.axis[1], sh.axis[2], 0.f, F_TWO_PI);
                 ring(sh.c, sh.axis[0], sh.axis[2], 0.f, F_TWO_PI);
+                // The outline, full strength: exactly how far the shape reaches on screen.
+                col.mV[VALPHA] *= alpha;
+                gGL.color4fv(col.mV);
+                outline(sh.c, sh.axis);
             }
             for (const QLLimbOut& limb : av->mQLLimbsOut)
             {
