@@ -7967,7 +7967,10 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
     {
         const bool limb = k == HIP_L || k == HIP_R || k == SHOULDER_L || k == SHOULDER_R;
         const bool eye = k == EYE_L || k == EYE_R;
-        used[k] = (!limb || tilting) && (!eye || looking);
+        // The pelvis only for a slope (its hips then keep the legs pointing down): turning it
+        // to look at someone swung the legs with it -- one foot lifted, the other sank, and
+        // foot IK (hands off on flat ground) left them there (user, 2026-11-20, with AOs).
+        used[k] = (!limb || tilting) && (!eye || looking) && (k != PELVIS || tilting);
         node[k] = -1;
     }
     for (S32 k = 0; k < QL_BODY_IK_JOINTS; ++k)
@@ -7981,11 +7984,10 @@ void LLVOAvatar::qlBodyIKApply(bool visible)
                 if (used[m] && mQLBodyIK[m].joint == up) { parent = node[m]; break; }
             }
         }
-        // Looking around turns the neck, head and eyes (and the chest a little), never the
-        // pelvis: it is only free to tilt for a slope.
-        // ... and the spine twists only a little for a big turn (stiffer than for a slope).
+        // Looking around turns the neck, head and eyes (and the chest a little; the pelvis
+        // isn't in the rig then), and the spine twists only a little for a big turn
+        // (stiffer than for a slope).
         F32 stiffness = STIFF[k];
-        if (!tilting && k == PELVIS) stiffness = 50.f;
         if (!tilting && (k == TORSO || k == CHEST)) stiffness = 7.f;
         node[k] = rig.addNode(pos[k], rot[k], parent, stiffness, LIMIT[k] * DEG_TO_RAD);
     }
